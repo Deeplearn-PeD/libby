@@ -1,0 +1,20 @@
+[tool.poetry]
+name = "libby"
+version = "0.1.0"
+description = "Libby the Librarian Bot."
+authors = ["Flávio Codeço Coelho <fccoelho@gmail.com>"]
+license = "GPLv3"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+ollama = "^0.1.8"
+chromadb = "^0.4.24"
+fire = "^0.6.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.1.1"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
