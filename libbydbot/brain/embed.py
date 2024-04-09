@@ -35,6 +35,7 @@ def retrieve_docs(query):
 
 def generate_response(question):
     context = retrieve_docs(question)
+    print(context)
     response = ollama.generate(
         model="gemma",
         prompt=f"Using this context: {context} \n\nAnswer this question: {question}",
