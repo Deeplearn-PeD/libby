@@ -5,6 +5,12 @@ description = "Libby the Librarian Bot."
 authors = ["Flávio Codeço Coelho <fccoelho@gmail.com>"]
 license = "GPLv3"
 readme = "README.md"
+packages = [
+    { include = "libbydbot", from = "." }
+]
+
+[tool.poetry.scripts]
+libby = "libbydbot.cli:main"
 
 [tool.poetry.dependencies]
 python = "^3.11"
