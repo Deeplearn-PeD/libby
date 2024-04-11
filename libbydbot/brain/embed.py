@@ -60,8 +60,10 @@ class DocEmbedder:
         statement = (
             select(DocVector.document)
             .order_by(DocVector.embedding.l2_distance(response["embedding"]))
+            .limit(5)
         )
-        data = self.session.scalars(statement).first()
+        pages = self.session.scalars(statement)
+        data = "\n".join(pages)
         return data
 
     def generate_response(self, question):
