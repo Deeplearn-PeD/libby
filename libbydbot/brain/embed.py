@@ -71,8 +71,9 @@ class DocEmbedder:
         # print(context)
         response = ollama.generate(
             model="gemma",
-            prompt=f"Using this context: {context} \n\nAnswer this question: {question}",
-            system="You are Libby D. Bot, a research Assistant, you should answer questions based on the context provided."
+            prompt=f"{question}",
+            system=f"You are Libby D. Bot, a research Assistant, you should answer questions "
+                   f"based on the context provided below.\n{context}"
         )
         return response["response"]
 
