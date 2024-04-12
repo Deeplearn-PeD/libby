@@ -25,6 +25,7 @@ pymupdf = "^1.24.1"
 loguru = "^0.7.2"
 openai = "^1.17.0"
 psycopg2-binary = "^2.9.9"
+base-ai-agent = {git = "https://github.com/Deeplearn-PeD/base-ai-agent.git"}
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.1.1"

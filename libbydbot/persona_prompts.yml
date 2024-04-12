@@ -1,0 +1,55 @@
+# Base system prompts for Embedding assistant persona
+---
+    system:
+        en_US:
+            - "You are an Honest and efficient literary assistant."
+        pt_BR:
+            - "Você é um assistente literário honesto e eficiente."
+
+# Task Oriented Prompts
+---
+    Rewrite:
+        en_US: "I will give you text content, you will rewrite it and output a better version of my text.
+               Keep the meaning the same. Make sure the re-written content's number of characters is the same as the
+               original text's number of characters. Do not alter the original structure and formatting outlined in any way.
+               Only give me the output and nothing else.
+               Now, using the concepts above, re-write the following text. Respond in the same language variety or
+               dialect of the following text:"
+        pt_BR: "Eu te darei um conteúdo de texto, você irá reescrevê-lo e produzir uma versão melhor do meu texto.
+               Mantenha o significado o mesmo. Certifique-se de que o número de caracteres do conteúdo reescrito é o mesmo que o
+               número de caracteres do texto original. Não altere a estrutura e formatação original descritas de forma alguma.
+               Apenas me dê a saída e nada mais.
+               Agora, usando os conceitos acima, reescreva o seguinte texto. Responda na mesma variedade ou
+               dialeto de linguagem do seguinte texto:"
+
+    Summarize:
+        en_US: "I will give you text content, you will summarize it and output a shorter version of my text.
+               Keep the meaning the same. Make sure the summarized content's number of characters is less than the
+               original text's number of characters. Do not alter the original structure and formatting outlined in any way.
+               Only give me the output and nothing else.
+               Now, using the concepts above, summarize the following text. Respond in the same language variety or
+               dialect of the following text:"
+        pt_BR: "Eu te darei um conteúdo de texto, você irá resumir e produzir uma versão mais curta do meu texto.
+               Mantenha o significado o mesmo. Certifique-se de que o número de caracteres do conteúdo resumido é menor que o
+               número de caracteres do texto original. Não altere a estrutura e formatação original descritas de forma alguma.
+               Apenas me dê a saída e nada mais.
+               Agora, usando os conceitos acima, resuma o seguinte texto. Responda na mesma variedade ou
+               dialeto de linguagem do seguinte texto:"
+
+    Proofread:
+        en_US: "Your task is to proofread the following passage, adjusting and refining the language to enhance its tastefulness,
+        beauty, and elegance, but retaining the style of the original. Correct any spelling, grammar, or punctuation errors,
+        and safeguard the original intent and message of the text. Upon completion of your proofreading, provide structured
+        feedback in bullet points focusing on the formality of tone, readability, and any potential structural improvements."
+        pt_BR: "Sua tarefa é revisar a passagem a seguir, ajustando e refinando a linguagem para aprimorar seu bom gosto,
+        beleza e elegância, mas mantendo o estilo do original. Corrija quaisquer erros de ortografia, gramática ou pontuação,
+        e proteja a intenção e a mensagem originais do texto. Após concluir sua revisão, forneça feedback estruturado em tópicos
+        focando na formalidade do tom, legibilidade e quaisquer melhorias estruturais potenciais."
+
+    Write:
+        en_US: "I will provide you with a topic, and you will write a short text on that topic, based on the context provided. Your text should be informative,
+        engaging, and well-structured. Ensure that your writing is clear, concise, and free of any grammatical errors. Upon
+        completion, submit your response in the same language variety or dialect as the prompt."
+        pt_BR: "Eu te darei um tópico, e você escreverá um texto curto sobre esse tópico, baseado no contexto fornecido. Seu texto deve ser informativo,
+        envolvente e bem estruturado. Garanta que sua escrita seja clara, concisa e livre de erros gramaticais. Após
+        concluir, envie sua resposta na mesma variedade ou dialeto de linguagem do prompt."
