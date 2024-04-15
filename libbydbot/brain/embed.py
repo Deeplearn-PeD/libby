@@ -21,27 +21,41 @@ with Session(engine) as session:
 class Base(DeclarativeBase):
     pass
 
+def table_factory(name):
+    """
+    Create the schema of a Table
+    :param name: name of the table
+    :return:
+    """
+    class Table(Base):
+        __tablename__ = name
+        id = Column(Integer, autoincrement=True, primary_key=True)
+        doc_name = Column(String)
+        page_number = Column(Integer)
+        hash = Column(String, unique=True)
+        document = Column(String)
+        embedding = Column(Vector(1024))
+    return Table
 
-class DocVector(Base):
-    __tablename__ = "embeddings"
-    id = Column(Integer, autoincrement=True, primary_key=True)
-    doc_name = Column(String)
-    page_number = Column(Integer)
-    hash = Column(String, unique=True)
-    document = Column(String)
-    embedding = Column(Vector(1024))
+
 
 class DocEmbedder:
-    def __init__(self):
+    def __init__(self, name="embeddings"):
         self.engine = create_engine(os.getenv("PGURL"))
         self.session = Session(self.engine)
+        self.schema = table_factory(name)
         Base.metadata.create_all(self.engine)
+
+    @property
+    def embeddings_list(self):
+        embedding_list = Base.metadata.tables.keys()
+        return embedding_list
 
     def embed_text(self, doctext: object, docname:str, page_number: object) -> object:
         response = ollama.embeddings(model="mxbai-embed-large", prompt=doctext)
         embedding = response["embedding"]
         # print(len(embedding))
-        docv = DocVector(
+        docv = self.schema(
             hash=sha256(doctext.encode()).hexdigest(),
             doc_name=docname,
             page_number=page_number,

@@ -1,0 +1,9 @@
+site_name: Libby d. Bot Documentation
+site_url: https://github.com/Deeplearn-PeD/libby
+nav:
+  - Home: index.md
+  - About: about.md
+  - Contact: contact.md
+  - License: license.md
+  - GitHub: https://github.com/Deeplearn-PeD/libby
+theme: readthedocs
