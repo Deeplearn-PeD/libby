@@ -16,7 +16,7 @@ def test_embed_text(mock_sha256, mock_ollama):
 @patch('libbydbot.brain.embed.ollama')
 def test_retrieve_docs(mock_ollama):
     mock_ollama.embeddings.return_value = {"embedding": [1, 2, 3]}
-    embedder = DocEmbedder()
+    embedder = DocEmbedder(name='embeddings2')
     embedder.session = MagicMock()
     embedder.session.scalars.return_value = ['doc1', 'doc2', 'doc3']
     result = embedder.retrieve_docs('query')
@@ -25,7 +25,7 @@ def test_retrieve_docs(mock_ollama):
 @patch('libbydbot.brain.embed.ollama')
 def test_generate_response(mock_ollama):
     mock_ollama.generate.return_value = {"response": "response"}
-    embedder = DocEmbedder()
+    embedder = DocEmbedder(name='embeddings3')
     embedder.retrieve_docs = MagicMock()
     embedder.retrieve_docs.return_value = 'context'
     result = embedder.generate_response('question')

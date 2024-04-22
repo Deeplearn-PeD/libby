@@ -44,7 +44,8 @@ class DocEmbedder:
         self.engine = create_engine(os.getenv("PGURL"))
         self.session = Session(self.engine)
         self.schema = table_factory(name)
-        Base.metadata.create_all(self.engine)
+        # if not self.engine.dialect.has_schema(self.engine, name):
+        Base.metadata.create_all(self.engine, checkfirst=True)
 
     @property
     def embeddings_list(self):
@@ -72,8 +73,8 @@ class DocEmbedder:
     def retrieve_docs(self, query):
         response = ollama.embeddings(model="mxbai-embed-large", prompt=query)
         statement = (
-            select(DocVector.document)
-            .order_by(DocVector.embedding.l2_distance(response["embedding"]))
+            select(self.schema.document)
+            .order_by(self.schema.embedding.l2_distance(response["embedding"]))
             .limit(5)
         )
         pages = self.session.scalars(statement)
