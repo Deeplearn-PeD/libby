@@ -53,6 +53,7 @@ class DocEmbedder:
         return embedding_list
 
     def embed_text(self, doctext: object, docname:str, page_number: object) -> object:
+        doctext = doctext.replace("\x00", "\uFFFD")
         response = ollama.embeddings(model="mxbai-embed-large", prompt=doctext)
         embedding = response["embedding"]
         # print(len(embedding))
@@ -68,7 +69,9 @@ class DocEmbedder:
         except IntegrityError:
             self.session.rollback()
             logger.warning(f"Document {docname} page {page_number} already exists in the database.")
-
+        except ValueError as e:
+            logger.error(f"Error: {e} generated when attempting to embed the following text: \n{doctext}")
+            self.session.rollback()
 
     def retrieve_docs(self, query):
         response = ollama.embeddings(model="mxbai-embed-large", prompt=query)
