@@ -4,7 +4,6 @@ import os
 import pgvector
 from hashlib import sha256
 from sqlalchemy.orm import DeclarativeBase, Session
-from sqlalchemy.ext.automap import automap_base
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import Column, Integer, String, text, create_engine, select, MetaData
 from pgvector.sqlalchemy import Vector
@@ -58,13 +57,26 @@ class DocEmbedder:
         metadata.reflect(self.engine)
         self.schema = metadata.tables[name]
 
+    def _check_existing(self, hash: str):
+        """
+        Check if a document with this hash already exists in the database
+        :param hash: SHA256 hash of the document
+        :return:
+        """
+        statement = select(self.schema).where(self.schema.hash == hash)
+        result = self.session.execute(statement)
+        return result
     def embed_text(self, doctext: object, docname:str, page_number: object) -> object:
+        dochash = sha256(doctext.encode()).hexdigest()
+        if self._check_existing(dochash):
+            logger.info(f"Document {docname} page {page_number} already exists in the database, skipping.")
+            return
         doctext = doctext.replace("\x00", "\uFFFD")
         response = ollama.embeddings(model="mxbai-embed-large", prompt=doctext)
         embedding = response["embedding"]
         # print(len(embedding))
         docv = self.schema(
-            hash=sha256(doctext.encode()).hexdigest(),
+            hash=dochash,
             doc_name=docname,
             page_number=page_number,
             document=doctext,
