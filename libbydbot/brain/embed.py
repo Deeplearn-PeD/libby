@@ -4,8 +4,9 @@ import os
 import pgvector
 from hashlib import sha256
 from sqlalchemy.orm import DeclarativeBase, Session
+from sqlalchemy.ext.automap import automap_base
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy import Column, Integer, String, text, create_engine, select
+from sqlalchemy import Column, Integer, String, text, create_engine, select, MetaData
 from pgvector.sqlalchemy import Vector
 import dotenv
 import loguru
@@ -52,6 +53,11 @@ class DocEmbedder:
         embedding_list = Base.metadata.tables.keys()
         return embedding_list
 
+    def set_schema(self, name):
+        metadata = MetaData()
+        metadata.reflect(self.engine)
+        self.schema = metadata.tables[name]
+
     def embed_text(self, doctext: object, docname:str, page_number: object) -> object:
         doctext = doctext.replace("\x00", "\uFFFD")
         response = ollama.embeddings(model="mxbai-embed-large", prompt=doctext)
@@ -75,6 +81,7 @@ class DocEmbedder:
 
     def retrieve_docs(self, query):
         response = ollama.embeddings(model="mxbai-embed-large", prompt=query)
+        # print(dir(self.schema.columns))
         statement = (
             select(self.schema.document)
             .order_by(self.schema.embedding.l2_distance(response["embedding"]))

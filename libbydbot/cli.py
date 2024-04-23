@@ -24,11 +24,11 @@ class LibbyInterface:
                 DE.embed_text(text, n, page_number)
         return DE
 
-    def answer(self, question: str, collection_name: str = 'default'):
-        DE = embed.DocEmbedder()
-        if collection_name in DE.embeddings:
-            DE.schema = DE.embeddings[collection_name]
-            response = DE.generate_response(question)
+    def answer(self, question: str, collection_name: str = 'embeddings'):
+        DE = embed.DocEmbedder(collection_name)
+        # if collection_name in DE.embeddings_list:
+        #     DE.set_schema(collection_name)
+        response = DE.generate_response(question)
 
         return response
 
