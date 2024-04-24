@@ -5,6 +5,7 @@ import os
 import fitz
 from fitz import EmptyFileError
 from glob import glob
+from libbydbot.brain import LibbyDBot
 
 
 class LibbyInterface:
@@ -26,10 +27,13 @@ class LibbyInterface:
 
     def answer(self, question: str, collection_name: str = 'embeddings'):
         DE = embed.DocEmbedder(collection_name)
+        context = DE.retrieve_docs(question, num_docs=15)
+        LDB = LibbyDBot(model='llama3')
+        LDB.set_prompt(f"You are Libby D. Bot, a research Assistant, you should answer questions "
+                       f"based on the context provided below.\n{context}")
         # if collection_name in DE.embeddings_list:
         #     DE.set_schema(collection_name)
-        response = DE.generate_response(question)
-
+        response = LDB.get_response(question)
         return response
 
 

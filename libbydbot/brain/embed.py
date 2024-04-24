@@ -91,33 +91,21 @@ class DocEmbedder:
             logger.error(f"Error: {e} generated when attempting to embed the following text: \n{doctext}")
             self.session.rollback()
 
-    def retrieve_docs(self, query):
+    def retrieve_docs(self, query, num_docs: int=5):
         response = ollama.embeddings(model="mxbai-embed-large", prompt=query)
         # print(dir(self.schema.columns))
         statement = (
             select(self.schema.document)
             .order_by(self.schema.embedding.l2_distance(response["embedding"]))
-            .limit(5)
+            .limit(num_docs)
         )
         pages = self.session.scalars(statement)
         data = "\n".join(pages)
         return data
 
-    def generate_response(self, question):
-        context = self.retrieve_docs(question)
-        # print(context)
-        response = ollama.generate(
-            model="gemma",
-            prompt=f"{question}",
-            system=f"You are Libby D. Bot, a research Assistant, you should answer questions "
-                   f"based on the context provided below.\n{context}"
-        )
-        return response["response"]
+
 
     def __del__(self):
         self.session.close()
 
 
-
-if __name__ == '__main__':
-    embed_text()

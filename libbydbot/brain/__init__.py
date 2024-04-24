@@ -26,7 +26,7 @@ class LibbyDBot(Persona):
         return response
 
     def get_response(self, question):
-        response =  self.llm.get_response(question=question, context=self.prompt_template.get_prompt())
+        response =  self.llm.get_response(question=question, context=self.prompt_template)
         return response
 
     def get_prompt(self):
