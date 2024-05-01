@@ -31,8 +31,7 @@ class LibbyInterface:
         LDB = LibbyDBot(model='llama3')
         LDB.set_prompt(f"You are Libby D. Bot, a research Assistant, you should answer questions "
                        f"based on the context provided below.\n{context}")
-        # if collection_name in DE.embeddings_list:
-        #     DE.set_schema(collection_name)
+
         response = LDB.get_response(question)
         return response
 

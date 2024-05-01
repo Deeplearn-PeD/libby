@@ -40,12 +40,13 @@ def table_factory(name):
 
 
 class DocEmbedder:
-    def __init__(self, name="embeddings"):
+    def __init__(self, name="embeddings", create=False):
         self.engine = create_engine(os.getenv("PGURL"))
         self.session = Session(self.engine)
         self.schema = table_factory(name)
         # if not self.engine.dialect.has_schema(self.engine, name):
-        Base.metadata.create_all(self.engine, checkfirst=True)
+        if create:
+            Base.metadata.create_all(self.engine, checkfirst=True)
 
     @property
     def embeddings_list(self):
