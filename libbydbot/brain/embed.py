@@ -50,12 +50,12 @@ class DocEmbedder:
 
     @property
     def embeddings_list(self):
-        embedding_list = Base.metadata.tables.keys()
+        embedding_list = list(Base.metadata.tables.keys())
         return embedding_list
 
     def set_schema(self, name):
         metadata = MetaData()
-        metadata.reflect(self.engine)
+        metadata.reflect(self.engine, extend_existing=True)
         self.schema = metadata.tables[name]
 
     def _check_existing(self, hash: str):
@@ -64,7 +64,7 @@ class DocEmbedder:
         :param hash: SHA256 hash of the document
         :return:
         """
-        statement = select(self.schema).where(self.schema.hash == hash)
+        statement = select(self.schema).where(self.schema.c.hash == hash)
         result = self.session.execute(statement)
         return result
     def embed_text(self, doctext: object, docname:str, page_number: object) -> object:
@@ -96,8 +96,8 @@ class DocEmbedder:
         response = ollama.embeddings(model="mxbai-embed-large", prompt=query)
         # print(dir(self.schema.columns))
         statement = (
-            select(self.schema.document)
-            .order_by(self.schema.embedding.l2_distance(response["embedding"]))
+            select(self.schema.c.document)
+            .order_by(self.schema.c.embedding.l2_distance(response["embedding"]))
             .limit(num_docs)
         )
         pages = self.session.scalars(statement)

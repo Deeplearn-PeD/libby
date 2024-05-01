@@ -21,3 +21,13 @@ def test_retrieve_docs(mock_ollama):
     result = embedder.retrieve_docs('query')
     assert result == 'doc1\ndoc2\ndoc3'
 
+def test_create_embedding():
+    embedder = DocEmbedder(name='test_embeddings', create=True)
+    assert embedder.embeddings_list == ['test_embeddings']
+    embedder.set_schema('test_embeddings')
+    assert embedder.schema is not None
+    embedder.session = MagicMock()
+    embedder.embed_text('Our research also sheds light on longer-term trends linking the intensity of dengue epidemics ',
+                        'docname', 1)
+    embedder.retrieve_docs('query')
+
