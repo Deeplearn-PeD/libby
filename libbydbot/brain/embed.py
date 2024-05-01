@@ -29,7 +29,7 @@ def table_factory(name):
     """
     class Table(Base):
         __tablename__ = name
-        extend_existing = True
+        __table_args__ = {'extend_existing': True}
         id = Column(Integer, autoincrement=True, primary_key=True)
         doc_name = Column(String)
         page_number = Column(Integer)
