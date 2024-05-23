@@ -1,7 +1,6 @@
 from libbydbot import Persona
-import yaml
-import os
 from base_agent.llminterface import LangModel
+from .memory import memorize, remember
 
 
 
@@ -23,9 +22,17 @@ class LibbyDBot(Persona):
         self.prompt_template = prompt_template
 
     def ask(self, question: str):
-        response = self.get_response(question)
+        response = self._get_response(question)
+        memorize(1, question, response, self.context)
         return response
 
-    def get_response(self, question):
+    def memorize(self, question: str, response: str):
+        self.set_context(question)
+        self.set_prompt(f"You are Libby D. Bot, a research Assistant, you should answer questions "
+                       f"based on the context provided below.\n{question}")
+        self.ask(response)
+        return True
+
+    def _get_response(self, question):
         response = self.llm.get_response(question=question, context=self.context_prompt)
         return response

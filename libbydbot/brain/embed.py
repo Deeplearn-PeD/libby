@@ -17,9 +17,11 @@ engine = create_engine(os.getenv("PGURL"))
 with Session(engine) as session:
     session.execute(text('CREATE EXTENSION IF NOT EXISTS vector;'))
 
+
 # create a class to store the embeddings
 class Base(DeclarativeBase):
     pass
+
 
 def table_factory(name):
     """
@@ -27,6 +29,7 @@ def table_factory(name):
     :param name: name of the table
     :return:
     """
+
     class Table(Base):
         __tablename__ = name
         __table_args__ = {'extend_existing': True}
@@ -36,8 +39,8 @@ def table_factory(name):
         hash = Column(String, unique=True)
         document = Column(String)
         embedding = Column(Vector(1024))
-    return Table
 
+    return Table
 
 
 class DocEmbedder:
@@ -65,26 +68,34 @@ class DocEmbedder:
         :param hash: SHA256 hash of the document
         :return:
         """
-        statement = select(self.schema).where(self.schema.c.hash == hash)
+        statement = select(self.schema).where(self.schema.hash == hash)
         result = self.session.execute(statement)
         return result
-    def embed_text(self, doctext: object, docname:str, page_number: object) -> object:
-        dochash = sha256(doctext.encode()).hexdigest()
-        if self._check_existing(dochash):
+
+    def embed_text(self, doctext: str, docname: str, page_number: str):
+        """
+        Embed a page of a document.
+        :param doctext: page of a document
+        :param docname: name of the document
+        :param page_number: page number
+        :return:
+        """
+        document_hash = sha256(doctext.encode()).hexdigest()
+        if self._check_existing(document_hash):
             logger.info(f"Document {docname} page {page_number} already exists in the database, skipping.")
             return
         doctext = doctext.replace("\x00", "\uFFFD")
         response = ollama.embeddings(model="mxbai-embed-large", prompt=doctext)
         embedding = response["embedding"]
         # print(len(embedding))
-        docv = self.schema(
-            hash=dochash,
+        doc_vector = self.schema(
+            hash=document_hash,
             doc_name=docname,
             page_number=page_number,
             document=doctext,
             embedding=embedding)
         try:
-            self.session.add(docv)
+            self.session.add(doc_vector)
             self.session.commit()
         except IntegrityError:
             self.session.rollback()
@@ -93,21 +104,23 @@ class DocEmbedder:
             logger.error(f"Error: {e} generated when attempting to embed the following text: \n{doctext}")
             self.session.rollback()
 
-    def retrieve_docs(self, query, num_docs: int=5):
+    def retrieve_docs(self, query: str, num_docs: int = 5) -> str:
+        """
+        Retrieve documents based on a query.
+        :param query: query string
+        :param num_docs: number of documents to retrieve
+        :return: all documents as a string
+        """
         response = ollama.embeddings(model="mxbai-embed-large", prompt=query)
         # print(dir(self.schema.columns))
         statement = (
-            select(self.schema.c.document)
-            .order_by(self.schema.c.embedding.l2_distance(response["embedding"]))
+            select(self.schema.document)
+            .order_by(self.schema.embedding.l2_distance(response["embedding"]))
             .limit(num_docs)
         )
         pages = self.session.scalars(statement)
         data = "\n".join(pages)
         return data
 
-
-
     def __del__(self):
         self.session.close()
-
-

@@ -9,7 +9,7 @@ from libbydbot.brain import LibbyDBot
 
 
 class LibbyInterface:
-    def embed_PDFs(self, corpus_path: str ='.', collection_name: str = 'embeddings'):
+    def embed(self, corpus_path: str ='.', collection_name: str = 'embeddings'):
         DE = embed.DocEmbedder(collection_name)
         print ("Processing your corpus...")
         for d in glob(os.path.join(corpus_path, '*.pdf')):
@@ -32,7 +32,7 @@ class LibbyInterface:
         LDB.set_prompt(f"You are Libby D. Bot, a research Assistant, you should answer questions "
                        f"based on the context provided below.\n{context}")
 
-        response = LDB.get_response(question)
+        response = LDB.ask(question)
         return response
 
 
