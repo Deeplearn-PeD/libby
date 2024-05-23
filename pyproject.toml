@@ -14,8 +14,6 @@ libby = "libbydbot.cli:main"
 
 [tool.poetry.dependencies]
 python = "^3.11"
-ollama = "^0.1.8"
-chromadb = "^0.4.24"
 fire = "^0.6.0"
 pgvector = "^0.2.5"
 python-dotenv = "^1.0.1"
@@ -23,9 +21,9 @@ asyncpg = "^0.29.0"
 sqlalchemy = "^2.0.29"
 pymupdf = "^1.24.1"
 loguru = "^0.7.2"
-openai = "^1.17.0"
 psycopg2-binary = "^2.9.9"
 base-ai-agent = {git = "https://github.com/Deeplearn-PeD/base-ai-agent.git"}
+pyaml = "^24.4.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.1.1"

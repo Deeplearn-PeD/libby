@@ -7,11 +7,20 @@ from base_agent.voice import talk
 from libbydbot.persona_prompts import base_prompt
 from typing import List, Dict, Any, Union
 from base_agent import BasePersona
+import yaml
+import os
 
+def load_config():
+    current_dir = os.path.dirname(__file__)
+    config_file = os.path.join(current_dir, "config.yml")
+    with open(config_file, "r") as f:
+        return yaml.load(f, Loader=yaml.FullLoader)
+
+config = load_config()
 
 
 class Persona(BasePersona):
-    def __init__(self, name: str='Libby D. Bot', model: str='gpt-4-0125-preview',  languages: List=['pt_BR','en'], ):
+    def __init__(self, name: str='Libby D. Bot', model: str='gpt-4o',  languages: List=['pt_BR','en'], ):
         super().__init__(name=name, model=model, languages=languages)
         self.name = name
         self.languages = languages
