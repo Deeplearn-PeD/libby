@@ -3,9 +3,7 @@ import yaml
 import os
 from base_agent.llminterface import LangModel
 
-import dotenv
 
-dotenv.load_dotenv()
 
 class LibbyDBot(Persona):
     def __init__(self, name: str = 'Libby D. Bot', languages=['pt_BR', 'en'], model: str = 'gpt-4o'):

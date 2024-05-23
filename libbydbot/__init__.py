@@ -10,6 +10,10 @@ from base_agent import BasePersona
 import yaml
 import os
 
+import dotenv
+
+dotenv.load_dotenv()
+
 def load_config():
     current_dir = os.path.dirname(__file__)
     config_file = os.path.join(current_dir, "config.yml")
