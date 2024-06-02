@@ -25,6 +25,7 @@ psycopg2-binary = "^2.9.9"
 base-ai-agent = {git = "https://github.com/Deeplearn-PeD/base-ai-agent.git"}
 pyaml = "^24.4.0"
 sqlmodel = "^0.0.18"
+pymupdf4llm = "^0.0.5"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.1.1"
