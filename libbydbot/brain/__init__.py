@@ -1,18 +1,19 @@
 from libbydbot import Persona
 from base_agent.llminterface import LangModel, StructuredLangModel
-from .memory import memorize, remember
+from .memory import History
 import loguru
 logger = loguru.logger
 
 
 
 class LibbyDBot(Persona):
-    def __init__(self, name: str = 'Libby D. Bot', languages=['pt_BR', 'en'], model: str = 'gpt-4o'):
+    def __init__(self, name: str = 'Libby D. Bot', languages=['pt_BR', 'en'], model: str = 'gpt-4o', dburl: str= 'sqlite:///memory.db'):
         super().__init__(name=name, languages=languages, model=model)
         self.llm = LangModel(model=model)
         self.struct_llm = StructuredLangModel(model=model)
         self.prompt_template = None
         self.context_prompt = ""
+        self.history = History(dburl)
 
     @property
     def context(self):
@@ -26,7 +27,7 @@ class LibbyDBot(Persona):
 
     def ask(self, question: str, user_id: int=1):
         response = self._get_response(question)
-        memorize(user_id, question, response, self.context)
+        self.history.memorize(user_id, question, response, self.context)
         return response
 
     # def memorize(self, question: str, response: str):
