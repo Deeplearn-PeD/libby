@@ -1,6 +1,8 @@
 from libbydbot import Persona
 from base_agent.llminterface import LangModel, StructuredLangModel
 from .memory import memorize, remember
+import loguru
+logger = loguru.logger
 
 
 
@@ -22,17 +24,17 @@ class LibbyDBot(Persona):
     def set_prompt(self, prompt_template):
         self.prompt_template = prompt_template
 
-    def ask(self, question: str):
+    def ask(self, question: str, user_id: int=1):
         response = self._get_response(question)
-        memorize(1, question, response, self.context)
+        memorize(user_id, question, response, self.context)
         return response
 
-    def memorize(self, question: str, response: str):
-        self.set_context(question)
-        self.set_prompt(f"You are Libby D. Bot, a research Assistant, you should answer questions "
-                       f"based on the context provided below.\n{question}")
-        self.ask(response)
-        return True
+    # def memorize(self, question: str, response: str):
+    #     self.set_context(question)
+    #     self.set_prompt(f"You are Libby D. Bot, a research Assistant, you should answer questions "
+    #                    f"based on the context provided below.\n{question}")
+    #     self.ask(response)
+    #     return True
 
     def _get_response(self, question):
         response = self.llm.get_response(question=question, context=self.context_prompt)

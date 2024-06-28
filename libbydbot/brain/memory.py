@@ -4,8 +4,11 @@ This module implements LibbyDBot's memory system
 LibbyDBot's memory system is a simple data model that persists data between sessions
 """
 import os
-from sqlmodel import SQLModel, Field, create_engine, Session
+from sqlmodel import SQLModel, Field, create_engine, Session, select
 import datetime
+import loguru
+
+logger = loguru.logger
 
 
 class User(SQLModel, table=True):
@@ -37,7 +40,12 @@ def memorize(user_id: int, question: str, response: str, context: str):
     :return: memory object
     """
     with Session(engine) as session:
+        stmt = select(User).where(User.id == user_id)
         memory = Memory(question=question, response=response, context=context, user_id=user_id)
+        results = session.exec(stmt)
+        if not results: # Does not memorize if user is not registered
+            logger.warning(f"User {user_id} not found in the database")
+            return
         session.add(memory)
         session.commit()
         session.refresh(memory)
