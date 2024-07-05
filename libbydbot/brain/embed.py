@@ -23,32 +23,26 @@ class Base(DeclarativeBase):
     pass
 
 
-def table_factory(name):
-    """
-    Create the schema of a Table
-    :param name: name of the table
-    :return:
-    """
+class Embedding(Base):
+    __tablename__ = 'embedding'
+    __table_args__ = {'extend_existing': True}
+    id = Column(Integer, autoincrement=True, primary_key=True)
+    collection_name = Column(String)
+    doc_name = Column(String)
+    page_number = Column(Integer)
+    doc_hash = Column(String, unique=True)
+    document = Column(String)
+    embedding = Column(Vector(1024))
 
-    class Table(Base):
-        __tablename__ = name
-        __table_args__ = {'extend_existing': True}
-        id = Column(Integer, autoincrement=True, primary_key=True)
-        doc_name = Column(String)
-        page_number = Column(Integer)
-        hash = Column(String, unique=True)
-        document = Column(String)
-        embedding = Column(Vector(1024))
 
-    return Table
 
 
 class DocEmbedder:
-    def __init__(self, name="embeddings", create=False):
+    def __init__(self, col_name, create=True):
         self.engine = create_engine(os.getenv("PGURL"))
         self.session = Session(self.engine)
-        self.schema = table_factory(name)
-        # if not self.engine.dialect.has_schema(self.engine, name):
+        self.embedding = Embedding
+        self.collection_name = col_name
         if create:
             Base.metadata.create_all(self.engine, checkfirst=True)
 
@@ -57,10 +51,10 @@ class DocEmbedder:
         embedding_list = list(Base.metadata.tables.keys())
         return embedding_list
 
-    def set_schema(self, name):
-        metadata = MetaData()
-        metadata.reflect(self.engine, extend_existing=True)
-        self.schema = metadata.tables[name]
+    # def set_schema(self, name):
+    #     metadata = MetaData()
+    #     metadata.reflect(self.engine, extend_existing=True)
+    #     self.schema = metadata.tables[name]
 
     def _check_existing(self, hash: str):
         """
@@ -68,8 +62,8 @@ class DocEmbedder:
         :param hash: SHA256 hash of the document
         :return:
         """
-        statement = select(self.schema).where(self.schema.hash == hash)
-        result = self.session.execute(statement)
+        statement = select(self.embedding).where(self.embedding.doc_hash == hash)
+        result = self.session.execute(statement).all()
         return result
 
     def embed_text(self, doctext: str, docname: str, page_number: str):
@@ -88,9 +82,10 @@ class DocEmbedder:
         response = ollama.embeddings(model="mxbai-embed-large", prompt=doctext)
         embedding = response["embedding"]
         # print(len(embedding))
-        doc_vector = self.schema(
-            hash=document_hash,
+        doc_vector = self.embedding(
+            doc_hash=document_hash,
             doc_name=docname,
+            collection_name=self.collection_name,
             page_number=page_number,
             document=doctext,
             embedding=embedding)
@@ -104,18 +99,19 @@ class DocEmbedder:
             logger.error(f"Error: {e} generated when attempting to embed the following text: \n{doctext}")
             self.session.rollback()
 
-    def retrieve_docs(self, query: str, num_docs: int = 5) -> str:
+    def retrieve_docs(self, query: str, collection: str, num_docs: int = 5) -> str:
         """
         Retrieve documents based on a query.
         :param query: query string
+        :param collection: collection name
         :param num_docs: number of documents to retrieve
         :return: all documents as a string
         """
         response = ollama.embeddings(model="mxbai-embed-large", prompt=query)
         # print(dir(self.schema.columns))
         statement = (
-            select(self.schema.document)
-            .order_by(self.schema.embedding.l2_distance(response["embedding"]))
+            select(self.embedding.document)
+            .order_by(self.embedding.embedding.l2_distance(response["embedding"]))
             .limit(num_docs)
         )
         pages = self.session.scalars(statement)

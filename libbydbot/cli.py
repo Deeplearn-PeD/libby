@@ -10,6 +10,12 @@ from libbydbot.brain import LibbyDBot
 
 class LibbyInterface:
     def embed(self, corpus_path: str ='.', collection_name: str = 'embeddings'):
+        """
+        Embed a corpus of documents
+        :param corpus_path: path to a folder containing PDFs
+        :param collection_name: Name of the document collection
+        :return:
+        """
         DE = embed.DocEmbedder(collection_name)
         print ("Processing your corpus...")
         for d in glob(os.path.join(corpus_path, '*.pdf')):
