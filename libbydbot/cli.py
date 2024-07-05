@@ -31,7 +31,13 @@ class LibbyInterface:
                 DE.embed_text(text, n, page_number)
         return DE
 
-    def answer(self, question: str, collection_name: str = 'embeddings'):
+    def answer(self, question: str, collection_name: str = 'main'):
+        """
+        Answer a question based on a collection of documents
+        :param question: Users question
+        :param collection_name: collection of documents on which to base the answer
+        :return: Answer to the question
+        """
         DE = embed.DocEmbedder(collection_name)
         context = DE.retrieve_docs(question, num_docs=15)
         LDB = LibbyDBot(model='llama3')

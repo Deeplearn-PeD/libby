@@ -99,7 +99,7 @@ class DocEmbedder:
             logger.error(f"Error: {e} generated when attempting to embed the following text: \n{doctext}")
             self.session.rollback()
 
-    def retrieve_docs(self, query: str, collection: str, num_docs: int = 5) -> str:
+    def retrieve_docs(self, query: str, collection: str="", num_docs: int = 5) -> str:
         """
         Retrieve documents based on a query.
         :param query: query string
@@ -109,11 +109,18 @@ class DocEmbedder:
         """
         response = ollama.embeddings(model="mxbai-embed-large", prompt=query)
         # print(dir(self.schema.columns))
-        statement = (
-            select(self.embedding.document)
-            .order_by(self.embedding.embedding.l2_distance(response["embedding"]))
-            .limit(num_docs)
-        )
+        if collection:
+            statement = (
+                select(self.embedding.document).where(self.embedding.collection_name == collection)
+                .order_by(self.embedding.embedding.l2_distance(response["embedding"]))
+                .limit(num_docs)
+            )
+        else:
+            statement = (
+                select(self.embedding.document)
+                .order_by(self.embedding.embedding.l2_distance(response["embedding"]))
+                .limit(num_docs)
+            )
         pages = self.session.scalars(statement)
         data = "\n".join(pages)
         return data
