@@ -39,7 +39,7 @@ class LibbyInterface:
         :return: Answer to the question
         """
         DE = embed.DocEmbedder(collection_name)
-        context = DE.retrieve_docs(question, num_docs=15)
+        context = DE.retrieve_docs(question, collection=collection_name, num_docs=15)
         LDB = LibbyDBot(model='llama3')
         LDB.set_prompt(f"You are Libby D. Bot, a research Assistant, you should answer questions "
                        f"based on the context provided below.\n{context}")
