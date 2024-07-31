@@ -61,7 +61,7 @@ class History:
             session.commit()
             session.refresh(memory)
             return memory
-    def remember(self, user_id, since: datetime.datetime = None):
+    def recall(self, user_id, since: datetime.datetime = None):
         with Session(self.engine) as session:
             if since:
                 return session.query(Memory).filter(Memory.user_id == user_id, Memory.timestamp >= since).all()

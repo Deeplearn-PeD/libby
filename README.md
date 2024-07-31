@@ -1,4 +1,7 @@
 # Libby D. Bot
+
+[![DOI](https://zenodo.org/badge/784398327.svg)](https://zenodo.org/doi/10.5281/zenodo.12744747)
+
 Libby the librarian. AI agent specialized in creating and querying embeddings for RAG
 ![Libby D. Bot](/libby.jpeg)
 
