@@ -79,7 +79,7 @@ class LibbyInterface(LibbyDBot):
         :return: Generated text
         """
         DE = embed.DocEmbedder("embedding")
-        context = DE.retrieve_docs(prompt,  num_docs=15)
+        context = DE.retrieve_docs(prompt,  num_docs=100)
         self.set_prompt("You are Libby D. Bot, a creative and competent writer.")
         self.set_context(context)
         response = self.ask(prompt)
