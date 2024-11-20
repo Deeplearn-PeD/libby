@@ -65,8 +65,8 @@ class LibbyInterface(LibbyDBot):
         DE = embed.DocEmbedder(collection_name)
         context = DE.retrieve_docs(question, collection=collection_name, num_docs=5)
         # LDB = LibbyDBot(model='llama3')
-        self.set_prompt(f"You are Libby D. Bot, a research Assistant, you should answer questions "
-                       f"based on the context provided below.\n\n{context}")
+        self.set_prompt(f"You are Libby D. Bot, a research Assistant")
+        self.set_context(context)
 
         response = self.ask(question)
         return response
@@ -78,7 +78,10 @@ class LibbyInterface(LibbyDBot):
         :param output_file: Optional file path to save the generated text
         :return: Generated text
         """
-        self.set_prompt("You are Libby D. Bot, a creative and helpful assistant.")
+        DE = embed.DocEmbedder("embedding")
+        context = DE.retrieve_docs(prompt,  num_docs=15)
+        self.set_prompt("You are Libby D. Bot, a creative and competent writer.")
+        self.set_context(context)
         response = self.ask(prompt)
         
         if output_file:
