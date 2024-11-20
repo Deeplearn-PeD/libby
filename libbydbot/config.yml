@@ -7,11 +7,11 @@ languages:
 
 models:
   Llama3:
-    code: "llama3"
+    code: "llama3.2"
     is_default: true
   Gemma:
-    code: "gemma"
-  Llama3-Gradient:
-    code: "llama3-gradient"
+    code: "gemma2"
+  Llama3-vision:
+    code: "llama3.2-vision"
   ChatGPT:
     code: "gpt-4o"

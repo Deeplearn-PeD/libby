@@ -27,13 +27,11 @@ readme = "README.md"
 libby = "libbydbot.cli:main"
 
 
-[dependency-groups]
+[project.optional-dependencies]
 dev = [
     "pytest<9.0.0,>=8.1.1",
     "mkdocs<2.0.0,>=1.5.3",
-]
-
-[tool.uv]
-dev-dependencies = [
     "aider-chat>=0.63.2",
 ]
+
+

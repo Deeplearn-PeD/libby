@@ -10,14 +10,14 @@ class TestLibbyInterface(unittest.TestCase):
     def test_initialization_default(self):
         self.assertEqual(self.libby.name, 'Libby D. Bot')
         self.assertEqual(self.libby.languages, ['pt_BR', 'en'])
-        self.assertEqual(self.libby.model, 'gpt-4o')
+        self.assertEqual(self.libby.model, 'llama3.2')
 
 
     def test_initialization_custom(self):
-        custom_libby = LibbyInterface(name='Custom Bot', languages=['en'], model='Llama3', dburl='sqlite:///custom.db')
+        custom_libby = LibbyInterface(name='Custom Bot', languages=['en'], model='Gemma', dburl='sqlite:///custom.db')
         self.assertEqual(custom_libby.name, 'Custom Bot')
         self.assertEqual(custom_libby.languages, ['en'])
-        self.assertEqual(custom_libby.model, 'llama3.2')
+        self.assertEqual(custom_libby.model, 'gemma2')
 
     def test_invalid_model(self):
         with self.assertRaises(ValueError):
