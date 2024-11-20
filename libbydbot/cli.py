@@ -71,13 +71,24 @@ class LibbyInterface(LibbyDBot):
         response = self.ask(question)
         return response
 
-    def generate(self, prompt: str, output_file: str = None):
+    def generate(self, prompt: str, output_file: str = None, prompt_file: str = None):
         """
         Generate text based on a prompt
         :param prompt: The prompt to generate text from
         :param output_file: Optional file path to save the generated text
+        :param prompt_file: Optional file path to read the prompt from
         :return: Generated text
         """
+        if prompt_file:
+            try:
+                with open(prompt_file, 'r') as f:
+                    prompt = f.read().strip()
+            except FileNotFoundError:
+                print(f"Error: Prompt file '{prompt_file}' not found.")
+                return
+            except Exception as e:
+                print(f"Error reading prompt file: {e}")
+                return
         DE = embed.DocEmbedder("embedding")
         context = DE.retrieve_docs(prompt,  num_docs=100)
         self.set_prompt("You are Libby D. Bot, a creative and competent writer.")

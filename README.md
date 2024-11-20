@@ -40,7 +40,11 @@ libby answer "What is the main topic of the documents?" --collection_name your_c
 You can use Libby to generate content based on prompts:
 
 ```bash
+# Generate using direct prompt
 libby generate "Write a summary of..." --output_file output.txt
+
+# Generate using prompt from file
+libby generate "" --prompt_file input_prompt.txt --output_file output.txt
 ```
 
 ## Features
