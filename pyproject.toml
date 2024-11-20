@@ -1,36 +1,39 @@
-[tool.poetry]
+[project]
+authors = [
+    {name = "Flávio Codeço Coelho", email = "fccoelho@gmail.com"},
+]
+license = {text = "GPLv3"}
+requires-python = ">=3.11,<4.0"
+dependencies = [
+    "fire<1.0.0,>=0.6.0",
+    "pgvector<1.0.0,>=0.2.5",
+    "python-dotenv<2.0.0,>=1.0.1",
+    "asyncpg<1.0.0,>=0.29.0",
+    "sqlalchemy<3.0.0,>=2.0.29",
+    "pymupdf<2.0.0,>=1.24.1",
+    "loguru<1.0.0,>=0.7.2",
+    "psycopg2-binary<3.0.0,>=2.9.9",
+    "base-ai-agent @ git+https://github.com/Deeplearn-PeD/base-ai-agent.git",
+    "pyaml<25.0.0,>=24.4.0",
+    "sqlmodel<1.0.0,>=0.0.18",
+    "pymupdf4llm<1.0.0,>=0.0.5",
+]
 name = "libby"
 version = "0.3.0"
 description = "Libby the Librarian Bot."
-authors = ["Flávio Codeço Coelho <fccoelho@gmail.com>"]
-license = "GPLv3"
 readme = "README.md"
-packages = [
-    { include = "libbydbot", from = "." }
-]
 
-[tool.poetry.scripts]
+[project.scripts]
 libby = "libbydbot.cli:main"
 
-[tool.poetry.dependencies]
-python = "^3.11"
-fire = "^0.6.0"
-pgvector = "^0.2.5"
-python-dotenv = "^1.0.1"
-asyncpg = "^0.29.0"
-sqlalchemy = "^2.0.29"
-pymupdf = "^1.24.1"
-loguru = "^0.7.2"
-psycopg2-binary = "^2.9.9"
-base-ai-agent = {git = "https://github.com/Deeplearn-PeD/base-ai-agent.git"}
-pyaml = "^24.4.0"
-sqlmodel = "^0.0.18"
-pymupdf4llm = "^0.0.5"
 
-[tool.poetry.group.dev.dependencies]
-pytest = "^8.1.1"
-mkdocs = "^1.5.3"
+[dependency-groups]
+dev = [
+    "pytest<9.0.0,>=8.1.1",
+    "mkdocs<2.0.0,>=1.5.3",
+]
 
-[build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+[tool.uv]
+dev-dependencies = [
+    "aider-chat>=0.63.2",
+]
