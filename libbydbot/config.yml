@@ -15,3 +15,5 @@ models:
     code: "llama3.2-vision"
   ChatGPT:
     code: "gpt-4o"
+  Qwen:
+    code: "qwen2.5"
