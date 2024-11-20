@@ -26,6 +26,8 @@ readme = "README.md"
 [project.scripts]
 libby = "libbydbot.cli:main"
 
+[tool.setuptools.package-data]
+libbydbot = ["config.yml"]
 
 [project.optional-dependencies]
 dev = [
