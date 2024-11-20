@@ -30,5 +30,25 @@ class TestLibbyInterface(unittest.TestCase):
         self.assertIsNotNone(response)
         self.assertIsInstance(response, str)
 
+    def test_generate_console(self):
+        prompt = "Write a haiku about programming"
+        response = self.libby.generate(prompt)
+        self.assertIsNotNone(response)
+        self.assertIsInstance(response, str)
+
+    def test_generate_file(self):
+        prompt = "Write a haiku about programming"
+        test_file = "test_output.txt"
+        response = self.libby.generate(prompt, output_file=test_file)
+        
+        # Check if file was created and contains the response
+        self.assertTrue(os.path.exists(test_file))
+        with open(test_file, 'r') as f:
+            file_content = f.read()
+        self.assertEqual(response, file_content)
+        
+        # Cleanup
+        os.remove(test_file)
+
 if __name__ == '__main__':
     unittest.main()
