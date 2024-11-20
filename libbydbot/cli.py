@@ -3,14 +3,34 @@ from libbydbot.brain import embed
 import pathlib
 import os
 import fitz
+import yaml
 from fitz import EmptyFileError
 from glob import glob
 from libbydbot.brain import LibbyDBot
 
 
 class LibbyInterface(LibbyDBot):
+    
+    @staticmethod
+    def load_available_models():
+        config_path = os.path.join(os.path.dirname(__file__), 'config.yml')
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+        return {name: details['code'] for name, details in config['models'].items()}
 
-    def __init__(self, name: str = 'Libby D. Bot', languages=['pt_BR', 'en'], model: str = 'gpt-4o', dburl: str= 'sqlite:///memory.db'):
+    def __init__(self, name: str = 'Libby D. Bot', languages=['pt_BR', 'en'], model: str = None, dburl: str= 'sqlite:///memory.db'):
+        available_models = self.load_available_models()
+        if model is None:
+            # Find default model from config
+            for model_name, details in yaml.safe_load(open(os.path.join(os.path.dirname(__file__), 'config.yml')))['models'].items():
+                if details.get('is_default'):
+                    model = details['code']
+                    break
+        elif model in available_models:
+            model = available_models[model]
+        else:
+            raise ValueError(f"Invalid model. Available models: {', '.join(available_models.keys())}")
+            
         super().__init__(name=name, languages=languages, model=model, dburl=dburl)
 
     def embed(self, corpus_path: str ='.', collection_name: str = 'embeddings'):
