@@ -51,6 +51,22 @@ class LibbyInterface(LibbyDBot):
         response = self.ask(question)
         return response
 
+    def generate(self, prompt: str, output_file: str = None):
+        """
+        Generate text based on a prompt
+        :param prompt: The prompt to generate text from
+        :param output_file: Optional file path to save the generated text
+        :return: Generated text
+        """
+        self.set_prompt("You are Libby D. Bot, a creative and helpful assistant.")
+        response = self.ask(prompt)
+        
+        if output_file:
+            with open(output_file, 'w') as f:
+                f.write(response)
+            print(f"Generated text saved to: {output_file}")
+        
+        return response
 
 
 def main(corpus_path='.'):
