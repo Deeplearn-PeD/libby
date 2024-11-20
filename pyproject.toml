@@ -19,7 +19,7 @@ dependencies = [
     "pymupdf4llm<1.0.0,>=0.0.5",
 ]
 name = "libby"
-version = "0.3.0"
+version = "0.3.1"
 description = "Libby the Librarian Bot."
 readme = "README.md"
 
