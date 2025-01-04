@@ -1,14 +1,14 @@
-import ollama
 # import chromadb
 import os
-import pgvector
 from hashlib import sha256
-from sqlalchemy.orm import DeclarativeBase, Session
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy import Column, Integer, String, text, create_engine, select, MetaData
-from pgvector.sqlalchemy import Vector
+
 import dotenv
 import loguru
+import ollama
+from pgvector.sqlalchemy import Vector
+from sqlalchemy import Column, Integer, String, text, create_engine, select
+from sqlalchemy.exc import IntegrityError, NoSuchModuleError
+from sqlalchemy.orm import DeclarativeBase, Session
 
 dotenv.load_dotenv()
 logger = loguru.logger
@@ -35,11 +35,13 @@ class Embedding(Base):
     embedding = Column(Vector(1024))
 
 
-
-
 class DocEmbedder:
-    def __init__(self, col_name, create=True):
-        self.engine = create_engine(os.getenv("PGURL"))
+    def __init__(self, col_name, dburl: str = None, create=True):
+        try:
+            self.engine = create_engine(os.getenv("PGURL")) if dburl is None else create_engine(dburl)
+        except NoSuchModuleError as exc:
+            logger.error(f"Invalid dburl string passed to DocEmbedder: \n{exc}")
+            raise exc
         self.session = Session(self.engine)
         self.embedding = Embedding
         self.collection_name = col_name
@@ -92,14 +94,14 @@ class DocEmbedder:
         try:
             self.session.add(doc_vector)
             self.session.commit()
-        except IntegrityError:
+        except IntegrityError as e:
             self.session.rollback()
-            logger.warning(f"Document {docname} page {page_number} already exists in the database.")
+            logger.warning(f"Document {docname} page {page_number} already exists in the database: {e}")
         except ValueError as e:
             logger.error(f"Error: {e} generated when attempting to embed the following text: \n{doctext}")
             self.session.rollback()
 
-    def retrieve_docs(self, query: str, collection: str="", num_docs: int = 5) -> str:
+    def retrieve_docs(self, query: str, collection: str = "", num_docs: int = 5) -> str:
         """
         Retrieve documents based on a query.
         :param query: query string

@@ -6,7 +6,9 @@ def test_embed_text():
     embedder = DocEmbedder("test_collection")
     embedder.embed_text('doctext', 'docname', 1)
 
-
+def test_instantiate():
+    embedder = DocEmbedder("test_collection", dburl="sqlite:///memory.db")
+    assert embedder
 
 def test_retrieve_docs():
     embedder = DocEmbedder("test_collection")
