@@ -13,9 +13,9 @@ from sqlalchemy.orm import DeclarativeBase, Session
 dotenv.load_dotenv()
 logger = loguru.logger
 
-engine = create_engine(os.getenv("PGURL"))
-with Session(engine) as session:
-    session.execute(text('CREATE EXTENSION IF NOT EXISTS vector;'))
+# engine = create_engine(os.getenv("PGURL"))
+# with Session(engine) as session:
+#     session.execute(text('CREATE EXTENSION IF NOT EXISTS vector;'))
 
 
 # create a class to store the embeddings
@@ -37,12 +37,14 @@ class Embedding(Base):
 
 class DocEmbedder:
     def __init__(self, col_name, dburl: str = None, create=True):
+        self.dburl = dburl
         try:
             self.engine = create_engine(os.getenv("PGURL")) if dburl is None else create_engine(dburl)
         except NoSuchModuleError as exc:
             logger.error(f"Invalid dburl string passed to DocEmbedder: \n{exc}")
             raise exc
         self.session = Session(self.engine)
+        self._check_vector_exists()
         self.embedding = Embedding
         self.collection_name = col_name
         if create:
@@ -53,10 +55,16 @@ class DocEmbedder:
         embedding_list = list(Base.metadata.tables.keys())
         return embedding_list
 
-    # def set_schema(self, name):
-    #     metadata = MetaData()
-    #     metadata.reflect(self.engine, extend_existing=True)
-    #     self.schema = metadata.tables[name]
+    def _check_vector_exists(self):
+        """
+        Check if the vector extension exists in the database
+        """
+        if self.dburl.startswith("postgresql"):
+            self.session.execute(text('CREATE EXTENSION IF NOT EXISTS vector;'))
+
+        elif self.dburl.startswith("duckdb"):
+            self.session.execute(text('INSTALL vss;LOAD vss;'))
+        self.session.commit()
 
     def _check_existing(self, hash: str):
         """

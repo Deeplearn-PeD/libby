@@ -17,6 +17,9 @@ dependencies = [
     "pyaml<25.0.0,>=24.4.0",
     "sqlmodel<1.0.0,>=0.0.18",
     "pymupdf4llm<1.0.0,>=0.0.5",
+    "sqlite-vss>=0.1.2",
+    "duckdb>=1.1.3",
+    "duckdb-engine>=0.14.0",
 ]
 name = "libby"
 version = "0.3.8"
