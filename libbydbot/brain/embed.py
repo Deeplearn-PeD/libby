@@ -1,6 +1,7 @@
 # import chromadb
 import os
 from hashlib import sha256
+from glob import glob
 
 import dotenv
 import loguru
@@ -9,6 +10,8 @@ from pgvector.sqlalchemy import Vector
 from sqlalchemy import Column, Integer, String, Sequence, text, create_engine, select
 from sqlalchemy.exc import IntegrityError, NoSuchModuleError
 from sqlalchemy.orm import DeclarativeBase, Session
+import fitz
+from fitz import EmptyFileError
 
 dotenv.load_dotenv()
 logger = loguru.logger
@@ -109,6 +112,24 @@ class DocEmbedder:
         except ValueError as e:
             logger.error(f"Error: {e} generated when attempting to embed the following text: \n{doctext}")
             self.session.rollback()
+
+    def embed_path(self, corpus_path: str):
+        """
+        Embed all documents in a path
+        :param corpus_path:  path to a folder containing PDFs
+        :return:
+        """
+        for d in glob(os.path.join(corpus_path, '*.pdf')):
+            try:
+                doc = fitz.open(d)
+            except EmptyFileError:
+                continue
+            n = doc.name
+            for page_number, page in enumerate(doc):
+                text = page.get_text()
+                if not text:
+                    continue
+                self.embed_text(text, n, page_number)
 
     def retrieve_docs(self, query: str, collection: str = "", num_docs: int = 5) -> str:
         """

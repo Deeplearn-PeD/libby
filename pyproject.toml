@@ -22,7 +22,7 @@ dependencies = [
     "duckdb-engine>=0.14.0",
 ]
 name = "libby"
-version = "0.3.8"
+version = "0.3.9"
 description = "Libby the Librarian Bot."
 readme = "README.md"
 
