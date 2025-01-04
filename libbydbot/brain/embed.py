@@ -6,7 +6,7 @@ import dotenv
 import loguru
 import ollama
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Column, Integer, String, text, create_engine, select
+from sqlalchemy import Column, Integer, String, Sequence, text, create_engine, select
 from sqlalchemy.exc import IntegrityError, NoSuchModuleError
 from sqlalchemy.orm import DeclarativeBase, Session
 
@@ -26,6 +26,7 @@ class Base(DeclarativeBase):
 class Embedding(Base):
     __tablename__ = 'embedding'
     __table_args__ = {'extend_existing': True}
+    # id_seq = Sequence("id_seq", metadata=Base.metadata)
     id = Column(Integer, autoincrement=True, primary_key=True)
     collection_name = Column(String)
     doc_name = Column(String)
@@ -37,7 +38,7 @@ class Embedding(Base):
 
 class DocEmbedder:
     def __init__(self, col_name, dburl: str = None, create=True):
-        self.dburl = dburl
+        self.dburl = dburl if dburl is not None else os.getenv("PGURL")
         try:
             self.engine = create_engine(os.getenv("PGURL")) if dburl is None else create_engine(dburl)
         except NoSuchModuleError as exc:

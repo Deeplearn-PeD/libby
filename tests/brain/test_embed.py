@@ -4,10 +4,15 @@ from libbydbot.brain.embed import DocEmbedder
 
 def test_embed_text():
     embedder = DocEmbedder("test_collection")
-    embedder.embed_text('doctext', 'docname', 1)
+    embedder.embed_text('doctext1', 'docname', 1)
 
-def test_instantiate():
-    embedder = DocEmbedder("test_collection", dburl="sqlite:///memory.db")
+def test_instantiate_sqlite():
+    embedder = DocEmbedder("test_collection", dburl="sqlite:///:memory:")
+    assert embedder
+
+def test_embed_duckdb():
+    embedder = DocEmbedder("test_collection", dburl="duckdb:///:memory:")
+    embedder.embed_text('doctext', 'docname', 1)
     assert embedder
 
 def test_retrieve_docs():
