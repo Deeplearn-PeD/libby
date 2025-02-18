@@ -1,17 +1,17 @@
-from pydantic import BaseSettings
-from typing import Dict, List
+from pydantic_settings import BaseSettings
+from typing import Dict, List, Any
 
 class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
     
-    languages: Dict[str, Dict[str, str]] = {
+    languages: Dict[str, Dict[str, Any]] = {
         "English": {"code": "en_US", "is_default": True},
         "Português": {"code": "pt_BR"}
     }
     
-    models: Dict[str, Dict[str, str]] = {
+    models: Dict[str, Dict[str, Any]] = {
         "Llama3": {"code": "llama3.2", "is_default": True},
         "Gemma": {"code": "gemma2"},
         "Llama3-vision": {"code": "llama3.2-vision"},
