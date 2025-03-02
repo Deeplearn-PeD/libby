@@ -38,9 +38,11 @@ response = bot.ask("What is the capital of France?")
 ### Configuration
 
 #### Supported Models
-- gpt-4o (default)
-- llama3
-- gemma
+Any models that you have API keys for, plus all local models accessible via Ollama.
+Try:
+```python
+bot.llm.available_models()
+```
 
 #### Supported Languages
 - Portuguese (pt_BR)
