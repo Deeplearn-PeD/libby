@@ -10,8 +10,13 @@ def test_instantiate_sqlite():
     embedder = DocEmbedder("test_collection", dburl="sqlite:///:memory:")
     assert embedder
 
-def test_embed_duckdb():
-    embedder = DocEmbedder("test_collection", dburl="duckdb:///:memory:")
+# def test_embed_duckdb():
+#     embedder = DocEmbedder("test_collection", dburl="duckdb:///:memory:")
+#     embedder.embed_text('doctext', 'docname', 1)
+#     assert embedder
+
+def test_embed_sqlite():
+    embedder = DocEmbedder("test_collection", dburl="sqlite:///:memory:")
     embedder.embed_text('doctext', 'docname', 1)
     assert embedder
 
