@@ -275,7 +275,7 @@ tests-mypy = ["mypy (>=1.11.1) ; platform_python_implementation == \"CPython\" a
 
 [[package]]
 name = "base-ai-agent"
-version = "0.2.2"
+version = "0.3.0"
 description = "Base class for all of Deeplearn's  AI agents."
 optional = false
 python-versions = ">=3.12,<3.14"
@@ -297,7 +297,7 @@ PyYAML = "^6.0.1"
 type = "git"
 url = "https://github.com/Deeplearn-PeD/base-ai-agent.git"
 reference = "HEAD"
-resolved_reference = "26005b950522ad914dafb682abd24e6a9b9fdacc"
+resolved_reference = "1da1d95a349eacfe088fcebd148070f2ad10476b"
 
 [[package]]
 name = "certifi"
