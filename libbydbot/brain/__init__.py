@@ -27,6 +27,8 @@ class LibbyDBot(Persona):
 
     def ask(self, question: str, user_id: int=1):
         response = self._get_response(question)
+        if "</think>" in response:
+            response = response.split("</think>")[-1].strip()
         self.history.memorize(user_id, question, response, self.context)
         return response
 
