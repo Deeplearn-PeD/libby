@@ -17,7 +17,7 @@ class TestLibbyInterface(unittest.TestCase):
         custom_libby = LibbyInterface(name='Custom Bot', languages=['en'], model='Gemma', dburl='sqlite:///custom.db')
         self.assertEqual(custom_libby.name, 'Custom Bot')
         self.assertEqual(custom_libby.languages, ['en'])
-        self.assertEqual(custom_libby.model, 'gemma2')
+        self.assertEqual(custom_libby.model, 'gemma3')
 
     def test_invalid_model(self):
         with self.assertRaises(ValueError):
