@@ -9,9 +9,10 @@ import loguru
 import ollama
 from fitz import EmptyFileError
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Column, Integer, String, Sequence, text, create_engine, select, Table, insert
+from sqlalchemy import Column, Integer, String, Sequence, text, create_engine, select, Table, insert, func
 from sqlalchemy.exc import IntegrityError, NoSuchModuleError
 from sqlalchemy.orm import DeclarativeBase, Session
+from duckdb import array_type
 
 dotenv.load_dotenv()
 logger = loguru.logger
@@ -90,11 +91,17 @@ class DocEmbedder:
 
     def _add_duckdb_vector_column(self):
         """
-        Add a vector column to the database
+        Add a vector column named embedding to the database
         """
-        self.session.execute(text("ALTER TABLE embedding_duckdb ADD COLUMN embedding FLOAT[1024];"
-                                  "CREATE INDEX my_hnsw_cosine_index ON embedding_duckdb USING HNSW(embedding) WITH (metric = 'cosine');"))
+        # Check if the column embedding already exists
+        result = self.session.execute(text("SELECT * FROM information_schema.columns WHERE table_name = 'embedding_duckdb' AND column_name = 'embedding';")).first()
+        if result is None:
+            # If it does not exist, add the column
+            logger.info("Adding vector column to DuckDB embedding table.")
+            self.session.execute(text("ALTER TABLE embedding_duckdb ADD COLUMN embedding FLOAT[1024];"))
+
         self.session.commit()
+
 
     def _check_vector_exists(self):
         """
@@ -192,18 +199,41 @@ class DocEmbedder:
         response = ollama.embeddings(model="mxbai-embed-large", prompt=query)
         # print(dir(self.schema.columns))
         if collection:
-            statement = (
-                select(self.embedding.document).where(self.embedding.collection_name == collection)
-                .order_by(self.embedding.embedding.l2_distance(response["embedding"]))
-                .limit(num_docs)
-            )
+            if self.dburl.startswith("duckdb"):
+                query = text('select document from embedding_duckdb where collection_name = :collection_name order by array_cosine_similarity(embedding, CAST(:embedding as FLOAT[1024])) limit :num_docs;')
+                result = self.session.execute(query, {'collection_name': collection, 'embedding': response["embedding"], 'num_docs': num_docs})
+                pages = [row[0] for row in result.fetchall()]
+                # statement = (
+                #     select(self.embedding.c.document).where(self.embedding.c.collection_name == collection)
+                #     .order_by(func.array_distance(self.embedding.c.embedding, response["embedding"]))
+                #     .limit(num_docs)
+                # )
+            else:
+                # For PostgreSQL
+                statement = (
+                    select(self.embedding.document).where(self.embedding.collection_name == collection)
+                    .order_by(self.embedding.embedding.l2_distance(response["embedding"]))
+                    .limit(num_docs)
+                )
+                pages = self.session.scalars(statement)
         else:
-            statement = (
-                select(self.embedding.document)
-                .order_by(self.embedding.embedding.l2_distance(response["embedding"]))
-                .limit(num_docs)
-            )
-        pages = self.session.scalars(statement)
+            if self.dburl.startswith("duckdb"):
+                query = text('select document from embedding_duckdb order by array_cosine_similarity(embedding, CAST(:embedding as FLOAT[1024])) limit :num_docs;')
+                result = self.session.execute(query, {'embedding': response["embedding"], 'num_docs': num_docs})
+                pages = [row[0] for row in result.fetchall()]
+                # statement = (
+                #     select(self.embedding.c.document)
+                #     .order_by(func.array_distance(self.embedding.c.embedding, response["embedding"]))
+                #     .limit(num_docs)
+                # )
+            else:
+                # For PostgreSQL
+                statement = (
+                    select(self.embedding.document)
+                    .order_by(self.embedding.embedding.l2_distance(response["embedding"]))
+                    .limit(num_docs)
+                )
+                pages = self.session.scalars(statement)
         data = "\n".join(pages)
         return data
 
