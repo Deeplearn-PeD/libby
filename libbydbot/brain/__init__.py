@@ -9,6 +9,7 @@ logger = loguru.logger
 class LibbyDBot(Persona):
     def __init__(self, name: str = 'Libby D. Bot', languages=['pt_BR', 'en'], model: str = 'gpt-4o', dburl: str= 'sqlite:///memory.db'):
         super().__init__(name=name, languages=languages, model=model)
+        self.dburl = dburl
         self.llm = LangModel(model=model)
         self.struct_llm = StructuredLangModel(model=model)
         self.prompt_template = None

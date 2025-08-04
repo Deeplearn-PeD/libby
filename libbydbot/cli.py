@@ -6,13 +6,19 @@ import fitz
 from fitz import EmptyFileError
 from glob import glob
 from libbydbot.brain import LibbyDBot
-from libbydbot.settings import settings
+from libbydbot.settings import Settings
 
+try:
+    settings = Settings()
+except Exception as e:
+    print(f"Error loading settings: {e}")
+    settings = None
 
 class LibbyInterface(LibbyDBot):
-    
     @staticmethod
     def load_available_models():
+        if settings is None:
+            return {}
         return {name: details['code'] for name, details in settings.models.items()}
 
     def __init__(self, name: str = 'Libby D. Bot', languages=['pt_BR', 'en'], model: str = None, dburl: str= 'sqlite:///memory.db'):
@@ -33,7 +39,7 @@ class LibbyInterface(LibbyDBot):
         :param collection_name: Name of the document collection
         :return:
         """
-        DE = embed.DocEmbedder(collection_name)
+        DE = embed.DocEmbedder(collection_name, dburl=self.dburl)
         print ("Processing your corpus...")
         for d in glob(os.path.join(corpus_path, '*.pdf')):
             try:

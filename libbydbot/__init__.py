@@ -5,7 +5,7 @@ for Such as name, language model uses, and basic context sqlprompts defining its
 """
 from base_agent.voice import talk
 from libbydbot.persona_prompts import base_prompt
-from libbydbot.settings import settings
+from libbydbot.settings import Settings
 from typing import List, Dict, Any, Union
 from base_agent import BasePersona
 import yaml
@@ -15,7 +15,11 @@ import dotenv
 
 dotenv.load_dotenv()
 
-
+try:
+    settings = Settings()
+except Exception as e:
+    print(f"Error loading settings: {e}")
+    settings = None
 
 class Persona(BasePersona):
     def __init__(self, name: str='Libby D. Bot', model: str='gpt-4o',  languages: List=['pt_BR','en'], ):

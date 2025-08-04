@@ -20,7 +20,6 @@ class Settings(BaseSettings):
     models: Dict[str, Dict[str, Any]] = {
         "Llama3": {"code": "llama3.2", "is_default": True},
         "Gemma": {"code": "gemma3"},
-        "Llama3-vision": {"code": "llama3.2-vision"},
         "ChatGPT": {"code": "gpt-4o"},
         "Qwen": {"code": "qwen3"}
     }
@@ -32,4 +31,4 @@ class Settings(BaseSettings):
                 return details["code"]
         return "llama3.2"
 
-settings = Settings()
+
