@@ -1,20 +1,21 @@
 # import chromadb
 import os
-from hashlib import sha256
 from glob import glob
+from hashlib import sha256
 
 import dotenv
+import fitz
 import loguru
 import ollama
+from fitz import EmptyFileError
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Column, Integer, String, Sequence, text, create_engine, select
+from sqlalchemy import Column, Integer, String, Sequence, text, create_engine, select, Table, insert
 from sqlalchemy.exc import IntegrityError, NoSuchModuleError
 from sqlalchemy.orm import DeclarativeBase, Session
-import fitz
-from fitz import EmptyFileError
 
 dotenv.load_dotenv()
 logger = loguru.logger
+
 
 # engine = create_engine(os.getenv("PGURL"))
 # with Session(engine) as session:
@@ -38,26 +39,62 @@ class Embedding(Base):
     document = Column(String)
     embedding = Column(Vector(1024))
 
+# DuckDB does not support vector types natively, so we will use a different class for DuckDB
+class EmbeddingDuckdb(Base):
+    __tablename__ = 'embedding_duckdb'
+    __table_args__ = {'extend_existing': True}
+    user_id_seq = Sequence('user_id_seq')
+    id = Column(Integer, user_id_seq, server_default=user_id_seq.next_value(), primary_key=True)
+    collection_name = Column(String)
+    doc_name = Column(String)
+    page_number = Column(Integer)
+    doc_hash = Column(String, unique=True)
+    document = Column(String)
+    # embedding = Column(Vector(1024, dimensions=1024)) # DuckDB does not support vector types natively
+
 
 class DocEmbedder:
     def __init__(self, col_name, dburl: str = None, create=True):
         self.dburl = dburl if dburl is not None else os.getenv("PGURL")
         try:
-            self.engine = create_engine(os.getenv("PGURL")) if dburl is None else create_engine(dburl)
+            if ':memory:' in self.dburl:
+                self.engine = create_engine(self.dburl)
+            else:
+                self.engine = create_engine(self.dburl)
+                # self.engine = create_engine(self.dburl.split('/')[-1])
         except NoSuchModuleError as exc:
             logger.error(f"Invalid dburl string passed to DocEmbedder: \n{exc}")
             raise exc
         self.session = Session(self.engine)
         self._check_vector_exists()
-        self.embedding = Embedding
+        if self.dburl.startswith("duckdb"):
+            self.embedding = EmbeddingDuckdb
+            col_name = col_name + "_duckdb"
+        else:
+            self.embedding = Embedding
         self.collection_name = col_name
         if create:
-            Base.metadata.create_all(self.engine, checkfirst=True)
+            if self.dburl.startswith("duckdb"):
+                Base.metadata.create_all(self.engine, tables=[Base.metadata.sorted_tables[1]], checkfirst=True)
+                # Add vector columns compatible with this engine
+                self._add_duckdb_vector_column()
+                Base.metadata.remove(Base.metadata.tables['embedding_duckdb'])
+                self.embedding = Table('embedding_duckdb', Base.metadata, autoload_with=self.engine)
+            else:
+                Base.metadata.create_all(self.engine, tables=[Base.metadata.sorted_tables[0]], checkfirst=True)
 
     @property
     def embeddings_list(self):
         embedding_list = list(Base.metadata.tables.keys())
         return embedding_list
+
+    def _add_duckdb_vector_column(self):
+        """
+        Add a vector column to the database
+        """
+        self.session.execute(text("ALTER TABLE embedding_duckdb ADD COLUMN embedding FLOAT[1024];"
+                                  "CREATE INDEX my_hnsw_cosine_index ON embedding_duckdb USING HNSW(embedding) WITH (metric = 'cosine');"))
+        self.session.commit()
 
     def _check_vector_exists(self):
         """
@@ -76,7 +113,11 @@ class DocEmbedder:
         :param hash: SHA256 hash of the document
         :return:
         """
-        statement = select(self.embedding).where(self.embedding.doc_hash == hash)
+        if self.dburl.startswith("duckdb"):
+            statement = select(self.embedding).where(self.embedding.c.doc_hash == hash)
+        else:
+            statement = select(self.embedding).where(self.embedding.doc_hash == hash)
+
         result = self.session.execute(statement).all()
         return result
 
@@ -96,22 +137,31 @@ class DocEmbedder:
         response = ollama.embeddings(model="mxbai-embed-large", prompt=doctext)
         embedding = response["embedding"]
         # print(len(embedding))
-        doc_vector = self.embedding(
-            doc_hash=document_hash,
-            doc_name=docname,
-            collection_name=self.collection_name,
-            page_number=page_number,
-            document=doctext,
-            embedding=embedding)
-        try:
-            self.session.add(doc_vector)
+        if self.dburl.startswith("duckdb"):
+            doc_vector_insert = insert(self.embedding).values(doc_name=docname,
+                                                       collection_name=self.collection_name,
+                                                       page_number=page_number,
+                                                       document=doctext,
+                                                       embedding=embedding)
+            self.session.execute(doc_vector_insert)
             self.session.commit()
-        except IntegrityError as e:
-            self.session.rollback()
-            logger.warning(f"Document {docname} page {page_number} already exists in the database: {e}")
-        except ValueError as e:
-            logger.error(f"Error: {e} generated when attempting to embed the following text: \n{doctext}")
-            self.session.rollback()
+        else:
+            doc_vector = self.embedding(
+                doc_hash=document_hash,
+                doc_name=docname,
+                collection_name=self.collection_name,
+                page_number=page_number,
+                document=doctext,
+                embedding=embedding)
+            try:
+                self.session.add(doc_vector)
+                self.session.commit()
+            except IntegrityError as e:
+                self.session.rollback()
+                logger.warning(f"Document {docname} page {page_number} already exists in the database: {e}")
+            except ValueError as e:
+                logger.error(f"Error: {e} generated when attempting to embed the following text: \n{doctext}")
+                self.session.rollback()
 
     def embed_path(self, corpus_path: str):
         """

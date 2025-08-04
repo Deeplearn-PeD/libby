@@ -21,7 +21,7 @@ class LibbyInterface(LibbyDBot):
             return {}
         return {name: details['code'] for name, details in settings.models.items()}
 
-    def __init__(self, name: str = 'Libby D. Bot', languages=['pt_BR', 'en'], model: str = None, dburl: str= 'sqlite:///memory.db'):
+    def __init__(self, name: str = 'Libby D. Bot', languages=['pt_BR', 'en'], model: str = None, dburl: str= 'sqlite:///memory.db', embed_db: str = 'duckdb:///embeddings.duckdb'):
         available_models = self.load_available_models()
         if model is None:
             model = settings.default_model
@@ -31,6 +31,7 @@ class LibbyInterface(LibbyDBot):
             raise ValueError(f"Invalid model. Available models: {', '.join(available_models.keys())}")
             
         super().__init__(name=name, languages=languages, model=model, dburl=dburl)
+        self.DE = embed.DocEmbedder(col_name='embeddings', dburl=embed_db)
 
     def embed(self, corpus_path: str ='.', collection_name: str = 'embeddings'):
         """
@@ -39,7 +40,7 @@ class LibbyInterface(LibbyDBot):
         :param collection_name: Name of the document collection
         :return:
         """
-        DE = embed.DocEmbedder(collection_name, dburl=self.dburl)
+        # DE = embed.DocEmbedder(collection_name, dburl=dburl)
         print ("Processing your corpus...")
         for d in glob(os.path.join(corpus_path, '*.pdf')):
             try:
@@ -51,8 +52,8 @@ class LibbyInterface(LibbyDBot):
                 text = page.get_text()
                 if not text:
                     continue
-                DE.embed_text(text, n, page_number)
-        return DE
+                self.DE.embed_text(text, n, page_number)
+        return self.DE
 
     def answer(self, question: str, collection_name: str = 'main'):
         """
@@ -61,8 +62,8 @@ class LibbyInterface(LibbyDBot):
         :param collection_name: collection of documents on which to base the answer
         :return: Answer to the question
         """
-        DE = embed.DocEmbedder(collection_name)
-        context = DE.retrieve_docs(question, collection=collection_name, num_docs=5)
+        # DE = embed.DocEmbedder(collection_name)
+        context = self.DE.retrieve_docs(question, collection=collection_name, num_docs=5)
         # LDB = LibbyDBot(model='llama3')
         self.set_prompt(f"You are Libby D. Bot, a research Assistant")
         self.set_context(context)
@@ -91,8 +92,8 @@ class LibbyInterface(LibbyDBot):
                     return
             else:
                 prompt = input("Enter a prompt: ")
-        DE = embed.DocEmbedder("embedding")
-        context = DE.retrieve_docs(prompt,  num_docs=100)
+        # DE = embed.DocEmbedder("embedding")
+        context = self.DE.retrieve_docs(prompt,  num_docs=100)
         self.set_prompt("You are Libby D. Bot, a creative and competent writer.")
         self.set_context(context)
         response = self.ask(prompt)
