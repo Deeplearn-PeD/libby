@@ -70,7 +70,6 @@ class DocEmbedder:
         self._check_vector_exists()
         if self.dburl.startswith("duckdb"):
             self.embedding = EmbeddingDuckdb
-            col_name = col_name + "_duckdb"
         else:
             self.embedding = Embedding
         self.collection_name = col_name

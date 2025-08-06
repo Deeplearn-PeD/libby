@@ -5,7 +5,7 @@ import os
 class TestLibbyInterface(unittest.TestCase):
 
     def setUp(self):
-        self.libby = LibbyInterface()
+        self.libby = LibbyInterface(collection_name='test_collection')
 
     def test_initialization_default(self):
         self.assertEqual(self.libby.name, 'Libby D. Bot')
@@ -28,9 +28,9 @@ class TestLibbyInterface(unittest.TestCase):
         self.assertEqual(libby.model, 'llama3.2')  # Default model from config
 
     def test_embed(self):
-        de = self.libby.embed(corpus_path='test_corpus', collection_name='test_embeddings')
+        de = self.libby.embed(corpus_path='test_corpus')
         self.assertIsNotNone(de)
-        self.assertEqual(de.collection_name, 'test_embeddings')
+        self.assertEqual(de.collection_name, 'test_collection')
 
 
     def test_answer(self):

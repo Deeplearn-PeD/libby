@@ -21,8 +21,10 @@ class LibbyInterface(LibbyDBot):
             return {}
         return {name: details['code'] for name, details in settings.models.items()}
 
-    def __init__(self, name: str = 'Libby D. Bot', languages=['pt_BR', 'en'], model: str = None, dburl: str= 'sqlite:///memory.db', embed_db: str = 'duckdb:///embeddings.duckdb'):
+    def __init__(self, name: str='Libby D. Bot', collection_name: str = 'Libby D. Bot', languages=['pt_BR', 'en'], model: str = None, dburl: str= 'sqlite:///memory.db',
+                 embed_db: str = 'duckdb:///embeddings.duckdb'):
         available_models = self.load_available_models()
+        self.collection_name = collection_name
         if model is None:
             model = settings.default_model
         elif model in available_models:
@@ -31,9 +33,9 @@ class LibbyInterface(LibbyDBot):
             raise ValueError(f"Invalid model. Available models: {', '.join(available_models.keys())}")
             
         super().__init__(name=name, languages=languages, model=model, dburl=dburl)
-        self.DE = embed.DocEmbedder(col_name='embeddings', dburl=embed_db)
+        self.DE = embed.DocEmbedder(col_name=collection_name, dburl=embed_db)
 
-    def embed(self, corpus_path: str ='.', collection_name: str = 'embeddings'):
+    def embed(self, corpus_path: str ='.'):
         """
         Embed a corpus of documents
         :param corpus_path: path to a folder containing PDFs
