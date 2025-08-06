@@ -3,7 +3,7 @@ from pydantic import Field, PostgresDsn
 from typing import Dict, List, Any
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="allow")
     # pgurl: PostgresDsn
     # duckurl: str
     # openai_api_key: str
