@@ -4,12 +4,12 @@ from typing import Dict, List, Any
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
-    pgurl: PostgresDsn
-    duckurl: str
-    openai_api_key: str
-    google_api_key: str
-    ollama_key: str
-    language: str
+    # pgurl: PostgresDsn
+    # duckurl: str
+    # openai_api_key: str
+    # google_api_key: str
+    # ollama_key: str
+    # language: str
 
 
     languages: Dict[str, Dict[str, Any]] = {
