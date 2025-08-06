@@ -55,7 +55,7 @@ class EmbeddingDuckdb(Base):
 
 
 class DocEmbedder:
-    def __init__(self, col_name, dburl: str = None, create=True):
+    def __init__(self, col_name, dburl: str = 'duckdb:///:memory:', create=True):
         self.dburl = dburl if dburl is not None else os.getenv("PGURL")
         try:
             if ':memory:' in self.dburl:
