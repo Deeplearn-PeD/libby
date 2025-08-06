@@ -4,14 +4,20 @@ from .memory import History
 import loguru
 logger = loguru.logger
 
-
+PROVIDERS = {
+    "llama3.2": "llama",
+    "gemma3": "google",
+    "gpt-4o": "openai",
+    "qwen3": "qwen",
+    "gemini": "google"
+}
 
 class LibbyDBot(Persona):
     def __init__(self, name: str = 'Libby D. Bot', languages=['pt_BR', 'en'], model: str = 'gpt-4o', dburl: str= 'sqlite:///memory.db'):
         super().__init__(name=name, languages=languages, model=model)
         self.dburl = dburl
-        self.llm = LangModel(model=model)
-        self.struct_llm = StructuredLangModel(model=model)
+        self.llm = LangModel(model=model, provider=PROVIDERS[model])
+        self.struct_llm = StructuredLangModel(model=model, provider=PROVIDERS[model])
         self.prompt_template = None
         self.context_prompt = ""
         self.history = History(dburl)
