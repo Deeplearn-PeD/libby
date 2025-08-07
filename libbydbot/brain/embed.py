@@ -274,6 +274,20 @@ class DocEmbedder:
         data = "\n".join(pages)
         return data
 
+    def get_embedded_documents(self):
+        """
+        Get a list of all embedded documents.
+        :return: List of tuples (doc_name, collection_name) for all embedded documents
+        """
+        with Session(self.engine) as session:
+            if self.dburl.startswith("duckdb"):
+                statement = select(self.embedding.c.doc_name, self.embedding.c.collection_name).distinct()
+            else:
+                statement = select(self.embedding.doc_name, self.embedding.collection_name).distinct()
+            
+            result = session.execute(statement).fetchall()
+            return [(row[0], row[1]) for row in result]
+
     def __del__(self):
         with Session(self.engine) as session:
             session.close()
