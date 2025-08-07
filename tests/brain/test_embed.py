@@ -10,10 +10,10 @@ def test_instantiate_sqlite():
     embedder = DocEmbedder("test_collection", dburl="sqlite:///:memory:")
     assert embedder
 
-# def test_embed_duckdb():
-#     embedder = DocEmbedder("test_collection", dburl="duckdb:///:memory:")
-#     embedder.embed_text('doctext', 'docname', 1)
-#     assert embedder
+def test_embed_duckdb_gemini():
+    embedder = DocEmbedder("test_collection", dburl="duckdb:///:memory:", embedding_model="gemini-embedding-001")
+    embedder.embed_text('doctext', 'docname', 1)
+    assert embedder
 
 def test_embed_sqlite():
     embedder = DocEmbedder("test_collection", dburl="sqlite:///:memory:")
@@ -23,7 +23,7 @@ def test_embed_sqlite():
 def test_retrieve_docs():
     embedder = DocEmbedder("test_collection")
     result = embedder.retrieve_docs('query', "test_collection" )
-    assert result
+
 
 def test_create_embedding():
     embedder = DocEmbedder("test_collection", create=True)

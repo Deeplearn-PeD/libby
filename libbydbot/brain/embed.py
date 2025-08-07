@@ -7,7 +7,8 @@ import dotenv
 import fitz
 import loguru
 import ollama
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from fitz import EmptyFileError
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import Column, Integer, String, Sequence, text, create_engine, select, Table, insert, func
@@ -62,17 +63,16 @@ class DocEmbedder:
         
         # Configure Google AI if using Gemini model
         if embedding_model == 'gemini-embedding-001':
-            genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+            self.client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+        else:
+            self.client = ollama.Client(host=os.getenv("OLLLAMA_HOST", "http://localhost:11434"))
+
         try:
-            if ':memory:' in self.dburl:
-                self.engine = create_engine(self.dburl)
-            else:
-                self.engine = create_engine(self.dburl)
-                # self.engine = create_engine(self.dburl.split('/')[-1])
+            self.engine = create_engine(self.dburl)
         except NoSuchModuleError as exc:
             logger.error(f"Invalid dburl string passed to DocEmbedder: \n{exc}")
             raise exc
-        self.session = Session(self.engine)
+        # self.session = Session(self.engine)
         self._check_vector_exists()
         if self.dburl.startswith("duckdb"):
             self.embedding = EmbeddingDuckdb
@@ -99,14 +99,15 @@ class DocEmbedder:
         Add a vector column named embedding to the database
         """
         # Check if the column embedding already exists
-        result = self.session.execute(text("SELECT * FROM information_schema.columns WHERE table_name = 'embedding_duckdb' AND column_name = 'embedding';")).first()
+        session = Session(self.engine)
+        result = session.execute(text("SELECT * FROM information_schema.columns WHERE table_name = 'embedding_duckdb' AND column_name = 'embedding';")).first()
         if result is None:
             # If it does not exist, add the column
             logger.info("Adding vector column to DuckDB embedding table.")
             dimension = self._get_embedding_dimension()
-            self.session.execute(text(f"ALTER TABLE embedding_duckdb ADD COLUMN embedding FLOAT[{dimension}];"))
+            session.execute(text(f"ALTER TABLE embedding_duckdb ADD COLUMN embedding FLOAT[{dimension}];"))
 
-        self.session.commit()
+        session.commit()
 
 
     def _get_embedding_dimension(self):
@@ -114,7 +115,7 @@ class DocEmbedder:
         Get the embedding dimension based on the model
         """
         if self.embedding_model == 'gemini-embedding-001':
-            return 768
+            return 1536
         else:  # mxbai-embed-large and other Ollama models
             return 1024
 
@@ -123,12 +124,12 @@ class DocEmbedder:
         Generate embedding using the specified model
         """
         if self.embedding_model == 'gemini-embedding-001':
-            result = genai.embed_content(
-                model="models/embedding-001",
-                content=text,
-                task_type="retrieval_document"
+            result = self.client.models.embed_content(
+                model="gemini-embedding-001",
+                contents=text,
+                config = types.EmbedContentConfig(output_dimensionality=self._get_embedding_dimension(), task_type="retrieval_document")
             )
-            return result['embedding']
+            return result.embeddings[0].values
         else:
             response = ollama.embeddings(model=self.embedding_model, prompt=text)
             return response["embedding"]
@@ -137,12 +138,13 @@ class DocEmbedder:
         """
         Check if the vector extension exists in the database
         """
+        session = Session(self.engine)
         if self.dburl.startswith("postgresql"):
-            self.session.execute(text('CREATE EXTENSION IF NOT EXISTS vector;'))
+            session.execute(text('CREATE EXTENSION IF NOT EXISTS vector;'))
 
         elif self.dburl.startswith("duckdb"):
-            self.session.execute(text('INSTALL vss;LOAD vss;'))
-        self.session.commit()
+            session.execute(text('INSTALL vss;LOAD vss;'))
+        session.commit()
 
     def _check_existing(self, hash: str):
         """
@@ -154,8 +156,8 @@ class DocEmbedder:
             statement = select(self.embedding).where(self.embedding.c.doc_hash == hash)
         else:
             statement = select(self.embedding).where(self.embedding.doc_hash == hash)
-
-        result = self.session.execute(statement).all()
+        with Session(self.engine) as session:
+            result = session.execute(statement).all()
         return result
 
     def embed_text(self, doctext: str, docname: str, page_number: str):
@@ -173,31 +175,33 @@ class DocEmbedder:
         doctext = doctext.replace("\x00", "\uFFFD")
         embedding = self._generate_embedding(doctext)
         # print(len(embedding))
-        if self.dburl.startswith("duckdb"):
-            doc_vector_insert = insert(self.embedding).values(doc_name=docname,
-                                                       collection_name=self.collection_name,
-                                                       page_number=page_number,
-                                                       document=doctext,
-                                                       embedding=embedding)
-            self.session.execute(doc_vector_insert)
-            self.session.commit()
-        else:
-            doc_vector = self.embedding(
-                doc_hash=document_hash,
-                doc_name=docname,
-                collection_name=self.collection_name,
-                page_number=page_number,
-                document=doctext,
-                embedding=embedding)
-            try:
-                self.session.add(doc_vector)
-                self.session.commit()
-            except IntegrityError as e:
-                self.session.rollback()
-                logger.warning(f"Document {docname} page {page_number} already exists in the database: {e}")
-            except ValueError as e:
-                logger.error(f"Error: {e} generated when attempting to embed the following text: \n{doctext}")
-                self.session.rollback()
+        with Session(self.engine) as session:
+            if self.dburl.startswith("duckdb"):
+                doc_vector_insert = insert(self.embedding).values(doc_name=docname,
+                                                           collection_name=self.collection_name,
+                                                           page_number=page_number,
+                                                           document=doctext,
+                                                           embedding=embedding)
+
+                session.execute(doc_vector_insert)
+                session.commit()
+            else:
+                doc_vector = self.embedding(
+                    doc_hash=document_hash,
+                    doc_name=docname,
+                    collection_name=self.collection_name,
+                    page_number=page_number,
+                    document=doctext,
+                    embedding=embedding)
+                try:
+                    session.add(doc_vector)
+                    session.commit()
+                except IntegrityError as e:
+                    session.rollback()
+                    logger.warning(f"Document {docname} page {page_number} already exists in the database: {e}")
+                except ValueError as e:
+                    logger.error(f"Error: {e} generated when attempting to embed the following text: \n{doctext}")
+                    session.rollback()
 
     def embed_path(self, corpus_path: str):
         """
@@ -228,46 +232,48 @@ class DocEmbedder:
         query_embedding = self._generate_embedding(query)
         # print(dir(self.schema.columns))
         dimension = self._get_embedding_dimension()
-        if collection:
-            if self.dburl.startswith("duckdb"):
-                query_text = f'select document from embedding_duckdb where collection_name = :collection_name order by array_cosine_similarity(embedding, CAST(:embedding as FLOAT[{dimension}])) limit :num_docs;'
-                query = text(query_text)
-                result = self.session.execute(query, {'collection_name': collection, 'embedding': query_embedding, 'num_docs': num_docs})
-                pages = [row[0] for row in result.fetchall()]
-                # statement = (
-                #     select(self.embedding.c.document).where(self.embedding.c.collection_name == collection)
-                #     .order_by(func.array_distance(self.embedding.c.embedding, response["embedding"]))
-                #     .limit(num_docs)
-                # )
+        with Session(self.engine) as session:
+            if collection:
+                if self.dburl.startswith("duckdb"):
+                    query_text = f'select document from embedding_duckdb where collection_name = :collection_name order by array_cosine_similarity(embedding, CAST(:embedding as FLOAT[{dimension}])) limit :num_docs;'
+                    query = text(query_text)
+                    result = session.execute(query, {'collection_name': collection, 'embedding': query_embedding, 'num_docs': num_docs})
+                    pages = [row[0] for row in result.fetchall()]
+                    # statement = (
+                    #     select(self.embedding.c.document).where(self.embedding.c.collection_name == collection)
+                    #     .order_by(func.array_distance(self.embedding.c.embedding, response["embedding"]))
+                    #     .limit(num_docs)
+                    # )
+                else:
+                    # For PostgreSQL
+                    statement = (
+                        select(self.embedding.document).where(self.embedding.collection_name == collection)
+                        .order_by(self.embedding.embedding.l2_distance(query_embedding))
+                        .limit(num_docs)
+                    )
+                    pages = session.scalars(statement)
             else:
-                # For PostgreSQL
-                statement = (
-                    select(self.embedding.document).where(self.embedding.collection_name == collection)
-                    .order_by(self.embedding.embedding.l2_distance(query_embedding))
-                    .limit(num_docs)
-                )
-                pages = self.session.scalars(statement)
-        else:
-            if self.dburl.startswith("duckdb"):
-                query_text = f'select document from embedding_duckdb order by array_cosine_similarity(embedding, CAST(:embedding as FLOAT[{dimension}])) limit :num_docs;'
-                query = text(query_text)
-                result = self.session.execute(query, {'embedding': query_embedding, 'num_docs': num_docs})
-                pages = [row[0] for row in result.fetchall()]
-                # statement = (
-                #     select(self.embedding.c.document)
-                #     .order_by(func.array_distance(self.embedding.c.embedding, response["embedding"]))
-                #     .limit(num_docs)
-                # )
-            else:
-                # For PostgreSQL
-                statement = (
-                    select(self.embedding.document)
-                    .order_by(self.embedding.embedding.l2_distance(query_embedding))
-                    .limit(num_docs)
-                )
-                pages = self.session.scalars(statement)
+                if self.dburl.startswith("duckdb"):
+                    query_text = f'select document from embedding_duckdb order by array_cosine_similarity(embedding, CAST(:embedding as FLOAT[{dimension}])) limit :num_docs;'
+                    query = text(query_text)
+                    result = session.execute(query, {'embedding': query_embedding, 'num_docs': num_docs})
+                    pages = [row[0] for row in result.fetchall()]
+                    # statement = (
+                    #     select(self.embedding.c.document)
+                    #     .order_by(func.array_distance(self.embedding.c.embedding, response["embedding"]))
+                    #     .limit(num_docs)
+                    # )
+                else:
+                    # For PostgreSQL
+                    statement = (
+                        select(self.embedding.document)
+                        .order_by(self.embedding.embedding.l2_distance(query_embedding))
+                        .limit(num_docs)
+                    )
+                    pages = session.scalars(statement)
         data = "\n".join(pages)
         return data
 
     def __del__(self):
-        self.session.close()
+        with Session(self.engine) as session:
+            session.close()
