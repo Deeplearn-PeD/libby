@@ -7,6 +7,7 @@ import dotenv
 import fitz
 import loguru
 import ollama
+import google.generativeai as genai
 from fitz import EmptyFileError
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import Column, Integer, String, Sequence, text, create_engine, select, Table, insert, func
@@ -55,8 +56,13 @@ class EmbeddingDuckdb(Base):
 
 
 class DocEmbedder:
-    def __init__(self, col_name, dburl: str = 'duckdb:///:memory:', create=True):
+    def __init__(self, col_name, dburl: str = 'duckdb:///:memory:', create=True, embedding_model: str = 'mxbai-embed-large'):
         self.dburl = dburl if dburl is not None else os.getenv("PGURL")
+        self.embedding_model = embedding_model
+        
+        # Configure Google AI if using Gemini model
+        if embedding_model == 'gemini-embedding-001':
+            genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
         try:
             if ':memory:' in self.dburl:
                 self.engine = create_engine(self.dburl)
@@ -97,10 +103,35 @@ class DocEmbedder:
         if result is None:
             # If it does not exist, add the column
             logger.info("Adding vector column to DuckDB embedding table.")
-            self.session.execute(text("ALTER TABLE embedding_duckdb ADD COLUMN embedding FLOAT[1024];"))
+            dimension = self._get_embedding_dimension()
+            self.session.execute(text(f"ALTER TABLE embedding_duckdb ADD COLUMN embedding FLOAT[{dimension}];"))
 
         self.session.commit()
 
+
+    def _get_embedding_dimension(self):
+        """
+        Get the embedding dimension based on the model
+        """
+        if self.embedding_model == 'gemini-embedding-001':
+            return 768
+        else:  # mxbai-embed-large and other Ollama models
+            return 1024
+
+    def _generate_embedding(self, text: str):
+        """
+        Generate embedding using the specified model
+        """
+        if self.embedding_model == 'gemini-embedding-001':
+            result = genai.embed_content(
+                model="models/embedding-001",
+                content=text,
+                task_type="retrieval_document"
+            )
+            return result['embedding']
+        else:
+            response = ollama.embeddings(model=self.embedding_model, prompt=text)
+            return response["embedding"]
 
     def _check_vector_exists(self):
         """
@@ -140,8 +171,7 @@ class DocEmbedder:
             logger.info(f"Document {docname} page {page_number} already exists in the database, skipping.")
             return
         doctext = doctext.replace("\x00", "\uFFFD")
-        response = ollama.embeddings(model="mxbai-embed-large", prompt=doctext)
-        embedding = response["embedding"]
+        embedding = self._generate_embedding(doctext)
         # print(len(embedding))
         if self.dburl.startswith("duckdb"):
             doc_vector_insert = insert(self.embedding).values(doc_name=docname,
@@ -195,12 +225,14 @@ class DocEmbedder:
         :param num_docs: number of documents to retrieve
         :return: all documents as a string
         """
-        response = ollama.embeddings(model="mxbai-embed-large", prompt=query)
+        query_embedding = self._generate_embedding(query)
         # print(dir(self.schema.columns))
+        dimension = self._get_embedding_dimension()
         if collection:
             if self.dburl.startswith("duckdb"):
-                query = text('select document from embedding_duckdb where collection_name = :collection_name order by array_cosine_similarity(embedding, CAST(:embedding as FLOAT[1024])) limit :num_docs;')
-                result = self.session.execute(query, {'collection_name': collection, 'embedding': response["embedding"], 'num_docs': num_docs})
+                query_text = f'select document from embedding_duckdb where collection_name = :collection_name order by array_cosine_similarity(embedding, CAST(:embedding as FLOAT[{dimension}])) limit :num_docs;'
+                query = text(query_text)
+                result = self.session.execute(query, {'collection_name': collection, 'embedding': query_embedding, 'num_docs': num_docs})
                 pages = [row[0] for row in result.fetchall()]
                 # statement = (
                 #     select(self.embedding.c.document).where(self.embedding.c.collection_name == collection)
@@ -211,14 +243,15 @@ class DocEmbedder:
                 # For PostgreSQL
                 statement = (
                     select(self.embedding.document).where(self.embedding.collection_name == collection)
-                    .order_by(self.embedding.embedding.l2_distance(response["embedding"]))
+                    .order_by(self.embedding.embedding.l2_distance(query_embedding))
                     .limit(num_docs)
                 )
                 pages = self.session.scalars(statement)
         else:
             if self.dburl.startswith("duckdb"):
-                query = text('select document from embedding_duckdb order by array_cosine_similarity(embedding, CAST(:embedding as FLOAT[1024])) limit :num_docs;')
-                result = self.session.execute(query, {'embedding': response["embedding"], 'num_docs': num_docs})
+                query_text = f'select document from embedding_duckdb order by array_cosine_similarity(embedding, CAST(:embedding as FLOAT[{dimension}])) limit :num_docs;'
+                query = text(query_text)
+                result = self.session.execute(query, {'embedding': query_embedding, 'num_docs': num_docs})
                 pages = [row[0] for row in result.fetchall()]
                 # statement = (
                 #     select(self.embedding.c.document)
@@ -229,7 +262,7 @@ class DocEmbedder:
                 # For PostgreSQL
                 statement = (
                     select(self.embedding.document)
-                    .order_by(self.embedding.embedding.l2_distance(response["embedding"]))
+                    .order_by(self.embedding.embedding.l2_distance(query_embedding))
                     .limit(num_docs)
                 )
                 pages = self.session.scalars(statement)
