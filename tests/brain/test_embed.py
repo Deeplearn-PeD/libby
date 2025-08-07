@@ -35,3 +35,27 @@ def test_create_embedding():
     assert len(res)
     assert 'dengue' in res
 
+
+def test_get_embedded_documents():
+    embedder = DocEmbedder('test_collection', dburl='duckdb:///:memory:', create=True)
+    
+    # Embed some test documents
+    embedder.embed_text("First test document", "doc1.pdf", 1)
+    embedder.embed_text("Second test document", "doc2.pdf", 1)
+    embedder.embed_text("Third test document", "doc1.pdf", 2)  # Same doc, different page
+    
+    # Get embedded documents
+    embedded_docs = embedder.get_embedded_documents()
+    
+    # Should return list of tuples (doc_name, collection_name)
+    assert isinstance(embedded_docs, list)
+    assert len(embedded_docs) == 2  # Only 2 unique documents
+    
+    # Check that we have the expected documents
+    doc_names = [doc[0] for doc in embedded_docs]
+    collection_names = [doc[1] for doc in embedded_docs]
+    
+    assert "doc1.pdf" in doc_names
+    assert "doc2.pdf" in doc_names
+    assert all(col == "test_collection" for col in collection_names)
+
