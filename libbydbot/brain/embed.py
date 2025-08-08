@@ -62,10 +62,10 @@ class DocEmbedder:
         self.embedding_model = embedding_model
         
         # Configure Google AI if using Gemini model
-        if embedding_model == 'gemini-embedding-001':
+        if "gemini" in embedding_model.lower():
             self.client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
         else:
-            self.client = ollama.Client(host=os.getenv("OLLLAMA_HOST", "http://localhost:11434"))
+            self.client = ollama.Client(host=os.getenv("OLLAMA_HOST", "http://localhost:11434"))
 
         try:
             self.engine = create_engine(self.dburl)
