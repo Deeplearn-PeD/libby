@@ -68,6 +68,7 @@ class DocEmbedder:
             self.client = ollama.Client(host=os.getenv("OLLAMA_HOST", "http://localhost:11434"))
 
         try:
+            logger.info(f"Connecting to database with dburl: {self.dburl}")
             self.engine = create_engine(self.dburl)
         except NoSuchModuleError as exc:
             logger.error(f"Invalid dburl string passed to DocEmbedder: \n{exc}")
