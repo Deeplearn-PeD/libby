@@ -13,7 +13,7 @@ dependencies = [
     "pymupdf<2.0.0,>=1.24.1",
     "loguru<1.0.0,>=0.7.2",
     "psycopg2-binary<3.0.0,>=2.9.9",
-    "base-ai-agent @ git+https://github.com/Deeplearn-PeD/base-ai-agent.git",
+    "base-ai-agent @ git+https://github.com/Deeplearn-PeD/base-ai-agent.git@main",
     "sqlmodel<1.0.0,>=0.0.18",
     "pymupdf4llm<1.0.0,>=0.0.5",
     "sqlite-vss>=0.1.2",
@@ -25,7 +25,7 @@ dependencies = [
     "google-genai>=1.2.0",
 ]
 name = "libby"
-version = "0.4.1"
+version = "0.4.2"
 description = "Libby the Librarian Bot."
 readme = "README.md"
 
