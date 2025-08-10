@@ -55,6 +55,18 @@ class EmbeddingDuckdb(Base):
     document = Column(String)
     # embedding = Column(Vector(1024, dimensions=1024)) # DuckDB does not support vector types natively
 
+# SQLite with sqlite-vec extension
+class EmbeddingSqlite(Base):
+    __tablename__ = 'embedding_sqlite'
+    __table_args__ = {'extend_existing': True}
+    id = Column(Integer, autoincrement=True, primary_key=True)
+    collection_name = Column(String)
+    doc_name = Column(String)
+    page_number = Column(Integer)
+    doc_hash = Column(String, unique=True)
+    document = Column(String)
+    # embedding will be handled as BLOB for sqlite-vec
+
 
 class DocEmbedder:
     def __init__(self, col_name, dburl: str = 'duckdb:///:memory:', create=True, embedding_model: str = 'mxbai-embed-large'):
@@ -78,6 +90,8 @@ class DocEmbedder:
         self._check_vector_exists()
         if self.dburl.startswith("duckdb"):
             self.embedding = EmbeddingDuckdb
+        elif self.dburl.startswith("sqlite"):
+            self.embedding = EmbeddingSqlite
         else:
             self.embedding = Embedding
         self.collection_name = col_name
@@ -88,6 +102,12 @@ class DocEmbedder:
                 self._add_duckdb_vector_column()
                 Base.metadata.remove(Base.metadata.tables['embedding_duckdb'])
                 self.embedding = Table('embedding_duckdb', Base.metadata, autoload_with=self.engine)
+            elif self.dburl.startswith("sqlite"):
+                Base.metadata.create_all(self.engine, tables=[Base.metadata.sorted_tables[2]], checkfirst=True)
+                # Add vector columns compatible with sqlite-vec
+                self._add_sqlite_vector_column()
+                Base.metadata.remove(Base.metadata.tables['embedding_sqlite'])
+                self.embedding = Table('embedding_sqlite', Base.metadata, autoload_with=self.engine)
             else:
                 Base.metadata.create_all(self.engine, tables=[Base.metadata.sorted_tables[0]], checkfirst=True)
 
@@ -109,6 +129,22 @@ class DocEmbedder:
             dimension = self._get_embedding_dimension()
             session.execute(text(f"ALTER TABLE embedding_duckdb ADD COLUMN embedding FLOAT[{dimension}];"))
 
+        session.commit()
+
+    def _add_sqlite_vector_column(self):
+        """
+        Add a vector column named embedding to the SQLite database using sqlite-vec
+        """
+        session = Session(self.engine)
+        # Check if the column embedding already exists
+        result = session.execute(text("PRAGMA table_info(embedding_sqlite);")).fetchall()
+        column_names = [row[1] for row in result]
+        
+        if 'embedding' not in column_names:
+            # If it does not exist, add the column as BLOB for sqlite-vec
+            logger.info("Adding vector column to SQLite embedding table.")
+            session.execute(text("ALTER TABLE embedding_sqlite ADD COLUMN embedding BLOB;"))
+        
         session.commit()
 
 
@@ -143,9 +179,15 @@ class DocEmbedder:
         session = Session(self.engine)
         if self.dburl.startswith("postgresql"):
             session.execute(text('CREATE EXTENSION IF NOT EXISTS vector;'))
-
         elif self.dburl.startswith("duckdb"):
             session.execute(text('INSTALL vss;LOAD vss;'))
+        elif self.dburl.startswith("sqlite"):
+            # Load sqlite-vec extension
+            try:
+                session.execute(text(".load sqlite-vec"))
+            except Exception:
+                # Try alternative loading method
+                session.execute(text("SELECT load_extension('sqlite-vec')"))
         session.commit()
 
     def _check_existing(self, hash: str):
@@ -154,7 +196,7 @@ class DocEmbedder:
         :param hash: SHA256 hash of the document
         :return:
         """
-        if self.dburl.startswith("duckdb"):
+        if self.dburl.startswith("duckdb") or self.dburl.startswith("sqlite"):
             statement = select(self.embedding).where(self.embedding.c.doc_hash == hash)
         else:
             statement = select(self.embedding).where(self.embedding.doc_hash == hash)
@@ -178,12 +220,22 @@ class DocEmbedder:
         embedding = self._generate_embedding(doctext)
         # print(len(embedding))
         with Session(self.engine) as session:
-            if self.dburl.startswith("duckdb"):
-                doc_vector_insert = insert(self.embedding).values(doc_name=docname,
-                                                           collection_name=self.collection_name,
-                                                           page_number=page_number,
-                                                           document=doctext,
-                                                           embedding=embedding)
+            if self.dburl.startswith("duckdb") or self.dburl.startswith("sqlite"):
+                # Convert embedding to bytes for sqlite-vec if using SQLite
+                if self.dburl.startswith("sqlite"):
+                    import struct
+                    embedding_bytes = struct.pack(f'{len(embedding)}f', *embedding)
+                    embedding_value = embedding_bytes
+                else:
+                    embedding_value = embedding
+                
+                doc_vector_insert = insert(self.embedding).values(
+                    doc_hash=document_hash,
+                    doc_name=docname,
+                    collection_name=self.collection_name,
+                    page_number=page_number,
+                    document=doctext,
+                    embedding=embedding_value)
 
                 session.execute(doc_vector_insert)
                 session.commit()
@@ -241,13 +293,16 @@ class DocEmbedder:
                     query = text(query_text)
                     result = session.execute(query, {'collection_name': collection, 'embedding': query_embedding, 'num_docs': num_docs})
                     pages = [row[0] for row in result.fetchall()]
-                    # statement = (
-                    #     select(self.embedding.c.document).where(self.embedding.c.collection_name == collection)
-                    #     .order_by(func.array_distance(self.embedding.c.embedding, response["embedding"]))
-                    #     .limit(num_docs)
-                    # )
+                elif self.dburl.startswith("sqlite"):
+                    # Convert query embedding to bytes for sqlite-vec
+                    import struct
+                    query_embedding_bytes = struct.pack(f'{len(query_embedding)}f', *query_embedding)
+                    query_text = 'select document from embedding_sqlite where collection_name = :collection_name order by vec_distance_cosine(embedding, :embedding) limit :num_docs;'
+                    query = text(query_text)
+                    result = session.execute(query, {'collection_name': collection, 'embedding': query_embedding_bytes, 'num_docs': num_docs})
+                    pages = [row[0] for row in result.fetchall()]
                 else:
-                    # For PostgreSQL or SQlite
+                    # For PostgreSQL
                     statement = (
                         select(self.embedding.document).where(self.embedding.collection_name == collection)
                         .order_by(self.embedding.embedding.l2_distance(query_embedding))
@@ -260,11 +315,14 @@ class DocEmbedder:
                     query = text(query_text)
                     result = session.execute(query, {'embedding': query_embedding, 'num_docs': num_docs})
                     pages = [row[0] for row in result.fetchall()]
-                    # statement = (
-                    #     select(self.embedding.c.document)
-                    #     .order_by(func.array_distance(self.embedding.c.embedding, response["embedding"]))
-                    #     .limit(num_docs)
-                    # )
+                elif self.dburl.startswith("sqlite"):
+                    # Convert query embedding to bytes for sqlite-vec
+                    import struct
+                    query_embedding_bytes = struct.pack(f'{len(query_embedding)}f', *query_embedding)
+                    query_text = 'select document from embedding_sqlite order by vec_distance_cosine(embedding, :embedding) limit :num_docs;'
+                    query = text(query_text)
+                    result = session.execute(query, {'embedding': query_embedding_bytes, 'num_docs': num_docs})
+                    pages = [row[0] for row in result.fetchall()]
                 else:
                     # For PostgreSQL
                     statement = (
@@ -282,7 +340,7 @@ class DocEmbedder:
         :return: List of tuples (doc_name, collection_name) for all embedded documents
         """
         with Session(self.engine) as session:
-            if self.dburl.startswith("duckdb"):
+            if self.dburl.startswith("duckdb") or self.dburl.startswith("sqlite"):
                 statement = select(self.embedding.c.doc_name, self.embedding.c.collection_name).distinct()
             else:
                 statement = select(self.embedding.doc_name, self.embedding.collection_name).distinct()
