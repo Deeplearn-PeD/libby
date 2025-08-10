@@ -2,6 +2,8 @@
 import os
 from glob import glob
 from hashlib import sha256
+import sqlite3
+from urllib.parse import urlparse
 
 import dotenv
 import fitz
@@ -11,7 +13,8 @@ from google import genai
 from google.genai import types
 from fitz import EmptyFileError
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Column, Integer, String, Sequence, text, create_engine, select, Table, insert, func
+import sqlite_vec
+from sqlalchemy import event, Column, Integer, String, Sequence, text, create_engine, select, Table, insert, func
 from sqlalchemy.exc import IntegrityError, NoSuchModuleError
 from sqlalchemy.orm import DeclarativeBase, Session
 from duckdb import array_type
@@ -31,6 +34,7 @@ class Base(DeclarativeBase):
 
 
 class Embedding(Base):
+    # To use with Postgresql.
     __tablename__ = 'embedding'
     __table_args__ = {'extend_existing': True}
     # id_seq = Sequence("id_seq", metadata=Base.metadata)
@@ -68,11 +72,13 @@ class EmbeddingSqlite(Base):
     # embedding will be handled as BLOB for sqlite-vec
 
 
+
+
 class DocEmbedder:
     def __init__(self, col_name, dburl: str = 'duckdb:///:memory:', create=True, embedding_model: str = 'mxbai-embed-large'):
         self.dburl = dburl if dburl is not None else os.getenv("PGURL")
         self.embedding_model = embedding_model
-        
+
         # Configure Google AI if using Gemini model
         if "gemini" in embedding_model.lower():
             self.client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
@@ -84,13 +90,13 @@ class DocEmbedder:
             self.engine = create_engine(self.dburl)
         except NoSuchModuleError as exc:
             logger.error(f"Invalid dburl string passed to DocEmbedder: \n{exc}")
-            self.engine = create_engine("duckdb:///data/embedding.duckdb")  # Fallback to in-memory DuckDB
+            self.engine = create_engine("sqlite:///data/embedding.db")  # Fallback to in-memory DuckDB
             # raise exc
-        # self.session = Session(self.engine)
         self._check_vector_exists()
         if self.dburl.startswith("duckdb"):
             self.embedding = EmbeddingDuckdb
         elif self.dburl.startswith("sqlite"):
+            self._get_sqlite_connection()
             self.embedding = EmbeddingSqlite
         else:
             self.embedding = Embedding
@@ -110,6 +116,15 @@ class DocEmbedder:
                 self.embedding = Table('embedding_sqlite', Base.metadata, autoload_with=self.engine)
             else:
                 Base.metadata.create_all(self.engine, tables=[Base.metadata.sorted_tables[0]], checkfirst=True)
+
+    def _get_sqlite_connection(self):
+        dbpath = urlparse(self.dburl).path
+        connection = sqlite3.connect(dbpath[1:])
+        connection.row_factory = sqlite3.Row
+        connection.enable_load_extension(True)
+        sqlite_vec.load(connection)
+        connection.enable_load_extension(False)
+        return connection
 
     @property
     def embeddings_list(self):
@@ -135,15 +150,16 @@ class DocEmbedder:
         """
         Add a vector column named embedding to the SQLite database using sqlite-vec
         """
-        session = Session(self.engine)
+        session = self._get_sqlite_connection() #get a connection
         # Check if the column embedding already exists
-        result = session.execute(text("PRAGMA table_info(embedding_sqlite);")).fetchall()
+        result = session.execute("PRAGMA table_info(embedding_sqlite);").fetchall()
         column_names = [row[1] for row in result]
         
         if 'embedding' not in column_names:
             # If it does not exist, add the column as BLOB for sqlite-vec
+            dimension = self._get_embedding_dimension()
             logger.info("Adding vector column to SQLite embedding table.")
-            session.execute(text("ALTER TABLE embedding_sqlite ADD COLUMN embedding BLOB;"))
+            session.execute(f"ALTER TABLE embedding_sqlite ADD COLUMN vec0(embedding float[dimension]);")
         
         session.commit()
 
@@ -182,12 +198,11 @@ class DocEmbedder:
         elif self.dburl.startswith("duckdb"):
             session.execute(text('INSTALL vss;LOAD vss;'))
         elif self.dburl.startswith("sqlite"):
-            # Load sqlite-vec extension
             try:
-                session.execute(text(".load sqlite-vec"))
-            except Exception:
-                # Try alternative loading method
-                session.execute(text("SELECT load_extension('sqlite-vec')"))
+                sqlite_version, vec_version = session.execute(text("SELECT sqlite_version(), vec_version()")).fetchone()
+                logger.info(f"SQLite version: {sqlite_version}, vector extension version: {vec_version}")
+            except Exception as e:
+                logger.error(f"Error checking vector extension: {e}")
         session.commit()
 
     def _check_existing(self, hash: str):
