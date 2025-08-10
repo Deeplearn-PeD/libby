@@ -247,7 +247,7 @@ class DocEmbedder:
                     #     .limit(num_docs)
                     # )
                 else:
-                    # For PostgreSQL
+                    # For PostgreSQL or SQlite
                     statement = (
                         select(self.embedding.document).where(self.embedding.collection_name == collection)
                         .order_by(self.embedding.embedding.l2_distance(query_embedding))
