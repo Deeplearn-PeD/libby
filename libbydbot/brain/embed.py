@@ -132,9 +132,9 @@ class DocEmbedder:
         dbpath = urlparse(self.dburl).path
         # Handle in-memory databases
         if dbpath == "/:memory:":
-            connection = sqlite3.connect(":memory:")
+            connection = sqlite3.connect(":memory:", check_same_thread=False)
         else:
-            connection = sqlite3.connect(dbpath[1:])
+            connection = sqlite3.connect(dbpath[1:], check_same_thread=False)
         connection.row_factory = sqlite3.Row
         connection.enable_load_extension(True)
         sqlite_vec.load(connection)
