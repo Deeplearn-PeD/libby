@@ -21,7 +21,7 @@ dependencies = [
     "duckdb-engine>=0.14.0",
     "pydantic-settings>=2.7.1",
     "pytest>=8.3.4",
-    "sqlite-vec (>=0.1.6,<0.2.0)",
+    "sqlite-vec>=0.1.6",
     "google-genai>=1.2.0",
 ]
 name = "libby"

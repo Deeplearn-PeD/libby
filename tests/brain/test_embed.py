@@ -3,7 +3,7 @@ from libbydbot.brain.embed import DocEmbedder
 
 
 def test_embed_text():
-    embedder = DocEmbedder("test_collection", dburl='duckdb:///:memory:')
+    embedder = DocEmbedder("test_collection", dburl='sqlite:///embedding.db')
     embedder.embed_text('doctext1', 'docname', 1)
 
 def test_instantiate_sqlite():
@@ -15,20 +15,21 @@ def test_embed_duckdb_gemini():
     embedder.embed_text('doctext', 'docname', 1)
     assert embedder
 
-def test_embed_sqlite():
+def test_embed_sqlite_memory():
     embedder = DocEmbedder("test_collection", dburl="sqlite:///:memory:")
     embedder.embed_text('doctext', 'docname', 1)
-    assert embedder
+    edocs = embedder.get_embedded_documents()
+    assert len(edocs) == 1
 
 def test_retrieve_docs():
-    embedder = DocEmbedder("test_collection")
+    embedder = DocEmbedder("test_collection", dburl='sqlite:///embedding.db')
     result = embedder.retrieve_docs('query', "test_collection" )
 
 
 def test_create_embedding():
-    embedder = DocEmbedder("test_collection", create=True)
+    embedder = DocEmbedder("test_collection", dburl='sqlite:///embedding.db')
     assert 'embedding' in embedder.embeddings_list
-    assert embedder.embedding is not None
+    assert embedder.embedding is None # No ORM model when using SQLite
     embedder.embed_text('Our research also sheds light on longer-term trends linking the intensity of dengue epidemics ',
                         'docname', 1)
     res = embedder.retrieve_docs('dengue', "test_collection")
@@ -37,7 +38,7 @@ def test_create_embedding():
 
 
 def test_get_embedded_documents():
-    embedder = DocEmbedder('test_collection', dburl='duckdb:///:memory:', create=True)
+    embedder = DocEmbedder('test_collection', dburl='duckdb:///:memory:')
     
     # Embed some test documents
     embedder.embed_text("First test document", "doc1.pdf", 1)

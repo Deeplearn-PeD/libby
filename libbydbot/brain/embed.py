@@ -59,18 +59,6 @@ class EmbeddingDuckdb(Base):
     document = Column(String)
     # embedding = Column(Vector(1024, dimensions=1024)) # DuckDB does not support vector types natively
 
-# SQLite with sqlite-vec extension
-class EmbeddingSqlite(Base):
-    __tablename__ = 'embedding_sqlite'
-    __table_args__ = {'extend_existing': True, 'sqlite_with_rowid': True}
-    id = Column(Integer, autoincrement=True, primary_key=True)
-    collection_name = Column(String)
-    doc_name = Column(String)
-    page_number = Column(Integer)
-    doc_hash = Column(String, unique=True)
-    document = Column(String)
-    # embedding will be handled as BLOB for sqlite-vec
-
 
 
 
@@ -182,28 +170,17 @@ class DocEmbedder:
         
         # Create the table with all necessary columns
         create_table_sql = f"""
-        CREATE TABLE IF NOT EXISTS embedding_sqlite (
+        CREATE VIRTUAL TABLE IF NOT EXISTS embedding_sqlite  using vec0(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             collection_name TEXT,
             doc_name TEXT,
             page_number INTEGER,
             doc_hash TEXT UNIQUE,
             document TEXT,
-            embedding BLOB
+            embedding float[{dimension}]
         );
         """
-        
         cursor.execute(create_table_sql)
-        
-        # Create vector index using sqlite-vec
-        try:
-            cursor.execute(f"""
-            CREATE VIRTUAL TABLE IF NOT EXISTS vec_embedding_sqlite USING vec0(
-                embedding float[{dimension}]
-            );
-            """)
-        except Exception as e:
-            logger.warning(f"Could not create vector index: {e}")
         
         self.sqlite_connection.commit()
         logger.info("Created SQLite embedding table with vector support.")
@@ -368,15 +345,15 @@ class DocEmbedder:
             cursor = self.sqlite_connection.cursor()
             
             if collection:
-                # Simple similarity search without vector extension for now
+                # Simple similarity search
                 result = cursor.execute(
-                    "SELECT document FROM embedding_sqlite WHERE collection_name = ? LIMIT ?",
-                    (collection, num_docs)
+                    "SELECT document FROM embedding_sqlite WHERE collection_name = ? AND embedding MATCH ? ORDER BY distance LIMIT ?",
+                    (collection,query_embedding_bytes, num_docs)
                 ).fetchall()
             else:
                 result = cursor.execute(
-                    "SELECT document FROM embedding_sqlite LIMIT ?",
-                    (num_docs,)
+                    "SELECT document FROM embedding_sqlite WHERE embedding MATCH ? ORDER BY distance  LIMIT ?",
+                    (query_embedding_bytes, num_docs)
                 ).fetchall()
             
             pages = [row[0] for row in result]
