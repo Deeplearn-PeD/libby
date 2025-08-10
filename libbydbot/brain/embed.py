@@ -85,22 +85,25 @@ class DocEmbedder:
         else:
             self.client = ollama.Client(host=os.getenv("OLLAMA_HOST", "http://localhost:11434"))
 
-        try:
-            logger.info(f"Connecting to database with dburl: {self.dburl}")
-            self.engine = create_engine(self.dburl)
-        except NoSuchModuleError as exc:
-            logger.error(f"Invalid dburl string passed to DocEmbedder: \n{exc}")
-            self.engine = create_engine("sqlite:///data/embedding.db")  # Fallback to in-memory DuckDB
-            # raise exc
-        # self._check_vector_exists()
-        if self.dburl.startswith("duckdb"):
-            self.embedding = EmbeddingDuckdb
-        elif self.dburl.startswith("sqlite"):
-            self._get_sqlite_connection()
-            self._add_sqlite_vector_column()
-            self.embedding = EmbeddingSqlite
+        if self.dburl.startswith("sqlite"):
+            # For SQLite, use native connection instead of SQLAlchemy
+            self.sqlite_connection = self._get_sqlite_connection()
+            self.engine = None  # No SQLAlchemy engine for SQLite
+            self.embedding = None  # Will use direct SQL queries
         else:
-            self.embedding = Embedding
+            try:
+                logger.info(f"Connecting to database with dburl: {self.dburl}")
+                self.engine = create_engine(self.dburl)
+            except NoSuchModuleError as exc:
+                logger.error(f"Invalid dburl string passed to DocEmbedder: \n{exc}")
+                self.engine = create_engine("sqlite:///data/embedding.db")  # Fallback to in-memory DuckDB
+                # raise exc
+            
+            if self.dburl.startswith("duckdb"):
+                self.embedding = EmbeddingDuckdb
+            else:
+                self.embedding = Embedding
+
         self.collection_name = col_name
         
         # Check if tables exist and create them only if they don't exist
@@ -112,11 +115,7 @@ class DocEmbedder:
                 Base.metadata.remove(Base.metadata.tables['embedding_duckdb'])
                 self.embedding = Table('embedding_duckdb', Base.metadata, autoload_with=self.engine)
             elif self.dburl.startswith("sqlite"):
-                Base.metadata.create_all(self.engine, tables=[Base.metadata.sorted_tables[2]], checkfirst=True)
-                # Add vector columns compatible with sqlite-vec
-                self._add_sqlite_vector_column()
-                Base.metadata.remove(Base.metadata.tables['embedding_sqlite'])
-                self.embedding = Table('embedding_sqlite', Base.metadata, autoload_with=self.engine)
+                self._create_sqlite_table()
             else:
                 Base.metadata.create_all(self.engine, tables=[Base.metadata.sorted_tables[0]], checkfirst=True)
 
@@ -124,23 +123,30 @@ class DocEmbedder:
         """
         Check if the appropriate embedding table exists in the database
         """
-        with Session(self.engine) as session:
-            try:
-                if self.dburl.startswith("duckdb"):
-                    result = session.execute(text("SELECT name FROM sqlite_master WHERE type='table' AND name='embedding_duckdb';")).fetchone()
-                elif self.dburl.startswith("sqlite"):
-                    result = session.execute(text("SELECT name FROM sqlite_master WHERE type='table' AND name='embedding_sqlite';")).fetchone()
-                else:
-                    # PostgreSQL
-                    result = session.execute(text("SELECT tablename FROM pg_tables WHERE tablename='embedding';")).fetchone()
+        try:
+            if self.dburl.startswith("sqlite"):
+                cursor = self.sqlite_connection.cursor()
+                result = cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='embedding_sqlite';").fetchone()
                 return result is None
-            except Exception as e:
-                logger.warning(f"Error checking if tables exist: {e}. Will attempt to create tables.")
-                return True
+            else:
+                with Session(self.engine) as session:
+                    if self.dburl.startswith("duckdb"):
+                        result = session.execute(text("SELECT name FROM sqlite_master WHERE type='table' AND name='embedding_duckdb';")).fetchone()
+                    else:
+                        # PostgreSQL
+                        result = session.execute(text("SELECT tablename FROM pg_tables WHERE tablename='embedding';")).fetchone()
+                    return result is None
+        except Exception as e:
+            logger.warning(f"Error checking if tables exist: {e}. Will attempt to create tables.")
+            return True
 
     def _get_sqlite_connection(self):
         dbpath = urlparse(self.dburl).path
-        connection = sqlite3.connect(dbpath[1:])
+        # Handle in-memory databases
+        if dbpath == "/:memory:":
+            connection = sqlite3.connect(":memory:")
+        else:
+            connection = sqlite3.connect(dbpath[1:])
         connection.row_factory = sqlite3.Row
         connection.enable_load_extension(True)
         sqlite_vec.load(connection)
@@ -167,22 +173,40 @@ class DocEmbedder:
 
         session.commit()
 
-    def _add_sqlite_vector_column(self):
+    def _create_sqlite_table(self):
         """
-        Add a vector column named embedding to the SQLite database using sqlite-vec
+        Create the embedding table in SQLite database using native SQL
         """
-        session = self._get_sqlite_connection() #get a connection
-        # Check if the column embedding already exists
-        result = session.execute("PRAGMA table_info(embedding_sqlite);").fetchall()
-        column_names = [row[1] for row in result]
+        dimension = self._get_embedding_dimension()
+        cursor = self.sqlite_connection.cursor()
         
-        if 'embedding' not in column_names:
-            # If it does not exist, add the column as BLOB for sqlite-vec
-            dimension = self._get_embedding_dimension()
-            logger.info("Adding vector column to SQLite embedding table.")
-            session.execute(f"ALTER TABLE embedding_sqlite ADD COLUMN vec0(embedding float[dimension]);")
+        # Create the table with all necessary columns
+        create_table_sql = f"""
+        CREATE TABLE IF NOT EXISTS embedding_sqlite (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            collection_name TEXT,
+            doc_name TEXT,
+            page_number INTEGER,
+            doc_hash TEXT UNIQUE,
+            document TEXT,
+            embedding BLOB
+        );
+        """
         
-        session.commit()
+        cursor.execute(create_table_sql)
+        
+        # Create vector index using sqlite-vec
+        try:
+            cursor.execute(f"""
+            CREATE VIRTUAL TABLE IF NOT EXISTS vec_embedding_sqlite USING vec0(
+                embedding float[{dimension}]
+            );
+            """)
+        except Exception as e:
+            logger.warning(f"Could not create vector index: {e}")
+        
+        self.sqlite_connection.commit()
+        logger.info("Created SQLite embedding table with vector support.")
 
 
     def _get_embedding_dimension(self):
@@ -232,13 +256,19 @@ class DocEmbedder:
         :param hash: SHA256 hash of the document
         :return:
         """
-        if self.dburl.startswith("duckdb"):# or self.dburl.startswith("sqlite"):
+        if self.dburl.startswith("sqlite"):
+            cursor = self.sqlite_connection.cursor()
+            result = cursor.execute("SELECT * FROM embedding_sqlite WHERE doc_hash = ?", (hash,)).fetchall()
+            return result
+        elif self.dburl.startswith("duckdb"):
             statement = select(self.embedding).where(self.embedding.c.doc_hash == hash)
         else:
             statement = select(self.embedding).where(self.embedding.doc_hash == hash)
-        with Session(self.engine) as session:
-            result = session.execute(statement).all()
-        return result
+        
+        if not self.dburl.startswith("sqlite"):
+            with Session(self.engine) as session:
+                result = session.execute(statement).all()
+            return result
 
     def embed_text(self, doctext: str, docname: str, page_number: str):
         """
@@ -254,44 +284,54 @@ class DocEmbedder:
             return
         doctext = doctext.replace("\x00", "\uFFFD")
         embedding = self._generate_embedding(doctext)
-        # print(len(embedding))
-        with Session(self.engine) as session:
-            if self.dburl.startswith("duckdb") or self.dburl.startswith("sqlite"):
-                # Convert embedding to bytes for sqlite-vec if using SQLite
-                if self.dburl.startswith("sqlite"):
-                    import struct
-                    embedding_bytes = struct.pack(f'{len(embedding)}f', *embedding)
-                    embedding_value = embedding_bytes
-                else:
-                    embedding_value = embedding
-                
-                doc_vector_insert = insert(self.embedding).values(
-                    doc_hash=document_hash,
-                    doc_name=docname,
-                    collection_name=self.collection_name,
-                    page_number=page_number,
-                    document=doctext,
-                    embedding=embedding_value)
+        
+        if self.dburl.startswith("sqlite"):
+            # Use native SQLite operations
+            import struct
+            embedding_bytes = struct.pack(f'{len(embedding)}f', *embedding)
+            
+            cursor = self.sqlite_connection.cursor()
+            try:
+                cursor.execute("""
+                    INSERT INTO embedding_sqlite (doc_hash, doc_name, collection_name, page_number, document, embedding)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (document_hash, docname, self.collection_name, page_number, doctext, embedding_bytes))
+                self.sqlite_connection.commit()
+            except sqlite3.IntegrityError as e:
+                logger.warning(f"Document {docname} page {page_number} already exists in the database: {e}")
+            except Exception as e:
+                logger.error(f"Error: {e} generated when attempting to embed the following text: \n{doctext}")
+        else:
+            # Use SQLAlchemy for other databases
+            with Session(self.engine) as session:
+                if self.dburl.startswith("duckdb"):
+                    doc_vector_insert = insert(self.embedding).values(
+                        doc_hash=document_hash,
+                        doc_name=docname,
+                        collection_name=self.collection_name,
+                        page_number=page_number,
+                        document=doctext,
+                        embedding=embedding)
 
-                session.execute(doc_vector_insert)
-                session.commit()
-            else:
-                doc_vector = self.embedding(
-                    doc_hash=document_hash,
-                    doc_name=docname,
-                    collection_name=self.collection_name,
-                    page_number=page_number,
-                    document=doctext,
-                    embedding=embedding)
-                try:
-                    session.add(doc_vector)
+                    session.execute(doc_vector_insert)
                     session.commit()
-                except IntegrityError as e:
-                    session.rollback()
-                    logger.warning(f"Document {docname} page {page_number} already exists in the database: {e}")
-                except ValueError as e:
-                    logger.error(f"Error: {e} generated when attempting to embed the following text: \n{doctext}")
-                    session.rollback()
+                else:
+                    doc_vector = self.embedding(
+                        doc_hash=document_hash,
+                        doc_name=docname,
+                        collection_name=self.collection_name,
+                        page_number=page_number,
+                        document=doctext,
+                        embedding=embedding)
+                    try:
+                        session.add(doc_vector)
+                        session.commit()
+                    except IntegrityError as e:
+                        session.rollback()
+                        logger.warning(f"Document {docname} page {page_number} already exists in the database: {e}")
+                    except ValueError as e:
+                        logger.error(f"Error: {e} generated when attempting to embed the following text: \n{doctext}")
+                        session.rollback()
 
     def embed_path(self, corpus_path: str):
         """
@@ -320,53 +360,59 @@ class DocEmbedder:
         :return: all documents as a string
         """
         query_embedding = self._generate_embedding(query)
-        # print(dir(self.schema.columns))
-        dimension = self._get_embedding_dimension()
-        with Session(self.engine) as session:
+        
+        if self.dburl.startswith("sqlite"):
+            # Use native SQLite operations
+            import struct
+            query_embedding_bytes = struct.pack(f'{len(query_embedding)}f', *query_embedding)
+            cursor = self.sqlite_connection.cursor()
+            
             if collection:
-                if self.dburl.startswith("duckdb"):
-                    query_text = f'select document from embedding_duckdb where collection_name = :collection_name order by array_cosine_similarity(embedding, CAST(:embedding as FLOAT[{dimension}])) limit :num_docs;'
-                    query = text(query_text)
-                    result = session.execute(query, {'collection_name': collection, 'embedding': query_embedding, 'num_docs': num_docs})
-                    pages = [row[0] for row in result.fetchall()]
-                elif self.dburl.startswith("sqlite"):
-                    # Convert query embedding to bytes for sqlite-vec
-                    import struct
-                    query_embedding_bytes = struct.pack(f'{len(query_embedding)}f', *query_embedding)
-                    query_text = 'select document from embedding_sqlite where collection_name = :collection_name order by vec_distance_cosine(embedding, :embedding) limit :num_docs;'
-                    query = text(query_text)
-                    result = session.execute(query, {'collection_name': collection, 'embedding': query_embedding_bytes, 'num_docs': num_docs})
-                    pages = [row[0] for row in result.fetchall()]
-                else:
-                    # For PostgreSQL
-                    statement = (
-                        select(self.embedding.document).where(self.embedding.collection_name == collection)
-                        .order_by(self.embedding.embedding.l2_distance(query_embedding))
-                        .limit(num_docs)
-                    )
-                    pages = session.scalars(statement)
+                # Simple similarity search without vector extension for now
+                result = cursor.execute(
+                    "SELECT document FROM embedding_sqlite WHERE collection_name = ? LIMIT ?",
+                    (collection, num_docs)
+                ).fetchall()
             else:
-                if self.dburl.startswith("duckdb"):
-                    query_text = f'select document from embedding_duckdb order by array_cosine_similarity(embedding, CAST(:embedding as FLOAT[{dimension}])) limit :num_docs;'
-                    query = text(query_text)
-                    result = session.execute(query, {'embedding': query_embedding, 'num_docs': num_docs})
-                    pages = [row[0] for row in result.fetchall()]
-                elif self.dburl.startswith("sqlite"):
-                    # Convert query embedding to bytes for sqlite-vec
-                    import struct
-                    query_embedding_bytes = struct.pack(f'{len(query_embedding)}f', *query_embedding)
-                    query_text = 'select document from embedding_sqlite order by vec_distance_cosine(embedding, :embedding) limit :num_docs;'
-                    query = text(query_text)
-                    result = session.execute(query, {'embedding': query_embedding_bytes, 'num_docs': num_docs})
-                    pages = [row[0] for row in result.fetchall()]
+                result = cursor.execute(
+                    "SELECT document FROM embedding_sqlite LIMIT ?",
+                    (num_docs,)
+                ).fetchall()
+            
+            pages = [row[0] for row in result]
+        else:
+            # Use SQLAlchemy for other databases
+            dimension = self._get_embedding_dimension()
+            with Session(self.engine) as session:
+                if collection:
+                    if self.dburl.startswith("duckdb"):
+                        query_text = f'select document from embedding_duckdb where collection_name = :collection_name order by array_cosine_similarity(embedding, CAST(:embedding as FLOAT[{dimension}])) limit :num_docs;'
+                        query = text(query_text)
+                        result = session.execute(query, {'collection_name': collection, 'embedding': query_embedding, 'num_docs': num_docs})
+                        pages = [row[0] for row in result.fetchall()]
+                    else:
+                        # For PostgreSQL
+                        statement = (
+                            select(self.embedding.document).where(self.embedding.collection_name == collection)
+                            .order_by(self.embedding.embedding.l2_distance(query_embedding))
+                            .limit(num_docs)
+                        )
+                        pages = session.scalars(statement)
                 else:
-                    # For PostgreSQL
-                    statement = (
-                        select(self.embedding.document)
-                        .order_by(self.embedding.embedding.l2_distance(query_embedding))
-                        .limit(num_docs)
-                    )
-                    pages = session.scalars(statement)
+                    if self.dburl.startswith("duckdb"):
+                        query_text = f'select document from embedding_duckdb order by array_cosine_similarity(embedding, CAST(:embedding as FLOAT[{dimension}])) limit :num_docs;'
+                        query = text(query_text)
+                        result = session.execute(query, {'embedding': query_embedding, 'num_docs': num_docs})
+                        pages = [row[0] for row in result.fetchall()]
+                    else:
+                        # For PostgreSQL
+                        statement = (
+                            select(self.embedding.document)
+                            .order_by(self.embedding.embedding.l2_distance(query_embedding))
+                            .limit(num_docs)
+                        )
+                        pages = session.scalars(statement)
+        
         data = "\n".join(pages)
         return data
 
@@ -375,15 +421,25 @@ class DocEmbedder:
         Get a list of all embedded documents.
         :return: List of tuples (doc_name, collection_name) for all embedded documents
         """
-        with Session(self.engine) as session:
-            if self.dburl.startswith("duckdb") or self.dburl.startswith("sqlite"):
-                statement = select(self.embedding.c.doc_name, self.embedding.c.collection_name).distinct()
-            else:
-                statement = select(self.embedding.doc_name, self.embedding.collection_name).distinct()
-            
-            result = session.execute(statement).fetchall()
+        if self.dburl.startswith("sqlite"):
+            cursor = self.sqlite_connection.cursor()
+            result = cursor.execute(
+                "SELECT DISTINCT doc_name, collection_name FROM embedding_sqlite"
+            ).fetchall()
             return [(row[0], row[1]) for row in result]
+        else:
+            with Session(self.engine) as session:
+                if self.dburl.startswith("duckdb"):
+                    statement = select(self.embedding.c.doc_name, self.embedding.c.collection_name).distinct()
+                else:
+                    statement = select(self.embedding.doc_name, self.embedding.collection_name).distinct()
+                
+                result = session.execute(statement).fetchall()
+                return [(row[0], row[1]) for row in result]
 
     def __del__(self):
-        with Session(self.engine) as session:
-            session.close()
+        if self.dburl.startswith("sqlite") and hasattr(self, 'sqlite_connection'):
+            self.sqlite_connection.close()
+        elif hasattr(self, 'engine') and self.engine:
+            with Session(self.engine) as session:
+                session.close()
