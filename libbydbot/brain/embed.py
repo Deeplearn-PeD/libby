@@ -75,7 +75,7 @@ class EmbeddingSqlite(Base):
 
 
 class DocEmbedder:
-    def __init__(self, col_name, dburl: str = 'duckdb:///:memory:', create=True, embedding_model: str = 'mxbai-embed-large'):
+    def __init__(self, col_name, dburl: str = 'duckdb:///:memory:', embedding_model: str = 'mxbai-embed-large'):
         self.dburl = dburl if dburl is not None else os.getenv("PGURL")
         self.embedding_model = embedding_model
 
@@ -101,7 +101,9 @@ class DocEmbedder:
         else:
             self.embedding = Embedding
         self.collection_name = col_name
-        if create:
+        
+        # Check if tables exist and create them only if they don't exist
+        if self._should_create_tables():
             if self.dburl.startswith("duckdb"):
                 Base.metadata.create_all(self.engine, tables=[Base.metadata.sorted_tables[1]], checkfirst=True)
                 # Add vector columns compatible with this engine
@@ -116,6 +118,24 @@ class DocEmbedder:
                 self.embedding = Table('embedding_sqlite', Base.metadata, autoload_with=self.engine)
             else:
                 Base.metadata.create_all(self.engine, tables=[Base.metadata.sorted_tables[0]], checkfirst=True)
+
+    def _should_create_tables(self):
+        """
+        Check if the appropriate embedding table exists in the database
+        """
+        with Session(self.engine) as session:
+            try:
+                if self.dburl.startswith("duckdb"):
+                    result = session.execute(text("SELECT name FROM sqlite_master WHERE type='table' AND name='embedding_duckdb';")).fetchone()
+                elif self.dburl.startswith("sqlite"):
+                    result = session.execute(text("SELECT name FROM sqlite_master WHERE type='table' AND name='embedding_sqlite';")).fetchone()
+                else:
+                    # PostgreSQL
+                    result = session.execute(text("SELECT tablename FROM pg_tables WHERE tablename='embedding';")).fetchone()
+                return result is None
+            except Exception as e:
+                logger.warning(f"Error checking if tables exist: {e}. Will attempt to create tables.")
+                return True
 
     def _get_sqlite_connection(self):
         dbpath = urlparse(self.dburl).path
