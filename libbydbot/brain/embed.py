@@ -62,7 +62,7 @@ class EmbeddingDuckdb(Base):
 # SQLite with sqlite-vec extension
 class EmbeddingSqlite(Base):
     __tablename__ = 'embedding_sqlite'
-    __table_args__ = {'extend_existing': True}
+    __table_args__ = {'extend_existing': True, 'sqlite_with_rowid': True}
     id = Column(Integer, autoincrement=True, primary_key=True)
     collection_name = Column(String)
     doc_name = Column(String)
@@ -92,11 +92,12 @@ class DocEmbedder:
             logger.error(f"Invalid dburl string passed to DocEmbedder: \n{exc}")
             self.engine = create_engine("sqlite:///data/embedding.db")  # Fallback to in-memory DuckDB
             # raise exc
-        self._check_vector_exists()
+        # self._check_vector_exists()
         if self.dburl.startswith("duckdb"):
             self.embedding = EmbeddingDuckdb
         elif self.dburl.startswith("sqlite"):
             self._get_sqlite_connection()
+            self._add_sqlite_vector_column()
             self.embedding = EmbeddingSqlite
         else:
             self.embedding = Embedding
@@ -231,7 +232,7 @@ class DocEmbedder:
         :param hash: SHA256 hash of the document
         :return:
         """
-        if self.dburl.startswith("duckdb") or self.dburl.startswith("sqlite"):
+        if self.dburl.startswith("duckdb"):# or self.dburl.startswith("sqlite"):
             statement = select(self.embedding).where(self.embedding.c.doc_hash == hash)
         else:
             statement = select(self.embedding).where(self.embedding.doc_hash == hash)
