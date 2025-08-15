@@ -399,7 +399,7 @@ class DocEmbedder:
         :return: List of tuples (doc_name, collection_name) for all embedded documents
         """
         if self.dburl.startswith("sqlite"):
-            cursor = self.sqlite_connection.cursor()
+            cursor = self._get_sqlite_connection().cursor()
             result = cursor.execute(
                 "SELECT DISTINCT doc_name, collection_name FROM embedding_sqlite"
             ).fetchall()
