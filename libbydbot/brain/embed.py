@@ -84,7 +84,7 @@ class DocEmbedder:
                 self.engine = create_engine(self.dburl)
             except NoSuchModuleError as exc:
                 logger.error(f"Invalid dburl string passed to DocEmbedder: \n{exc}")
-                self.engine = create_engine("sqlite:///data/embedding.db")  # Fallback to in-memory DuckDB
+                self.engine = create_engine("sqlite:///data/embedding.db")
                 # raise exc
             
             if self.dburl.startswith("duckdb"):
