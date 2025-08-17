@@ -113,7 +113,7 @@ class DocEmbedder:
         """
         try:
             if self.dburl.startswith("sqlite"):
-                cursor = self.sqlite_connection.cursor()
+                cursor = self.connection.cursor()
                 result = cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='embedding_sqlite';").fetchone()
                 return result is None
             else:
@@ -127,6 +127,17 @@ class DocEmbedder:
         except Exception as e:
             logger.warning(f"Error checking if tables exist: {e}. Will attempt to create tables.")
             return True
+
+    @property
+    def connection(self):
+        """
+        Get database connection. For SQLite, returns the native connection.
+        For other databases, returns the SQLAlchemy engine.
+        """
+        if self.dburl.startswith("sqlite"):
+            return self._get_sqlite_connection()
+        else:
+            return self.engine
 
     def _get_sqlite_connection(self):
         dbpath = urlparse(self.dburl).path
@@ -166,7 +177,7 @@ class DocEmbedder:
         Create the embedding table in SQLite database using native SQL
         """
         dimension = self._get_embedding_dimension()
-        cursor = self.sqlite_connection.cursor()
+        cursor = self.connection.cursor()
         
         # Create the table with all necessary columns
         create_table_sql = f"""
@@ -182,7 +193,7 @@ class DocEmbedder:
         """
         cursor.execute(create_table_sql)
         
-        self.sqlite_connection.commit()
+        self.connection.commit()
         logger.info("Created SQLite embedding table with vector support.")
 
 
@@ -234,7 +245,7 @@ class DocEmbedder:
         :return:
         """
         if self.dburl.startswith("sqlite"):
-            cursor = self.sqlite_connection.cursor()
+            cursor = self.connection.cursor()
             result = cursor.execute("SELECT * FROM embedding_sqlite WHERE doc_hash = ?", (hash,)).fetchall()
             return result
         elif self.dburl.startswith("duckdb"):
@@ -267,13 +278,13 @@ class DocEmbedder:
             import struct
             embedding_bytes = struct.pack(f'{len(embedding)}f', *embedding)
             
-            cursor = self.sqlite_connection.cursor()
+            cursor = self.connection.cursor()
             try:
                 cursor.execute("""
                     INSERT INTO embedding_sqlite (doc_hash, doc_name, collection_name, page_number, document, embedding)
                     VALUES (?, ?, ?, ?, ?, ?)
                 """, (document_hash, docname, self.collection_name, page_number, doctext, embedding_bytes))
-                self.sqlite_connection.commit()
+                self.connection.commit()
             except sqlite3.IntegrityError as e:
                 logger.warning(f"Document {docname} page {page_number} already exists in the database: {e}")
             except Exception as e:
@@ -342,7 +353,7 @@ class DocEmbedder:
             # Use native SQLite operations
             import struct
             query_embedding_bytes = struct.pack(f'{len(query_embedding)}f', *query_embedding)
-            cursor = self.sqlite_connection.cursor()
+            cursor = self.connection.cursor()
             
             if collection:
                 # Simple similarity search
@@ -399,7 +410,7 @@ class DocEmbedder:
         :return: List of tuples (doc_name, collection_name) for all embedded documents
         """
         if self.dburl.startswith("sqlite"):
-            cursor = self._get_sqlite_connection().cursor()
+            cursor = self.connection.cursor()
             result = cursor.execute(
                 "SELECT DISTINCT doc_name, collection_name FROM embedding_sqlite"
             ).fetchall()
