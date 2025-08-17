@@ -5,6 +5,8 @@ from libbydbot.brain.embed import DocEmbedder
 def test_embed_text():
     embedder = DocEmbedder("test_collection", dburl='sqlite:///embedding.db')
     embedder.embed_text('doctext1', 'docname', 1)
+    edocs = embedder.get_embedded_documents()
+    assert len(edocs) == 1
 
 def test_instantiate_sqlite():
     embedder = DocEmbedder("test_collection", dburl="sqlite:///:memory:")
