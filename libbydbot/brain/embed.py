@@ -63,7 +63,7 @@ class EmbeddingDuckdb(Base):
 
 
 class DocEmbedder:
-    def __init__(self, col_name, dburl: str = 'duckdb:///:memory:', embedding_model: str = 'mxbai-embed-large'):
+    def __init__(self, col_name, dburl: str = 'duckdb:///:memory:', embedding_model: str = 'gemini-embedding-001'):
         self.dburl = dburl if dburl is not None else os.getenv("PGURL")
         self.embedding_model = embedding_model
 
