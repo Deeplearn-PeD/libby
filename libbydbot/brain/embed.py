@@ -113,8 +113,9 @@ class DocEmbedder:
         """
         try:
             if self.dburl.startswith("sqlite"):
-                cursor = self.connection.cursor()
-                result = cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='embedding_sqlite';").fetchone()
+                with self.connection as conn:
+                    cursor = conn.cursor()
+                    result = cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='embedding_sqlite';").fetchone()
                 return result is None
             else:
                 with Session(self.engine) as session:
@@ -129,7 +130,7 @@ class DocEmbedder:
             return True
 
     @property
-    def connection(self):
+    def connection(self) -> sqlite3.Connection:
         """
         Get database connection. For SQLite, returns the native connection.
         For other databases, returns the SQLAlchemy engine.
@@ -177,23 +178,24 @@ class DocEmbedder:
         Create the embedding table in SQLite database using native SQL
         """
         dimension = self._get_embedding_dimension()
-        cursor = self.connection.cursor()
-        
-        # Create the table with all necessary columns
-        create_table_sql = f"""
-        CREATE VIRTUAL TABLE IF NOT EXISTS embedding_sqlite  using vec0(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            collection_name TEXT,
-            doc_name TEXT,
-            page_number INTEGER,
-            doc_hash TEXT UNIQUE,
-            document TEXT,
-            embedding float[{dimension}]
-        );
-        """
-        cursor.execute(create_table_sql)
-        
-        self.connection.commit()
+        with self.connection as conn:
+            cursor = conn.cursor()
+            # Create the table with all necessary columns
+            create_table_sql = f"""
+            CREATE VIRTUAL TABLE IF NOT EXISTS embedding_sqlite  using vec0(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                collection_name TEXT,
+                doc_name TEXT,
+                page_number INTEGER,
+                doc_hash TEXT UNIQUE,
+                document TEXT,
+                embedding float[{dimension}]
+            );
+            """
+            cursor.execute(create_table_sql)
+            conn.commit()
+            # conn.close()
+
         logger.info("Created SQLite embedding table with vector support.")
 
 
@@ -245,8 +247,11 @@ class DocEmbedder:
         :return:
         """
         if self.dburl.startswith("sqlite"):
-            cursor = self.connection.cursor()
-            result = cursor.execute("SELECT * FROM embedding_sqlite WHERE doc_hash = ?", (hash,)).fetchall()
+            with self.connection as conn:
+                cursor = conn.cursor()
+                result = cursor.execute("SELECT * FROM embedding_sqlite WHERE doc_hash = ?", (hash,)).fetchall()
+            conn.commit()
+            # conn.close()
             return result
         elif self.dburl.startswith("duckdb"):
             statement = select(self.embedding).where(self.embedding.c.doc_hash == hash)
@@ -277,18 +282,19 @@ class DocEmbedder:
             # Use native SQLite operations
             import struct
             embedding_bytes = struct.pack(f'{len(embedding)}f', *embedding)
-            
-            cursor = self.connection.cursor()
-            try:
-                cursor.execute("""
-                    INSERT INTO embedding_sqlite (doc_hash, doc_name, collection_name, page_number, document, embedding)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """, (document_hash, docname, self.collection_name, page_number, doctext, embedding_bytes))
-                self.connection.commit()
-            except sqlite3.IntegrityError as e:
-                logger.warning(f"Document {docname} page {page_number} already exists in the database: {e}")
-            except Exception as e:
-                logger.error(f"Error: {e} generated when attempting to embed the following text: \n{doctext}")
+
+            with self.connection as conn:
+                cursor = conn.cursor()
+                try:
+                    cursor.execute("""
+                        INSERT INTO embedding_sqlite (doc_hash, doc_name, collection_name, page_number, document, embedding)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    """, (document_hash, docname, self.collection_name, page_number, doctext, embedding_bytes))
+                    conn.commit()
+                except sqlite3.IntegrityError as e:
+                    logger.warning(f"Document {docname} page {page_number} already exists in the database: {e}")
+                except Exception as e:
+                    logger.error(f"Error: {e} generated when attempting to embed the following text: \n{doctext}")
         else:
             # Use SQLAlchemy for other databases
             with Session(self.engine) as session:
@@ -353,21 +359,21 @@ class DocEmbedder:
             # Use native SQLite operations
             import struct
             query_embedding_bytes = struct.pack(f'{len(query_embedding)}f', *query_embedding)
-            cursor = self.connection.cursor()
-            
-            if collection:
-                # Simple similarity search
-                result = cursor.execute(
-                    "SELECT document FROM embedding_sqlite WHERE collection_name = ? AND embedding MATCH ? ORDER BY distance LIMIT ?",
-                    (collection,query_embedding_bytes, num_docs)
-                ).fetchall()
-            else:
-                result = cursor.execute(
-                    "SELECT document FROM embedding_sqlite WHERE embedding MATCH ? ORDER BY distance  LIMIT ?",
-                    (query_embedding_bytes, num_docs)
-                ).fetchall()
-            
-            pages = [row[0] for row in result]
+            with self.connection as conn:
+                cursor = conn.cursor()
+                if collection:
+                    # Simple similarity search
+                    result = cursor.execute(
+                        "SELECT document FROM embedding_sqlite WHERE collection_name = ? AND embedding MATCH ? ORDER BY distance LIMIT ?",
+                        (collection,query_embedding_bytes, num_docs)
+                    ).fetchall()
+                else:
+                    result = cursor.execute(
+                        "SELECT document FROM embedding_sqlite WHERE embedding MATCH ? ORDER BY distance  LIMIT ?",
+                        (query_embedding_bytes, num_docs)
+                    ).fetchall()
+
+                pages = [row[0] for row in result]
         else:
             # Use SQLAlchemy for other databases
             dimension = self._get_embedding_dimension()
@@ -410,10 +416,11 @@ class DocEmbedder:
         :return: List of tuples (doc_name, collection_name) for all embedded documents
         """
         if self.dburl.startswith("sqlite"):
-            cursor = self.connection.cursor()
-            result = cursor.execute(
-                "SELECT DISTINCT doc_name, collection_name FROM embedding_sqlite"
-            ).fetchall()
+            with self.connection as conn:
+                cursor = conn.cursor()
+                result = cursor.execute(
+                    "SELECT DISTINCT doc_name, collection_name FROM embedding_sqlite"
+                ).fetchall()
             return [(row[0], row[1]) for row in result]
         else:
             with Session(self.engine) as session:
