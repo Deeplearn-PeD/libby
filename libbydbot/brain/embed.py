@@ -79,18 +79,13 @@ class DocEmbedder:
                     self.engine = duckdb.connect()
                 else:
                     self.engine = duckdb.connect(self.dburl.split(":///")[-1])
-
-
             except NoSuchModuleError as exc:
                 logger.error(f"Invalid dburl string passed to DocEmbedder: \n{exc}")
                 self.engine = duckdb.connect()
             self.embedding = None  # Not using SQLAlchemy ORM for DuckDB
-            self.table_name = 'embedding_duckdb'
-            # Ensure vss extension is loaded and table exists
-            self._setup_duckdb()
+            # Ensure vss extension is loaded, table and index exist
             if self._should_create_tables():
-                self._create_duckdb_table()
-                # self._add_duckdb_index()
+                self._init_duckdb()
         else:
             # PostgreSQL
             try:
@@ -112,44 +107,45 @@ class DocEmbedder:
                 # PostgreSQL
                 Base.metadata.create_all(self.engine, tables=[Base.metadata.sorted_tables[0]], checkfirst=True)
 
-    def _setup_duckdb(self):
-        """Install and load vss extension for DuckDB."""
-        with self.connection as conn:
-            # Install vss if not present
-            conn.sql("INSTALL vss;")
-            conn.sql("LOAD vss;")
-
-    def _create_duckdb_table(self):
-        """Create embedding table in DuckDB using direct SQL."""
+    def _init_duckdb(self):
+        """
+        Initialize DuckDB: install vss extension, create table if not exists,
+        and create HNSW index.
+        """
         dimension = self._get_embedding_dimension()
         with self.connection as conn:
+            # Install and load vss extension
+            conn.sql("INSTALL vss;")
+            conn.sql("LOAD vss;")
+            
             # Check if table exists
             result = conn.sql(
                 f"SELECT COUNT(*) FROM information_schema.tables WHERE table_name = '{self.table_name}';"
             ).fetchall()
-            if not result:
-                # Create table
-                create_sql = f"""                                                                                                                                                                                           
-                   CREATE TABLE {self.table_name} (                                                                                                                                                                             
-                       id INTEGER PRIMARY KEY AUTOINCREMENT,                                                                                                                                                                   
-                       collection_name TEXT,                                                                                                                                                                                   
-                       doc_name TEXT,                                                                                                                                                                                          
-                       page_number INTEGER,                                                                                                                                                                                    
-                       doc_hash TEXT UNIQUE,                                                                                                                                                                                   
-                       document TEXT,                                                                                                                                                                                          
-                       embedding FLOAT[{dimension}]                                                                                                                                                                            
-                   );                                                                                                                                                                                                          
-                   """
+            # result is a list of tuples; we check if count > 0
+            if result[0][0] == 0:
+                # Create table (DuckDB uses INTEGER PRIMARY KEY for auto‑increment)
+                create_sql = f"""
+                CREATE TABLE {self.table_name} (
+                    id INTEGER PRIMARY KEY,
+                    collection_name TEXT,
+                    doc_name TEXT,
+                    page_number INTEGER,
+                    doc_hash TEXT UNIQUE,
+                    document TEXT,
+                    embedding FLOAT[{dimension}]
+                );
+                """
                 conn.sql(create_sql)
-                self._add_duckdb_index()
-
                 logger.info("Created DuckDB embedding table with vector support.")
-    def _add_duckdb_index(self):
-        """
-        Add an index to the embedding table in DuckDB using direct SQL.
-        """
-        with self.connection as conn:
-            conn.sql(f"CREATE INDEX embedding_duckdb_index ON {self.table_name} USING HNSW(embedding) WITH (metric='cosine');")
+                
+                # Create HNSW index
+                conn.sql(f"""
+                    CREATE INDEX embedding_duckdb_index 
+                    ON {self.table_name} USING HNSW(embedding) 
+                    WITH (metric='cosine');
+                """)
+                logger.info("Created HNSW index on embedding column.")
 
     def _should_create_tables(self):
         """
@@ -163,11 +159,12 @@ class DocEmbedder:
                         "SELECT name FROM sqlite_schema WHERE type='table' AND name='embedding_sqlite';").fetchone()
                 return result is None
             elif self.dburl.startswith("duckdb"):
-                with self.engine.connect() as conn:
-                    result = conn.execute(text(
-                        "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'embedding_duckdb';"
-                    )).scalar()
-                return result == 0
+                with self.connection as conn:
+                    result = conn.sql(
+                        f"SELECT COUNT(*) FROM information_schema.tables WHERE table_name = '{self.table_name}';"
+                    ).fetchall()
+                # result is a list of tuples; we check if count == 0
+                return result[0][0] == 0
             else:
                 # PostgreSQL
                 with Session(self.engine) as session:
@@ -311,8 +308,11 @@ class DocEmbedder:
             return result
         elif self.dburl.startswith("duckdb"):
             with self.connection as conn:
+                # Use parameterized query to avoid SQL injection
                 result = conn.sql(
-                    f"SELECT * FROM {self.table_name} WHERE doc_hash = {hash}").fetchall()
+                    f"SELECT * FROM {self.table_name} WHERE doc_hash = ?",
+                    parameters=[hash]
+                ).fetchall()
             return result
         else:
             # PostgreSQL
@@ -362,21 +362,20 @@ class DocEmbedder:
             embedding_str = '[' + ','.join(str(v) for v in embedding) + ']'
             with self.connection as conn:
                 if self._should_create_tables():
-                    self._setup_duckdb()
-                    self._create_duckdb_table()
+                    self._init_duckdb()
                 try:
-                    conn.execute(text("""
-                        INSERT INTO embedding_duckdb (doc_hash, doc_name, collection_name, page_number, document, embedding)
-                        VALUES (:doc_hash, :doc_name, :collection_name, :page_number, :document, :embedding)
-                    """), {
-                        'doc_hash': document_hash,
-                        'doc_name': docname,
-                        'collection_name': self.collection_name,
-                        'page_number': page_number,
-                        'document': doctext,
-                        'embedding': embedding_str
-                    })
-                    conn.commit()
+                    # Use conn.sql() for direct DuckDB SQL execution
+                    conn.sql(f"""
+                        INSERT INTO {self.table_name} (doc_hash, doc_name, collection_name, page_number, document, embedding)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    """, parameters=[
+                        document_hash,
+                        docname,
+                        self.collection_name,
+                        page_number,
+                        doctext,
+                        embedding_str
+                    ])
                 except Exception as e:
                     logger.warning(f"Document {docname} page {page_number} may already exist or error: {e}")
         else:
@@ -449,29 +448,22 @@ class DocEmbedder:
             # Use direct SQL for DuckDB
             dimension = self._get_embedding_dimension()
             embedding_str = '[' + ','.join(str(v) for v in query_embedding) + ']'
-            with self.engine.connect() as conn:
+            with self.connection as conn:
                 if collection:
-                    result = conn.execute(text(f"""
+                    result = conn.sql(f"""
                         SELECT document 
-                        FROM embedding_duckdb 
-                        WHERE collection_name = :collection 
-                        ORDER BY array_cosine_similarity(embedding, :embedding) 
-                        LIMIT :num_docs
-                    """), {
-                        'collection': collection,
-                        'embedding': embedding_str,
-                        'num_docs': num_docs
-                    }).fetchall()
+                        FROM {self.table_name} 
+                        WHERE collection_name = ? 
+                        ORDER BY array_cosine_similarity(embedding, ?) 
+                        LIMIT ?
+                    """, parameters=[collection, embedding_str, num_docs]).fetchall()
                 else:
-                    result = conn.execute(text(f"""
+                    result = conn.sql(f"""
                         SELECT document 
-                        FROM embedding_duckdb 
-                        ORDER BY array_cosine_similarity(embedding, :embedding) 
-                        LIMIT :num_docs
-                    """), {
-                        'embedding': embedding_str,
-                        'num_docs': num_docs
-                    }).fetchall()
+                        FROM {self.table_name} 
+                        ORDER BY array_cosine_similarity(embedding, ?) 
+                        LIMIT ?
+                    """, parameters=[embedding_str, num_docs]).fetchall()
                 pages = [row[0] for row in result]
         else:
             # PostgreSQL
@@ -508,10 +500,10 @@ class DocEmbedder:
                 ).fetchall()
             return [(row[0], row[1]) for row in result]
         elif self.dburl.startswith("duckdb"):
-            with self.engine.connect() as conn:
-                result = conn.execute(text(
-                    "SELECT DISTINCT doc_name, collection_name FROM embedding_duckdb"
-                )).fetchall()
+            with self.connection as conn:
+                result = conn.sql(
+                    f"SELECT DISTINCT doc_name, collection_name FROM {self.table_name}"
+                ).fetchall()
             return [(row[0], row[1]) for row in result]
         else:
             # PostgreSQL
