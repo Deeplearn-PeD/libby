@@ -23,14 +23,12 @@ class LibbyInterface(LibbyDBot):
 
     def __init__(self, name: str='Libby D. Bot', collection_name: str = 'Libby D. Bot', languages=['pt_BR', 'en'], model: str = 'qwen3', dburl: str= 'sqlite:///memory.db',
                  embed_db: str = 'duckdb:///embeddings.duckdb'):
-        available_models = self.load_available_models()
-        self.collection_name = collection_name
-        if model is None:
-            model = settings.default_model
-        elif model in available_models:
-            model = available_models[model]
-        else:
-            raise ValueError(f"Invalid model. Available models: {', '.join(available_models.keys())}")
+        # available_models = self.load_available_models()
+        # available_models = self.llm.available_models
+        # self.collection_name = collection_name
+        #
+        # if model not in available_models:
+        #     raise ValueError(f"Invalid model. Available models: {', '.join(available_models.keys())}")
             
         super().__init__(name=name, languages=languages, model=model, dburl=dburl)
         self.DE = embed.DocEmbedder(col_name=collection_name, dburl=embed_db)

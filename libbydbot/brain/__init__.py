@@ -17,7 +17,7 @@ class LibbyDBot(Persona):
         super().__init__(name=name, languages=languages, model=model)
         self.dburl = dburl
         self.llm = LangModel(model=model, provider=PROVIDERS.get(model, 'google'))
-        self.struct_llm = StructuredLangModel(model=model, provider=PROVIDERS.get(model, 'google'))
+        self.struct_llm = StructuredLangModel(model=model, )
         self.prompt_template = None
         self.context_prompt = ""
         self.history = History(dburl)

@@ -53,7 +53,7 @@ class Embedding(Base):
 
 
 class DocEmbedder:
-    def __init__(self, col_name, dburl: str = 'duckdb:///:memory:', embedding_model: str = 'gemini-embedding-001'):
+    def __init__(self, col_name, dburl: str = 'duckdb:///:memory:', embedding_model: str = 'mxbai-embed-large'):
         self.dburl = dburl if dburl is not None else os.getenv("PGURL")
         self.embedding_model = embedding_model
         self._connection = None
@@ -448,17 +448,17 @@ class DocEmbedder:
                     result = conn.sql(f"""
                         SELECT document 
                         FROM {self.table_name} 
-                        WHERE collection_name = ? 
-                        ORDER BY array_cosine_similarity(embedding, ?) 
-                        LIMIT ?
-                    """, parameters=[collection, embedding_str, num_docs]).fetchall()
+                        WHERE collection_name = {collection} 
+                        ORDER BY array_cosine_similarity(embedding, {embedding_str}) 
+                        LIMIT {num_docs}
+                    """).fetchall()
                 else:
                     result = conn.sql(f"""
                         SELECT document 
                         FROM {self.table_name} 
-                        ORDER BY array_cosine_similarity(embedding, ?) 
-                        LIMIT ?
-                    """, parameters=[embedding_str, num_docs]).fetchall()
+                        ORDER BY array_cosine_similarity(embedding, {embedding_str}) 
+                        LIMIT {num_docs}
+                    """).fetchall()
                 pages = [row[0] for row in result]
         else:
             # PostgreSQL
