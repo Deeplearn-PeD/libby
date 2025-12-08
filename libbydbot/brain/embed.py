@@ -46,18 +46,7 @@ class Embedding(Base):
     document = Column(String)
     embedding = Column(Vector(1024))
 
-# DuckDB does not support vector types natively, so we will use a different class for DuckDB
-class EmbeddingDuckdb(Base):
-    __tablename__ = 'embedding_duckdb'
-    __table_args__ = {'extend_existing': True}
-    user_id_seq = Sequence('user_id_seq')
-    id = Column(Integer, user_id_seq, server_default=user_id_seq.next_value(), primary_key=True)
-    collection_name = Column(String)
-    doc_name = Column(String)
-    page_number = Column(Integer)
-    doc_hash = Column(String, unique=True)
-    document = Column(String)
-    # embedding = Column(Vector(1024, dimensions=1024)) # DuckDB does not support vector types natively
+
 
 
 
@@ -89,9 +78,7 @@ class DocEmbedder:
                 self.engine = create_engine("sqlite:///data/embedding.db")
                 # raise exc
             
-            if self.dburl.startswith("duckdb"):
-                self.embedding = EmbeddingDuckdb
-            else:
+            if self.dburl.lower().startswith("postgres"):
                 self.embedding = Embedding
 
         self.collection_name = col_name
@@ -99,15 +86,49 @@ class DocEmbedder:
         # Check if tables exist and create them only if they don't exist
         if self._should_create_tables():
             if self.dburl.startswith("duckdb"):
-                Base.metadata.create_all(self.engine, tables=[Base.metadata.sorted_tables[1]], checkfirst=True)
+                self._setup_duckdb()
+                self._create_duckdb_table()
                 # Add vector columns compatible with this engine
-                self._add_duckdb_vector_column()
-                Base.metadata.remove(Base.metadata.tables['embedding_duckdb'])
-                self.embedding = Table('embedding_duckdb', Base.metadata, autoload_with=self.engine)
+                # self._add_duckdb_vector_column()
+                # Base.metadata.remove(Base.metadata.tables['embedding_duckdb'])
+                # self.embedding = Table('embedding_duckdb', Base.metadata, autoload_with=self.engine)
             elif self.dburl.startswith("sqlite"):
                 self._create_sqlite_table(self.connection.cursor())
             else:
                 Base.metadata.create_all(self.engine, tables=[Base.metadata.sorted_tables[0]], checkfirst=True)
+
+    def _setup_duckdb(self):
+        """Install and load vss extension for DuckDB."""
+        with self.engine.connect() as conn:
+            # Install vss if not present
+            conn.execute(text("INSTALL vss;"))
+            conn.execute(text("LOAD vss;"))
+            conn.commit()
+
+    def _create_duckdb_table(self):
+        """Create embedding table in DuckDB using direct SQL."""
+        dimension = self._get_embedding_dimension()
+        with self.engine.connect() as conn:
+            # Check if table exists
+            result = conn.execute(text(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'embedding_duckdb';"
+            )).scalar()
+            if result == 0:
+                # Create table
+                create_sql = f"""                                                                                                                                                                                           
+                   CREATE TABLE embedding_duckdb (                                                                                                                                                                             
+                       id INTEGER PRIMARY KEY AUTOINCREMENT,                                                                                                                                                                   
+                       collection_name TEXT,                                                                                                                                                                                   
+                       doc_name TEXT,                                                                                                                                                                                          
+                       page_number INTEGER,                                                                                                                                                                                    
+                       doc_hash TEXT UNIQUE,                                                                                                                                                                                   
+                       document TEXT,                                                                                                                                                                                          
+                       embedding FLOAT[{dimension}]                                                                                                                                                                            
+                   );                                                                                                                                                                                                          
+                   """
+                conn.execute(text(create_sql))
+                conn.commit()
+                logger.info("Created DuckDB embedding table with vector support.")
 
     def _should_create_tables(self):
         """
@@ -117,7 +138,8 @@ class DocEmbedder:
             if self.dburl.startswith("sqlite"):
                 with self.connection as conn:
                     cursor = conn.cursor()
-                    result = cursor.execute("SELECT name FROM sqlite_schema WHERE type='table' AND name='embedding_sqlite';").fetchone()
+                    result = cursor.execute(
+                        "SELECT name FROM sqlite_schema WHERE type='table' AND name='embedding_sqlite';").fetchone()
                 return result is None
             else:
                 with Session(self.engine) as session:
