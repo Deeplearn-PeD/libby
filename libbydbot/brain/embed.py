@@ -138,14 +138,16 @@ class DocEmbedder:
                 """
                 conn.sql(create_sql)
                 logger.info("Created DuckDB embedding table with vector support.")
-                
-                # Create HNSW index
-                conn.sql(f"""
-                    CREATE INDEX embedding_duckdb_index 
-                    ON {self.table_name} USING HNSW(embedding) 
-                    WITH (metric='cosine');
-                """)
-                logger.info("Created HNSW index on embedding column.")
+
+                if ":memory:" in self.dburl:
+                    # Create HNSW index. only works with :memory: databases
+                    conn.sql(f"""
+                        CREATE INDEX embedding_duckdb_index 
+                        ON {self.table_name} USING HNSW(embedding) 
+                        WITH (metric='cosine');
+                    """)
+                    logger.info("Created HNSW index on embedding column.")
+                return conn
 
     def _should_create_tables(self):
         """
@@ -185,7 +187,7 @@ class DocEmbedder:
             return self._get_sqlite_connection()
         elif self.dburl.startswith("duckdb"):
             # self.engine is already a duckdb connection
-            return self.engine
+            return duckdb.connect() if ":memory" in self.dburl else duckdb.connect(self.dburl.split(":///")[-1])
         else: # PostgreSQL
             return self.engine
 
@@ -301,11 +303,11 @@ class DocEmbedder:
             return result
         elif self.dburl.startswith("duckdb"):
             with self.connection as conn:
-                # Use parameterized query to avoid SQL injection
+                if ":memory:" in self.dburl:
+                    conn = self._init_duckdb()
+
                 result = conn.sql(
-                    f"SELECT * FROM {self.table_name} WHERE doc_hash = ?",
-                    parameters=[hash]
-                ).fetchall()
+                    f"SELECT * FROM {self.table_name} WHERE doc_hash = '{hash}'").fetchall()
             return result
         else:
             # PostgreSQL
@@ -354,8 +356,8 @@ class DocEmbedder:
             # Convert embedding list to a string representation for DuckDB array literal
             embedding_str = '[' + ','.join(str(v) for v in embedding) + ']'
             with self.connection as conn:
-                if self._should_create_tables():
-                    self._init_duckdb()
+                if ":memory:" in self.dburl:
+                    conn = self._init_duckdb()
                 try:
                     # Use conn.sql() for direct DuckDB SQL execution
                     conn.sql(f"""

@@ -21,7 +21,7 @@ class LibbyInterface(LibbyDBot):
             return {}
         return {name: details['code'] for name, details in settings.models.items()}
 
-    def __init__(self, name: str='Libby D. Bot', collection_name: str = 'Libby D. Bot', languages=['pt_BR', 'en'], model: str = None, dburl: str= 'sqlite:///memory.db',
+    def __init__(self, name: str='Libby D. Bot', collection_name: str = 'Libby D. Bot', languages=['pt_BR', 'en'], model: str = 'qwen3', dburl: str= 'sqlite:///memory.db',
                  embed_db: str = 'duckdb:///embeddings.duckdb'):
         available_models = self.load_available_models()
         self.collection_name = collection_name
@@ -73,7 +73,7 @@ class LibbyInterface(LibbyDBot):
         response = self.ask(question)
         return response
 
-    def generate(self, prompt: str=None, output_file: str = None, prompt_file: str = None):
+    def generate(self, prompt: str='', output_file: str = '', prompt_file: str = ''):
         """
         Generate text based on a prompt
         :param prompt: The prompt to generate text from
