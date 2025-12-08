@@ -66,16 +66,18 @@ class DocEmbedder:
     def __init__(self, col_name, dburl: str = 'duckdb:///:memory:', embedding_model: str = 'gemini-embedding-001'):
         self.dburl = dburl if dburl is not None else os.getenv("PGURL")
         self.embedding_model = embedding_model
+        self._connection =None
 
         # Configure Google AI if using Gemini model
         if "gemini" in embedding_model.lower():
-            self.client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+            self.client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
         else:
             self.client = ollama.Client(host=os.getenv("OLLAMA_HOST", "http://localhost:11434"))
 
         if self.dburl.startswith("sqlite"):
+            self.table_name = 'embedding_sqlite'
             # For SQLite, use native connection instead of SQLAlchemy
-            self.sqlite_connection = self._get_sqlite_connection()
+            self._create_sqlite_table(self.connection.cursor())  # Create table if it doesn't exist
             self.engine = None  # No SQLAlchemy engine for SQLite
             self.embedding = None  # Will use direct SQL queries
         else:
@@ -103,7 +105,7 @@ class DocEmbedder:
                 Base.metadata.remove(Base.metadata.tables['embedding_duckdb'])
                 self.embedding = Table('embedding_duckdb', Base.metadata, autoload_with=self.engine)
             elif self.dburl.startswith("sqlite"):
-                self._create_sqlite_table()
+                self._create_sqlite_table(self.connection.cursor())
             else:
                 Base.metadata.create_all(self.engine, tables=[Base.metadata.sorted_tables[0]], checkfirst=True)
 
@@ -115,12 +117,12 @@ class DocEmbedder:
             if self.dburl.startswith("sqlite"):
                 with self.connection as conn:
                     cursor = conn.cursor()
-                    result = cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='embedding_sqlite';").fetchone()
+                    result = cursor.execute("SELECT name FROM sqlite_schema WHERE type='table' AND name='embedding_sqlite';").fetchone()
                 return result is None
             else:
                 with Session(self.engine) as session:
                     if self.dburl.startswith("duckdb"):
-                        result = session.execute(text("SELECT name FROM sqlite_master WHERE type='table' AND name='embedding_duckdb';")).fetchone()
+                        result = session.execute(text("SELECT table_name FROM information_schema.tables WHERE table_name='embedding_duckdb';")).fetchone()
                     else:
                         # PostgreSQL
                         result = session.execute(text("SELECT tablename FROM pg_tables WHERE tablename='embedding';")).fetchone()
@@ -135,6 +137,8 @@ class DocEmbedder:
         Get database connection. For SQLite, returns the native connection.
         For other databases, returns the SQLAlchemy engine.
         """
+        if self._connection is not None:
+            return self._connection
         if self.dburl.startswith("sqlite"):
             return self._get_sqlite_connection()
         else:
@@ -173,31 +177,32 @@ class DocEmbedder:
 
         session.commit()
 
-    def _create_sqlite_table(self):
+    def _create_sqlite_table(self, cursor):
         """
         Create the embedding table in SQLite database using native SQL
         """
         dimension = self._get_embedding_dimension()
-        with self.connection as conn:
-            cursor = conn.cursor()
-            # Create the table with all necessary columns
-            create_table_sql = f"""
-            CREATE VIRTUAL TABLE IF NOT EXISTS embedding_sqlite  using vec0(
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                collection_name TEXT,
-                doc_name TEXT,
-                page_number INTEGER,
-                doc_hash TEXT UNIQUE,
-                document TEXT,
-                embedding float[{dimension}]
-            );
-            """
+
+        # Create the table with all necessary columns
+        create_table_sql = f"""
+        CREATE VIRTUAL TABLE IF NOT EXISTS {self.table_name} USING vec0(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            collection_name TEXT,
+            doc_name TEXT,
+            page_number INTEGER,
+            doc_hash TEXT UNIQUE,
+            document TEXT,
+            embedding float[{dimension}]
+        );
+        """
+        try:
             cursor.execute(create_table_sql)
-            conn.commit()
-            # conn.close()
-
-        logger.info("Created SQLite embedding table with vector support.")
-
+            # maybe commit?
+            logger.info("Created SQLite embedding table with vector support.")
+        except Exception as e:
+            logger.error(f"Failed to create SQLite embedding table: {e}")
+            raise
+        # conn.close()
 
     def _get_embedding_dimension(self):
         """
@@ -247,9 +252,12 @@ class DocEmbedder:
         :return:
         """
         if self.dburl.startswith("sqlite"):
+
             with self.connection as conn:
                 cursor = conn.cursor()
-                result = cursor.execute("SELECT * FROM embedding_sqlite WHERE doc_hash = ?", (hash,)).fetchall()
+                self._create_sqlite_table(cursor)
+                q = f"SELECT * FROM {self.table_name} WHERE doc_hash='{hash}'"
+                result = cursor.execute(q).fetchall()
             conn.commit()
             # conn.close()
             return result
@@ -263,7 +271,7 @@ class DocEmbedder:
                 result = session.execute(statement).all()
             return result
 
-    def embed_text(self, doctext: str, docname: str, page_number: str):
+    def embed_text(self, doctext: str, docname: str, page_number: int):
         """
         Embed a page of a document.
         :param doctext: page of a document
@@ -283,8 +291,12 @@ class DocEmbedder:
             import struct
             embedding_bytes = struct.pack(f'{len(embedding)}f', *embedding)
 
+
             with self.connection as conn:
+
                 cursor = conn.cursor()
+                if self._should_create_tables():
+                    self._create_sqlite_table(cursor)
                 try:
                     cursor.execute("""
                         INSERT INTO embedding_sqlite (doc_hash, doc_name, collection_name, page_number, document, embedding)
@@ -369,7 +381,7 @@ class DocEmbedder:
                     ).fetchall()
                 else:
                     result = cursor.execute(
-                        "SELECT document FROM embedding_sqlite WHERE embedding MATCH ? ORDER BY distance  LIMIT ?",
+                        f"SELECT document FROM {self.table_name} WHERE embedding MATCH ? ORDER BY distance  LIMIT ?",
                         (query_embedding_bytes, num_docs)
                     ).fetchall()
 
@@ -418,8 +430,9 @@ class DocEmbedder:
         if self.dburl.startswith("sqlite"):
             with self.connection as conn:
                 cursor = conn.cursor()
+                self._create_sqlite_table(cursor)
                 result = cursor.execute(
-                    "SELECT DISTINCT doc_name, collection_name FROM embedding_sqlite"
+                    f"SELECT DISTINCT doc_name, collection_name FROM {self.table_name}"
                 ).fetchall()
             return [(row[0], row[1]) for row in result]
         else:
