@@ -17,6 +17,7 @@ import sqlite_vec
 from sqlalchemy import event, Column, Integer, String, Sequence, text, create_engine, select, Table, insert, func
 from sqlalchemy.exc import IntegrityError, NoSuchModuleError
 from sqlalchemy.orm import DeclarativeBase, Session
+import duckdb
 from duckdb import array_type
 
 dotenv.load_dotenv()
@@ -71,18 +72,25 @@ class DocEmbedder:
             self.embedding = None  # Will use direct SQL queries
         elif self.dburl.startswith("duckdb"):
             # For DuckDB, we'll use SQL directly via a connection
+            self.table_name = 'embedding_duckdb'
             try:
                 logger.info(f"Connecting to database with dburl: {self.dburl}")
-                self.engine = create_engine(self.dburl)
+                if ':memory:' in self.dburl:
+                    self.engine = duckdb.connect()
+                else:
+                    self.engine = duckdb.connect(self.dburl.split(":///")[-1])
+
+
             except NoSuchModuleError as exc:
                 logger.error(f"Invalid dburl string passed to DocEmbedder: \n{exc}")
-                self.engine = create_engine("sqlite:///data/embedding.db")
+                self.engine = duckdb.connect()
             self.embedding = None  # Not using SQLAlchemy ORM for DuckDB
             self.table_name = 'embedding_duckdb'
             # Ensure vss extension is loaded and table exists
             self._setup_duckdb()
             if self._should_create_tables():
                 self._create_duckdb_table()
+                # self._add_duckdb_index()
         else:
             # PostgreSQL
             try:
@@ -106,24 +114,23 @@ class DocEmbedder:
 
     def _setup_duckdb(self):
         """Install and load vss extension for DuckDB."""
-        with self.engine.connect() as conn:
+        with self.connection as conn:
             # Install vss if not present
-            conn.execute(text("INSTALL vss;"))
-            conn.execute(text("LOAD vss;"))
-            conn.commit()
+            conn.sql("INSTALL vss;")
+            conn.sql("LOAD vss;")
 
     def _create_duckdb_table(self):
         """Create embedding table in DuckDB using direct SQL."""
         dimension = self._get_embedding_dimension()
-        with self.engine.connect() as conn:
+        with self.connection as conn:
             # Check if table exists
-            result = conn.execute(text(
-                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'embedding_duckdb';"
-            )).scalar()
-            if result == 0:
+            result = conn.sql(
+                f"SELECT COUNT(*) FROM information_schema.tables WHERE table_name = '{self.table_name}';"
+            ).fetchall()
+            if not result:
                 # Create table
                 create_sql = f"""                                                                                                                                                                                           
-                   CREATE TABLE embedding_duckdb (                                                                                                                                                                             
+                   CREATE TABLE {self.table_name} (                                                                                                                                                                             
                        id INTEGER PRIMARY KEY AUTOINCREMENT,                                                                                                                                                                   
                        collection_name TEXT,                                                                                                                                                                                   
                        doc_name TEXT,                                                                                                                                                                                          
@@ -133,9 +140,16 @@ class DocEmbedder:
                        embedding FLOAT[{dimension}]                                                                                                                                                                            
                    );                                                                                                                                                                                                          
                    """
-                conn.execute(text(create_sql))
-                conn.commit()
+                conn.sql(create_sql)
+                self._add_duckdb_index()
+
                 logger.info("Created DuckDB embedding table with vector support.")
+    def _add_duckdb_index(self):
+        """
+        Add an index to the embedding table in DuckDB using direct SQL.
+        """
+        with self.connection as conn:
+            conn.sql(f"CREATE INDEX embedding_duckdb_index ON {self.table_name} USING HNSW(embedding) WITH (metric='cosine');")
 
     def _should_create_tables(self):
         """
@@ -169,12 +183,21 @@ class DocEmbedder:
         Get database connection. For SQLite, returns the native connection.
         For other databases, returns the SQLAlchemy engine.
         """
-        if self._connection is not None:
-            return self._connection
+        # if self._connection is not None:
+        #     return self._connection
         if self.dburl.startswith("sqlite"):
             return self._get_sqlite_connection()
-        else:
-            return self.engine
+        elif self.dburl.startswith("duckdb"):
+            if ":memory:" in self.dburl:
+                self._connection = duckdb.connect(":memory:")
+                # self._create_duckdb_table()
+            else:
+                self._connection = duckdb.connect(self.dburl.split(':///')[-1])
+                # self._create_duckdb_table()
+
+        else: # PostgreSQL
+            self._connection = self.engine
+        return self._connection
 
     def _get_sqlite_connection(self):
         dbpath = urlparse(self.dburl).path
@@ -287,10 +310,9 @@ class DocEmbedder:
             conn.commit()
             return result
         elif self.dburl.startswith("duckdb"):
-            with self.engine.connect() as conn:
-                result = conn.execute(text(
-                    "SELECT * FROM embedding_duckdb WHERE doc_hash = :hash"
-                ), {'hash': hash}).fetchall()
+            with self.connection as conn:
+                result = conn.sql(
+                    f"SELECT * FROM {self.table_name} WHERE doc_hash = {hash}").fetchall()
             return result
         else:
             # PostgreSQL
@@ -338,7 +360,10 @@ class DocEmbedder:
             dimension = self._get_embedding_dimension()
             # Convert embedding list to a string representation for DuckDB array literal
             embedding_str = '[' + ','.join(str(v) for v in embedding) + ']'
-            with self.engine.connect() as conn:
+            with self.connection as conn:
+                if self._should_create_tables():
+                    self._setup_duckdb()
+                    self._create_duckdb_table()
                 try:
                     conn.execute(text("""
                         INSERT INTO embedding_duckdb (doc_hash, doc_name, collection_name, page_number, document, embedding)
