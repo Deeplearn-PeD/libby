@@ -55,7 +55,7 @@ class DocEmbedder:
     def __init__(self, col_name, dburl: str = 'duckdb:///:memory:', embedding_model: str = 'gemini-embedding-001'):
         self.dburl = dburl if dburl is not None else os.getenv("PGURL")
         self.embedding_model = embedding_model
-        self._connection =None
+        self._connection = None
 
         # Configure Google AI if using Gemini model
         if "gemini" in embedding_model.lower():
@@ -69,15 +69,28 @@ class DocEmbedder:
             self._create_sqlite_table(self.connection.cursor())  # Create table if it doesn't exist
             self.engine = None  # No SQLAlchemy engine for SQLite
             self.embedding = None  # Will use direct SQL queries
-        else:
+        elif self.dburl.startswith("duckdb"):
+            # For DuckDB, we'll use SQL directly via a connection
             try:
                 logger.info(f"Connecting to database with dburl: {self.dburl}")
                 self.engine = create_engine(self.dburl)
             except NoSuchModuleError as exc:
                 logger.error(f"Invalid dburl string passed to DocEmbedder: \n{exc}")
                 self.engine = create_engine("sqlite:///data/embedding.db")
-                # raise exc
-            
+            self.embedding = None  # Not using SQLAlchemy ORM for DuckDB
+            self.table_name = 'embedding_duckdb'
+            # Ensure vss extension is loaded and table exists
+            self._setup_duckdb()
+            if self._should_create_tables():
+                self._create_duckdb_table()
+        else:
+            # PostgreSQL
+            try:
+                logger.info(f"Connecting to database with dburl: {self.dburl}")
+                self.engine = create_engine(self.dburl)
+            except NoSuchModuleError as exc:
+                logger.error(f"Invalid dburl string passed to DocEmbedder: \n{exc}")
+                self.engine = create_engine("sqlite:///data/embedding.db")
             if self.dburl.lower().startswith("postgres"):
                 self.embedding = Embedding
 
@@ -85,16 +98,10 @@ class DocEmbedder:
         
         # Check if tables exist and create them only if they don't exist
         if self._should_create_tables():
-            if self.dburl.startswith("duckdb"):
-                self._setup_duckdb()
-                self._create_duckdb_table()
-                # Add vector columns compatible with this engine
-                # self._add_duckdb_vector_column()
-                # Base.metadata.remove(Base.metadata.tables['embedding_duckdb'])
-                # self.embedding = Table('embedding_duckdb', Base.metadata, autoload_with=self.engine)
-            elif self.dburl.startswith("sqlite"):
+            if self.dburl.startswith("sqlite"):
                 self._create_sqlite_table(self.connection.cursor())
-            else:
+            elif not self.dburl.startswith("duckdb"):
+                # PostgreSQL
                 Base.metadata.create_all(self.engine, tables=[Base.metadata.sorted_tables[0]], checkfirst=True)
 
     def _setup_duckdb(self):
@@ -141,13 +148,16 @@ class DocEmbedder:
                     result = cursor.execute(
                         "SELECT name FROM sqlite_schema WHERE type='table' AND name='embedding_sqlite';").fetchone()
                 return result is None
+            elif self.dburl.startswith("duckdb"):
+                with self.engine.connect() as conn:
+                    result = conn.execute(text(
+                        "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'embedding_duckdb';"
+                    )).scalar()
+                return result == 0
             else:
+                # PostgreSQL
                 with Session(self.engine) as session:
-                    if self.dburl.startswith("duckdb"):
-                        result = session.execute(text("SELECT table_name FROM information_schema.tables WHERE table_name='embedding_duckdb';")).fetchone()
-                    else:
-                        # PostgreSQL
-                        result = session.execute(text("SELECT tablename FROM pg_tables WHERE tablename='embedding';")).fetchone()
+                    result = session.execute(text("SELECT tablename FROM pg_tables WHERE tablename='embedding';")).fetchone()
                     return result is None
         except Exception as e:
             logger.warning(f"Error checking if tables exist: {e}. Will attempt to create tables.")
@@ -189,20 +199,6 @@ class DocEmbedder:
         else:
             return ['embedding']
 
-    def _add_duckdb_vector_column(self):
-        """
-        Add a vector column named embedding to the database
-        """
-        # Check if the column embedding already exists
-        session = Session(self.engine)
-        result = session.execute(text("SELECT * FROM information_schema.columns WHERE table_name = 'embedding_duckdb' AND column_name = 'embedding';")).first()
-        if result is None:
-            # If it does not exist, add the column
-            logger.info("Adding vector column to DuckDB embedding table.")
-            dimension = self._get_embedding_dimension()
-            session.execute(text(f"ALTER TABLE embedding_duckdb ADD COLUMN embedding FLOAT[{dimension}];"))
-
-        session.commit()
 
     def _create_sqlite_table(self, cursor):
         """
@@ -283,22 +279,23 @@ class DocEmbedder:
         :return:
         """
         if self.dburl.startswith("sqlite"):
-
             with self.connection as conn:
                 cursor = conn.cursor()
                 self._create_sqlite_table(cursor)
                 q = f"SELECT * FROM {self.table_name} WHERE doc_hash='{hash}'"
                 result = cursor.execute(q).fetchall()
             conn.commit()
-            # conn.close()
             return result
         elif self.dburl.startswith("duckdb"):
-            statement = select(self.embedding).where(self.embedding.c.doc_hash == hash)
+            with self.engine.connect() as conn:
+                result = conn.execute(text(
+                    "SELECT * FROM embedding_duckdb WHERE doc_hash = :hash"
+                ), {'hash': hash}).fetchall()
+            return result
         else:
-            statement = select(self.embedding).where(self.embedding.doc_hash == hash)
-        
-        if not self.dburl.startswith("sqlite"):
+            # PostgreSQL
             with Session(self.engine) as session:
+                statement = select(self.embedding).where(self.embedding.doc_hash == hash)
                 result = session.execute(statement).all()
             return result
 
@@ -322,9 +319,7 @@ class DocEmbedder:
             import struct
             embedding_bytes = struct.pack(f'{len(embedding)}f', *embedding)
 
-
             with self.connection as conn:
-
                 cursor = conn.cursor()
                 if self._should_create_tables():
                     self._create_sqlite_table(cursor)
@@ -338,37 +333,46 @@ class DocEmbedder:
                     logger.warning(f"Document {docname} page {page_number} already exists in the database: {e}")
                 except Exception as e:
                     logger.error(f"Error: {e} generated when attempting to embed the following text: \n{doctext}")
+        elif self.dburl.startswith("duckdb"):
+            # Use direct SQL for DuckDB
+            dimension = self._get_embedding_dimension()
+            # Convert embedding list to a string representation for DuckDB array literal
+            embedding_str = '[' + ','.join(str(v) for v in embedding) + ']'
+            with self.engine.connect() as conn:
+                try:
+                    conn.execute(text("""
+                        INSERT INTO embedding_duckdb (doc_hash, doc_name, collection_name, page_number, document, embedding)
+                        VALUES (:doc_hash, :doc_name, :collection_name, :page_number, :document, :embedding)
+                    """), {
+                        'doc_hash': document_hash,
+                        'doc_name': docname,
+                        'collection_name': self.collection_name,
+                        'page_number': page_number,
+                        'document': doctext,
+                        'embedding': embedding_str
+                    })
+                    conn.commit()
+                except Exception as e:
+                    logger.warning(f"Document {docname} page {page_number} may already exist or error: {e}")
         else:
-            # Use SQLAlchemy for other databases
+            # PostgreSQL
             with Session(self.engine) as session:
-                if self.dburl.startswith("duckdb"):
-                    doc_vector_insert = insert(self.embedding).values(
-                        doc_hash=document_hash,
-                        doc_name=docname,
-                        collection_name=self.collection_name,
-                        page_number=page_number,
-                        document=doctext,
-                        embedding=embedding)
-
-                    session.execute(doc_vector_insert)
+                doc_vector = self.embedding(
+                    doc_hash=document_hash,
+                    doc_name=docname,
+                    collection_name=self.collection_name,
+                    page_number=page_number,
+                    document=doctext,
+                    embedding=embedding)
+                try:
+                    session.add(doc_vector)
                     session.commit()
-                else:
-                    doc_vector = self.embedding(
-                        doc_hash=document_hash,
-                        doc_name=docname,
-                        collection_name=self.collection_name,
-                        page_number=page_number,
-                        document=doctext,
-                        embedding=embedding)
-                    try:
-                        session.add(doc_vector)
-                        session.commit()
-                    except IntegrityError as e:
-                        session.rollback()
-                        logger.warning(f"Document {docname} page {page_number} already exists in the database: {e}")
-                    except ValueError as e:
-                        logger.error(f"Error: {e} generated when attempting to embed the following text: \n{doctext}")
-                        session.rollback()
+                except IntegrityError as e:
+                    session.rollback()
+                    logger.warning(f"Document {docname} page {page_number} already exists in the database: {e}")
+                except ValueError as e:
+                    logger.error(f"Error: {e} generated when attempting to embed the following text: \n{doctext}")
+                    session.rollback()
 
     def embed_path(self, corpus_path: str):
         """
@@ -408,47 +412,59 @@ class DocEmbedder:
                     # Simple similarity search
                     result = cursor.execute(
                         "SELECT document FROM embedding_sqlite WHERE collection_name = ? AND embedding MATCH ? ORDER BY distance LIMIT ?",
-                        (collection,query_embedding_bytes, num_docs)
+                        (collection, query_embedding_bytes, num_docs)
                     ).fetchall()
                 else:
                     result = cursor.execute(
-                        f"SELECT document FROM {self.table_name} WHERE embedding MATCH ? ORDER BY distance  LIMIT ?",
+                        f"SELECT document FROM {self.table_name} WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
                         (query_embedding_bytes, num_docs)
                     ).fetchall()
-
+                pages = [row[0] for row in result]
+        elif self.dburl.startswith("duckdb"):
+            # Use direct SQL for DuckDB
+            dimension = self._get_embedding_dimension()
+            embedding_str = '[' + ','.join(str(v) for v in query_embedding) + ']'
+            with self.engine.connect() as conn:
+                if collection:
+                    result = conn.execute(text(f"""
+                        SELECT document 
+                        FROM embedding_duckdb 
+                        WHERE collection_name = :collection 
+                        ORDER BY array_cosine_similarity(embedding, :embedding) 
+                        LIMIT :num_docs
+                    """), {
+                        'collection': collection,
+                        'embedding': embedding_str,
+                        'num_docs': num_docs
+                    }).fetchall()
+                else:
+                    result = conn.execute(text(f"""
+                        SELECT document 
+                        FROM embedding_duckdb 
+                        ORDER BY array_cosine_similarity(embedding, :embedding) 
+                        LIMIT :num_docs
+                    """), {
+                        'embedding': embedding_str,
+                        'num_docs': num_docs
+                    }).fetchall()
                 pages = [row[0] for row in result]
         else:
-            # Use SQLAlchemy for other databases
+            # PostgreSQL
             dimension = self._get_embedding_dimension()
             with Session(self.engine) as session:
                 if collection:
-                    if self.dburl.startswith("duckdb"):
-                        query_text = f'select document from embedding_duckdb where collection_name = :collection_name order by array_cosine_similarity(embedding, CAST(:embedding as FLOAT[{dimension}])) limit :num_docs;'
-                        query = text(query_text)
-                        result = session.execute(query, {'collection_name': collection, 'embedding': query_embedding, 'num_docs': num_docs})
-                        pages = [row[0] for row in result.fetchall()]
-                    else:
-                        # For PostgreSQL
-                        statement = (
-                            select(self.embedding.document).where(self.embedding.collection_name == collection)
-                            .order_by(self.embedding.embedding.l2_distance(query_embedding))
-                            .limit(num_docs)
-                        )
-                        pages = session.scalars(statement)
+                    statement = (
+                        select(self.embedding.document).where(self.embedding.collection_name == collection)
+                        .order_by(self.embedding.embedding.l2_distance(query_embedding))
+                        .limit(num_docs)
+                    )
                 else:
-                    if self.dburl.startswith("duckdb"):
-                        query_text = f'select document from embedding_duckdb order by array_cosine_similarity(embedding, CAST(:embedding as FLOAT[{dimension}])) limit :num_docs;'
-                        query = text(query_text)
-                        result = session.execute(query, {'embedding': query_embedding, 'num_docs': num_docs})
-                        pages = [row[0] for row in result.fetchall()]
-                    else:
-                        # For PostgreSQL
-                        statement = (
-                            select(self.embedding.document)
-                            .order_by(self.embedding.embedding.l2_distance(query_embedding))
-                            .limit(num_docs)
-                        )
-                        pages = session.scalars(statement)
+                    statement = (
+                        select(self.embedding.document)
+                        .order_by(self.embedding.embedding.l2_distance(query_embedding))
+                        .limit(num_docs)
+                    )
+                pages = session.scalars(statement)
         
         data = "\n".join(pages)
         return data
@@ -466,13 +482,16 @@ class DocEmbedder:
                     f"SELECT DISTINCT doc_name, collection_name FROM {self.table_name}"
                 ).fetchall()
             return [(row[0], row[1]) for row in result]
+        elif self.dburl.startswith("duckdb"):
+            with self.engine.connect() as conn:
+                result = conn.execute(text(
+                    "SELECT DISTINCT doc_name, collection_name FROM embedding_duckdb"
+                )).fetchall()
+            return [(row[0], row[1]) for row in result]
         else:
+            # PostgreSQL
             with Session(self.engine) as session:
-                if self.dburl.startswith("duckdb"):
-                    statement = select(self.embedding.c.doc_name, self.embedding.c.collection_name).distinct()
-                else:
-                    statement = select(self.embedding.doc_name, self.embedding.collection_name).distinct()
-                
+                statement = select(self.embedding.doc_name, self.embedding.collection_name).distinct()
                 result = session.execute(statement).fetchall()
                 return [(row[0], row[1]) for row in result]
 
