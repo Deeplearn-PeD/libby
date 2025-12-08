@@ -175,26 +175,19 @@ class DocEmbedder:
             return True
 
     @property
-    def connection(self) -> sqlite3.Connection:
+    def connection(self):
         """
         Get database connection. For SQLite, returns the native connection.
-        For other databases, returns the SQLAlchemy engine.
+        For DuckDB, returns the duckdb connection object (self.engine).
+        For PostgreSQL, returns the SQLAlchemy engine.
         """
-        # if self._connection is not None:
-        #     return self._connection
         if self.dburl.startswith("sqlite"):
             return self._get_sqlite_connection()
         elif self.dburl.startswith("duckdb"):
-            if ":memory:" in self.dburl:
-                self._connection = duckdb.connect(":memory:")
-                # self._create_duckdb_table()
-            else:
-                self._connection = duckdb.connect(self.dburl.split(':///')[-1])
-                # self._create_duckdb_table()
-
+            # self.engine is already a duckdb connection
+            return self.engine
         else: # PostgreSQL
-            self._connection = self.engine
-        return self._connection
+            return self.engine
 
     def _get_sqlite_connection(self):
         dbpath = urlparse(self.dburl).path
@@ -515,5 +508,10 @@ class DocEmbedder:
     def __del__(self):
         if self.dburl.startswith("sqlite") and self._connection:
             self._connection.close()
+        # For DuckDB, self.engine is a duckdb connection, not an SQLAlchemy engine
+        # It doesn't have a dispose() method, so we should close it if it exists
         if hasattr(self, 'engine') and self.engine:
-            self.engine.dispose()
+            if self.dburl.startswith("duckdb"):
+                self.engine.close()
+            else:
+                self.engine.dispose()
