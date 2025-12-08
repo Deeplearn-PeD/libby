@@ -159,8 +159,13 @@ class DocEmbedder:
 
     @property
     def embeddings_list(self):
-        embedding_list = list(Base.metadata.tables.keys())
-        return embedding_list
+        """Return list of available embedding table names."""
+        if self.dburl.startswith("duckdb"):
+            return ['embedding_duckdb']
+        elif self.dburl.startswith("sqlite"):
+            return ['embedding_sqlite']
+        else:
+            return ['embedding']
 
     def _add_duckdb_vector_column(self):
         """
@@ -232,18 +237,22 @@ class DocEmbedder:
         """
         Check if the vector extension exists in the database
         """
-        session = Session(self.engine)
         if self.dburl.startswith("postgresql"):
-            session.execute(text('CREATE EXTENSION IF NOT EXISTS vector;'))
+            with Session(self.engine) as session:
+                session.execute(text('CREATE EXTENSION IF NOT EXISTS vector;'))
+                session.commit()
         elif self.dburl.startswith("duckdb"):
-            session.execute(text('INSTALL vss;LOAD vss;'))
+            # Already handled in _setup_duckdb
+            pass
         elif self.dburl.startswith("sqlite"):
-            try:
-                sqlite_version, vec_version = session.execute(text("SELECT sqlite_version(), vec_version()")).fetchone()
-                logger.info(f"SQLite version: {sqlite_version}, vector extension version: {vec_version}")
-            except Exception as e:
-                logger.error(f"Error checking vector extension: {e}")
-        session.commit()
+            with self.connection as conn:
+                cursor = conn.cursor()
+                try:
+                    cursor.execute("SELECT sqlite_version(), vec_version()")
+                    sqlite_version, vec_version = cursor.fetchone()
+                    logger.info(f"SQLite version: {sqlite_version}, vector extension version: {vec_version}")
+                except Exception as e:
+                    logger.error(f"Error checking vector extension: {e}")
 
     def _check_existing(self, hash: str):
         """
@@ -446,8 +455,7 @@ class DocEmbedder:
                 return [(row[0], row[1]) for row in result]
 
     def __del__(self):
-        if self.dburl.startswith("sqlite") and hasattr(self, 'sqlite_connection'):
-            self.sqlite_connection.close()
-        elif hasattr(self, 'engine') and self.engine:
-            with Session(self.engine) as session:
-                session.close()
+        if self.dburl.startswith("sqlite") and self._connection:
+            self._connection.close()
+        if hasattr(self, 'engine') and self.engine:
+            self.engine.dispose()
