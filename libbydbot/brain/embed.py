@@ -53,8 +53,8 @@ class Embedding(Base):
 
 
 class DocEmbedder:
-    def __init__(self, col_name, dburl: str = 'duckdb:///:memory:', embedding_model: str = 'mxbai-embed-large'):
-        self.dburl = dburl if dburl is not None else os.getenv("PGURL")
+    def __init__(self, col_name, dburl: str = '', embedding_model: str = 'mxbai-embed-large'):
+        self.dburl = dburl if dburl else os.getenv("PGURL")
         self.embedding_model = embedding_model
         self._connection = None
 
@@ -247,7 +247,7 @@ class DocEmbedder:
         Get the embedding dimension based on the model
         """
         if self.embedding_model == 'gemini-embedding-001':
-            return 1536
+            return 1024 #1536
         else:  # mxbai-embed-large and other Ollama models
             return 1024
 
