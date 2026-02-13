@@ -4,16 +4,72 @@ from .memory import History
 import loguru
 logger = loguru.logger
 
+# Monkeypatch base_agent.llminterface.LangModel.get_response 
+# to fix Agent.run() argument mismatch (system_prompt is not an argument in pydantic_ai Agent.run)
+def patched_get_response(self, question: str, context: str = ""):
+    if not self.agent:
+        self._setup_llm_client(self.provider or 'ollama')
+    
+    import asyncio
+    import nest_asyncio
+    nest_asyncio.apply()
+    
+    async def _run():
+        history = self.chat_history.get_all()
+        # combine context into question for robustness if system_prompt fails
+        full_prompt = f"Context: {context}\n\nQuestion: {question}" if context else question
+        result = await self.agent.run(
+            full_prompt,
+            message_history=history
+        )
+        for msg in result.new_messages():
+            self.chat_history.enqueue(msg)
+        return result.data
+        
+    return asyncio.run(_run())
+
+def patched_structured_get_response(self, question: str, context: str = "", response_model = None):
+    if not self.agent:
+        self._setup_llm_client(self.provider or 'ollama')
+    
+    import asyncio
+    import nest_asyncio
+    nest_asyncio.apply()
+    
+    async def _run():
+        history = self.chat_history.get_all()
+        full_prompt = f"Context: {context}\n\nQuestion: {question}" if context else question
+        result = await self.agent.run(
+            full_prompt,
+            message_history=history,
+            result_type=response_model
+        )
+        for msg in result.new_messages():
+            self.chat_history.enqueue(msg)
+        return result.data
+        
+    return asyncio.run(_run())
+
+LangModel.get_response = patched_get_response
+StructuredLangModel.get_response = patched_structured_get_response
+
 PROVIDERS = {
     "llama3.2": "llama",
     "gemma3": "google",
+    "gemma": "google",
     "gpt-4o": "openai",
     "qwen3": "qwen",
     "gemini": "google"
 }
 
 class LibbyDBot(Persona):
-    def __init__(self, name: str = 'Libby D. Bot', languages=['pt_BR', 'en'], model: str = 'gpt-4o', dburl: str= 'sqlite:///memory.db', provider: str='google', embed_db: str = 'duckdb:///embeddings.duckdb'):
+    def __init__(self, name: str = 'Libby D. Bot', languages=['pt_BR', 'en'], model: str = 'llama3.2', dburl: str= 'sqlite:///memory.db', provider: str=None, embed_db: str = 'duckdb:///embeddings.duckdb'):
+        if model.lower() == 'gemma':
+            model = 'gemma3'
+        
+        if model not in PROVIDERS:
+            raise ValueError(f"Model {model} not supported. Supported models: {list(PROVIDERS.keys())}")
+            
         super().__init__(name=name, languages=languages, model=model)
         self.dburl = dburl
         self.llm = LangModel(model=model, provider=PROVIDERS.get(model, 'google'))

@@ -1,5 +1,19 @@
 import pytest
+from unittest.mock import patch, MagicMock
+import numpy as np
 from libbydbot.brain.embed import DocEmbedder
+
+@pytest.fixture(autouse=True)
+def mock_embeddings():
+    with patch('libbydbot.brain.embed.DocEmbedder._generate_embedding') as mocked:
+        # Return a fixed vector of 1024 dimensions
+        mocked.return_value = np.zeros(1024).tolist()
+        yield mocked
+
+@pytest.fixture(autouse=True)
+def mock_pgvector(monkeypatch):
+    # Mock postgres connection if needed, but for now we focus on SQLite/DuckDB
+    pass
 
 
 def test_embed_text():

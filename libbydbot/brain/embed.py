@@ -115,47 +115,49 @@ class DocEmbedder:
         and create HNSW index.
         """
         dimension = self._get_embedding_dimension()
-        with self.connection as conn:
-            # Install and load vss extension
-            conn.sql("INSTALL vss;")
-            conn.sql("LOAD vss;")
-            
-            # Check if table exists
-            result = conn.sql(
-                f"SELECT COUNT(*) FROM information_schema.tables WHERE table_name = '{self.table_name}';"
-            ).fetchall()
-            # result is a list of tuples; we check if count > 0
-            if result[0][0] == 0:
-                # Create table (DuckDB uses INTEGER PRIMARY KEY for auto‑increment)
-                create_sql = f"""
-                CREATE TABLE {self.table_name} (
-                    id INTEGER PRIMARY KEY,
-                    collection_name TEXT,
-                    doc_name TEXT,
-                    page_number INTEGER,
-                    doc_hash TEXT UNIQUE,
-                    document TEXT,
-                    embedding FLOAT[{dimension}]
-                );
-                """
-                conn.sql(create_sql)
-                logger.info("Created DuckDB embedding table with vector support.")
+        db_path = urlparse(self.dburl).path
+        conn = duckdb.connect(db_path)
+        
+        # Install and load vss extension
+        conn.sql("INSTALL vss;")
+        conn.sql("LOAD vss;")
+        
+        # Check if table exists
+        result = conn.sql(
+            f"SELECT COUNT(*) FROM information_schema.tables WHERE table_name = '{self.table_name}';"
+        ).fetchall()
+        # result is a list of tuples; we check if count > 0
+        if result[0][0] == 0:
+            # Create table
+            create_sql = f"""
+            CREATE TABLE {self.table_name} (
+                id INTEGER PRIMARY KEY,
+                collection_name TEXT,
+                doc_name TEXT,
+                page_number INTEGER,
+                doc_hash TEXT UNIQUE,
+                document TEXT,
+                embedding FLOAT[{dimension}]
+            );
+            """
+            conn.sql(create_sql)
+            logger.info("Created DuckDB embedding table with vector support.")
 
-                # Create FTS index
-                conn.sql("INSTALL fts;")
-                conn.sql("LOAD fts;")
-                conn.sql(f"PRAGMA create_fts_index('{self.table_name}', 'id', 'document');")
-                logger.info("Created DuckDB FTS index for hybrid search.")
+            # Create FTS index
+            conn.sql("INSTALL fts;")
+            conn.sql("LOAD fts;")
+            conn.sql(f"PRAGMA create_fts_index('{self.table_name}', 'id', 'document');")
+            logger.info("Created DuckDB FTS index for hybrid search.")
 
-                if ":memory:" in self.dburl:
-                    # Create HNSW index. only works with :memory: databases
-                    conn.sql(f"""
-                        CREATE INDEX embedding_duckdb_index 
-                        ON {self.table_name} USING HNSW(embedding) 
-                        WITH (metric='cosine');
-                    """)
-                    logger.info("Created HNSW index on embedding column.")
-                return conn
+            if ":memory:" in self.dburl:
+                # Create HNSW index.
+                conn.sql(f"""
+                    CREATE INDEX embedding_duckdb_index 
+                    ON {self.table_name} USING HNSW(embedding) 
+                    WITH (metric='cosine');
+                """)
+                logger.info("Created HNSW index on embedding column.")
+        return conn
 
     def _should_create_tables(self):
         """
@@ -166,7 +168,7 @@ class DocEmbedder:
                 with self.connection as conn:
                     cursor = conn.cursor()
                     result = cursor.execute(
-                        "SELECT name FROM sqlite_schema WHERE type='table' AND name='embedding_sqlite';").fetchone()
+                        f"SELECT name FROM sqlite_master WHERE type='table' AND name='{self.table_name}'").fetchone()
                 return result is None
             elif self.dburl.startswith("duckdb"):
                 with self.connection as conn:
@@ -232,11 +234,10 @@ class DocEmbedder:
         # Create the table with all necessary columns
         create_table_sql = f"""
         CREATE VIRTUAL TABLE IF NOT EXISTS {self.table_name} USING vec0(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
             collection_name TEXT,
             doc_name TEXT,
             page_number INTEGER,
-            doc_hash TEXT UNIQUE,
+            doc_hash TEXT,
             document TEXT,
             embedding float[{dimension}]
         );
@@ -246,7 +247,7 @@ class DocEmbedder:
         CREATE VIRTUAL TABLE IF NOT EXISTS {self.table_name}_fts USING fts5(
             document,
             content='{self.table_name}',
-            content_rowid='id'
+            content_rowid='rowid'
         );
         """
         try:
@@ -312,25 +313,25 @@ class DocEmbedder:
         if self.dburl.startswith("sqlite"):
             with self.connection as conn:
                 cursor = conn.cursor()
-                self._create_sqlite_table(cursor)
-                q = f"SELECT * FROM {self.table_name} WHERE doc_hash='{hash}'"
-                result = cursor.execute(q).fetchall()
-            conn.commit()
-            return result
+                if self._should_create_tables():
+                    self._create_sqlite_table(cursor)
+                q = f"SELECT rowid FROM {self.table_name} WHERE doc_hash=?"
+                result = cursor.execute(q, (hash,)).fetchone()
+            return result is not None
         elif self.dburl.startswith("duckdb"):
             with self.connection as conn:
                 if ":memory:" in self.dburl:
                     conn = self._init_duckdb()
 
                 result = conn.sql(
-                    f"SELECT * FROM {self.table_name} WHERE doc_hash = '{hash}'").fetchall()
-            return result
+                    f"SELECT id FROM {self.table_name} WHERE doc_hash = ?", params=[hash]).fetchall()
+            return len(result) > 0
         else:
             # PostgreSQL
             with Session(self.engine) as session:
                 statement = select(self.embedding).where(self.embedding.doc_hash == hash)
                 result = session.execute(statement).all()
-            return result
+            return len(result) > 0
 
     def embed_text(self, doctext: str, docname: str, page_number: int):
         """
@@ -357,10 +358,11 @@ class DocEmbedder:
                 if self._should_create_tables():
                     self._create_sqlite_table(cursor)
                 try:
+                    logger.info(f"Inserting into {self.table_name}: {docname} page {page_number}")
                     cursor.execute(f"""
-                        INSERT INTO {self.table_name} (doc_hash, doc_name, collection_name, page_number, document, embedding)
+                        INSERT INTO {self.table_name} (collection_name, doc_name, page_number, doc_hash, document, embedding)
                         VALUES (?, ?, ?, ?, ?, ?)
-                    """, (document_hash, docname, self.collection_name, page_number, doctext, embedding_bytes))
+                    """, (self.collection_name, docname, page_number, document_hash, doctext, embedding_bytes))
                     
                     # Update FTS table
                     last_id = cursor.lastrowid
@@ -454,12 +456,12 @@ class DocEmbedder:
                 # Vector Search
                 if collection:
                     vector_results = cursor.execute(
-                        f"SELECT id, document, distance FROM {self.table_name} WHERE collection_name = ? AND embedding MATCH ? ORDER BY distance LIMIT ?",
+                        f"SELECT rowid, document, distance FROM {self.table_name} WHERE collection_name = ? AND embedding MATCH ? ORDER BY distance LIMIT ?",
                         (collection, query_embedding_bytes, num_docs * 2)
                     ).fetchall()
                 else:
                     vector_results = cursor.execute(
-                        f"SELECT id, document, distance FROM {self.table_name} WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
+                        f"SELECT rowid, document, distance FROM {self.table_name} WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
                         (query_embedding_bytes, num_docs * 2)
                     ).fetchall()
                 
@@ -474,17 +476,17 @@ class DocEmbedder:
                 scores = {}
                 docs = {}
                 
-                for rank, (id, doc, dist) in enumerate(vector_results):
-                    scores[id] = scores.get(id, 0) + 1.0 / (k + rank + 1)
-                    docs[id] = doc
+                for rank, (rowid, doc, dist) in enumerate(vector_results):
+                    scores[rowid] = scores.get(rowid, 0) + 1.0 / (k + rank + 1)
+                    docs[rowid] = doc
                     
-                for rank, (id, doc, rank_score) in enumerate(fts_results):
-                    scores[id] = scores.get(id, 0) + 1.0 / (k + rank + 1)
-                    docs[id] = doc
+                for rank, (rowid, doc, rank_score) in enumerate(fts_results):
+                    scores[rowid] = scores.get(rowid, 0) + 1.0 / (k + rank + 1)
+                    docs[rowid] = doc
                 
                 # Sort by score and take top num_docs
                 sorted_ids = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)[:num_docs]
-                pages = [docs[id] for id in sorted_ids]
+                pages = [docs[rowid] for rowid in sorted_ids]
         elif self.dburl.startswith("duckdb"):
             # Use direct SQL for DuckDB
             dimension = self._get_embedding_dimension()
@@ -495,7 +497,7 @@ class DocEmbedder:
                 
                 # Vector Search
                 vector_results = conn.sql(f"""
-                    SELECT id, document, array_cosine_similarity(embedding, {embedding_str}) as similarity
+                    SELECT id, document, array_cosine_similarity(embedding, {embedding_str}::FLOAT[{dimension}]) as similarity
                     FROM {self.table_name} 
                     {f"WHERE collection_name = '{collection}'" if collection else ""}
                     ORDER BY similarity DESC

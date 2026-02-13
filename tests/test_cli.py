@@ -28,7 +28,7 @@ class TestLibbyInterface(unittest.TestCase):
         self.assertEqual(libby.model, 'llama3.2')  # Default model from config
 
     def test_embed(self):
-        de = self.libby.embed(corpus_path='test_corpus')
+        de = self.libby.embed(corpus_path='tests/test_corpus')
         self.assertIsNotNone(de)
         self.assertEqual(de.collection_name, 'test_collection')
 

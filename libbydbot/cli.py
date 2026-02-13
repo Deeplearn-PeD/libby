@@ -21,7 +21,7 @@ class LibbyInterface(LibbyDBot):
             return {}
         return {name: details['code'] for name, details in settings.models.items()}
 
-    def __init__(self, name: str='Libby D. Bot', collection_name: str = 'Libby D. Bot', languages=['pt_BR', 'en'], model: str = 'qwen3', dburl: str= 'sqlite:///memory.db',
+    def __init__(self, name: str='Libby D. Bot', collection_name: str = 'Libby D. Bot', languages=['pt_BR', 'en'], model: str = 'llama3.2', dburl: str= 'sqlite:///memory.db',
                  embed_db: str = 'duckdb:///embeddings.duckdb'):
         super().__init__(name=name, languages=languages, model=model, dburl=dburl, embed_db=embed_db)
         if collection_name != name:
@@ -46,7 +46,14 @@ class LibbyInterface(LibbyDBot):
         :return: Answer to the question
         """
         # If the agent has tools registered, we can try to let it handle retrieval
-        if hasattr(self.llm, 'agent') and self.llm.agent.tools:
+        # In Pydantic AI, tools are often in _functions
+        has_tools = hasattr(self.llm, 'agent') and (
+            hasattr(self.llm.agent, 'tools') or 
+            hasattr(self.llm.agent, '_functions') or
+            hasattr(self.llm.agent, 'tool')
+        )
+
+        if has_tools:
             self.set_prompt(f"You are Libby D. Bot, a research Assistant. Use the search_library tool to find information if needed.")
             # Clear manual context to encourage tool use
             self.set_context("")

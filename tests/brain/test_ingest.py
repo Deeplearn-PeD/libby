@@ -6,8 +6,8 @@ from sqlmodel import Session, select
 
 
 def test_initialization_default():
-    ingester = FileSystemIngester(path="test_corpus", file_type="pdf")
-    assert ingester.path == "test_corpus"
+    ingester = FileSystemIngester(path="tests/test_corpus", file_type="pdf")
+    assert ingester.path == "tests/test_corpus"
     assert ingester.file_type == "pdf"
     assert ingester.engine is not None
 
@@ -18,7 +18,7 @@ def test_initialization_default():
 #     assert ingester.engine.url.database == "custom.db"
 
 def test_ingest():
-    ingester = FileSystemIngester(path="test_corpus", file_type="pdf")
+    ingester = FileSystemIngester(path="tests/test_corpus", file_type="pdf")
     ingester.ingest()
 
     with Session(ingester.engine) as session:
@@ -29,7 +29,7 @@ def test_ingest():
         assert isinstance( results[0].text['0'], str)
 
 def test_pdf_pipeline():
-    pdf_path = "test_corpus"
+    pdf_path = "tests/test_corpus"
     pipeline = PDFPipeline(path=str(pdf_path))
     documents = list(pipeline)
     assert len(documents) == 1
