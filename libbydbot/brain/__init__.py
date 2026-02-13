@@ -13,7 +13,7 @@ PROVIDERS = {
 }
 
 class LibbyDBot(Persona):
-    def __init__(self, name: str = 'Libby D. Bot', languages=['pt_BR', 'en'], model: str = 'gpt-4o', dburl: str= 'sqlite:///memory.db', provider: str='google'):
+    def __init__(self, name: str = 'Libby D. Bot', languages=['pt_BR', 'en'], model: str = 'gpt-4o', dburl: str= 'sqlite:///memory.db', provider: str='google', embed_db: str = 'duckdb:///embeddings.duckdb'):
         super().__init__(name=name, languages=languages, model=model)
         self.dburl = dburl
         self.llm = LangModel(model=model, provider=PROVIDERS.get(model, 'google'))
@@ -21,6 +21,22 @@ class LibbyDBot(Persona):
         self.prompt_template = None
         self.context_prompt = ""
         self.history = History(dburl)
+        
+        # doc_embedder for RAG
+        from .embed import DocEmbedder
+        self.DE = DocEmbedder(col_name=name, dburl=embed_db)
+        
+        # Register retrieval as a tool if the agent supports it
+        if hasattr(self.llm, 'agent'):
+            @self.llm.agent.tool_plain
+            def search_library(query: str) -> str:
+                """Search the document library for relevant information using hybrid search.
+                
+                Args:
+                    query: The search query.
+                """
+                logger.info(f"Agent is searching library for: {query}")
+                return self.DE.retrieve_docs(query)
 
     @property
     def context(self):

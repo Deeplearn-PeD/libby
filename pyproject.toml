@@ -1,8 +1,6 @@
 [project]
-authors = [
-    {name = "Flávio Codeço Coelho", email = "fccoelho@gmail.com"},
-]
-license = {text = "GPLv3"}
+authors = [{ name = "Flávio Codeço Coelho", email = "fccoelho@gmail.com" }]
+license = "GPL-3.0-only"
 requires-python = ">=3.12,<3.14"
 dependencies = [
     "fire<1.0.0,>=0.6.0",
@@ -38,15 +36,14 @@ libby = "libbydbot.cli:main"
 [tool.setuptools.package-data]
 libbydbot = ["config.yml"]
 
+[tool.setuptools.packages.find]
+include = ["libbydbot*"]
+exclude = ["site*"]
+
 [dependency-groups]
 dev = [
-#    "aider-chat>=0.70.0",
+    #    "aider-chat>=0.70.0",
 ]
 
 [project.optional-dependencies]
-dev = [
-    "pytest<9.0.0,>=8.1.1",
-    "mkdocs<2.0.0,>=1.5.3",
-]
-
-
+dev = ["pytest<9.0.0,>=8.1.1", "mkdocs<2.0.0,>=1.5.3"]

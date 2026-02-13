@@ -53,9 +53,11 @@ class Embedding(Base):
 
 
 class DocEmbedder:
-    def __init__(self, col_name, dburl: str = '', embedding_model: str = 'mxbai-embed-large'):
+    def __init__(self, col_name, dburl: str = '', embedding_model: str = 'mxbai-embed-large', chunk_size: int = 800, chunk_overlap: int = 100):
         self.dburl = dburl if dburl else os.getenv("PGURL")
         self.embedding_model = embedding_model
+        self.chunk_size = chunk_size
+        self.chunk_overlap = chunk_overlap
         self._connection = None
 
         # Configure Google AI if using Gemini model
@@ -138,6 +140,12 @@ class DocEmbedder:
                 """
                 conn.sql(create_sql)
                 logger.info("Created DuckDB embedding table with vector support.")
+
+                # Create FTS index
+                conn.sql("INSTALL fts;")
+                conn.sql("LOAD fts;")
+                conn.sql(f"PRAGMA create_fts_index('{self.table_name}', 'id', 'document');")
+                logger.info("Created DuckDB FTS index for hybrid search.")
 
                 if ":memory:" in self.dburl:
                     # Create HNSW index. only works with :memory: databases
@@ -233,12 +241,20 @@ class DocEmbedder:
             embedding float[{dimension}]
         );
         """
+        # Create FTS5 table for keyword search
+        create_fts_sql = f"""
+        CREATE VIRTUAL TABLE IF NOT EXISTS {self.table_name}_fts USING fts5(
+            document,
+            content='{self.table_name}',
+            content_rowid='id'
+        );
+        """
         try:
             cursor.execute(create_table_sql)
-            # maybe commit?
-            logger.info("Created SQLite embedding table with vector support.")
+            cursor.execute(create_fts_sql)
+            logger.info("Created SQLite embedding table and FTS5 table for hybrid search.")
         except Exception as e:
-            logger.error(f"Failed to create SQLite embedding table: {e}")
+            logger.error(f"Failed to create SQLite tables: {e}")
             raise
         # conn.close()
 
@@ -341,10 +357,15 @@ class DocEmbedder:
                 if self._should_create_tables():
                     self._create_sqlite_table(cursor)
                 try:
-                    cursor.execute("""
-                        INSERT INTO embedding_sqlite (doc_hash, doc_name, collection_name, page_number, document, embedding)
+                    cursor.execute(f"""
+                        INSERT INTO {self.table_name} (doc_hash, doc_name, collection_name, page_number, document, embedding)
                         VALUES (?, ?, ?, ?, ?, ?)
                     """, (document_hash, docname, self.collection_name, page_number, doctext, embedding_bytes))
+                    
+                    # Update FTS table
+                    last_id = cursor.lastrowid
+                    cursor.execute(f"INSERT INTO {self.table_name}_fts(rowid, document) VALUES (?, ?)", (last_id, doctext))
+                    
                     conn.commit()
                 except sqlite3.IntegrityError as e:
                     logger.warning(f"Document {docname} page {page_number} already exists in the database: {e}")
@@ -395,21 +416,23 @@ class DocEmbedder:
 
     def embed_path(self, corpus_path: str):
         """
-        Embed all documents in a path
+        Embed all documents in a path using chunking.
         :param corpus_path:  path to a folder containing PDFs
         :return:
         """
-        for d in glob(os.path.join(corpus_path, '*.pdf')):
-            try:
-                doc = fitz.open(d)
-            except EmptyFileError:
-                continue
-            n = doc.name
-            for page_number, page in enumerate(doc):
-                text = page.get_text()
-                if not text:
-                    continue
-                self.embed_text(text, n, page_number)
+        from libbydbot.brain.ingest import PDFPipeline
+        pipeline = PDFPipeline(corpus_path, chunk_size=self.chunk_size, chunk_overlap=self.chunk_overlap)
+        
+        for text, metadata in pipeline:
+            docname = metadata.get('title', 'Unknown')
+            if isinstance(text, list):
+                # Text is already chunked
+                for i, chunk in enumerate(text):
+                    self.embed_text(chunk, docname, i)
+            else:
+                # Legacy page-based dict
+                for page_number, page_text in text.items():
+                    self.embed_text(page_text, docname, page_number)
 
     def retrieve_docs(self, query: str, collection: str = "", num_docs: int = 5) -> str:
         """
@@ -427,39 +450,88 @@ class DocEmbedder:
             query_embedding_bytes = struct.pack(f'{len(query_embedding)}f', *query_embedding)
             with self.connection as conn:
                 cursor = conn.cursor()
+                
+                # Vector Search
                 if collection:
-                    # Simple similarity search
-                    result = cursor.execute(
-                        "SELECT document FROM embedding_sqlite WHERE collection_name = ? AND embedding MATCH ? ORDER BY distance LIMIT ?",
-                        (collection, query_embedding_bytes, num_docs)
+                    vector_results = cursor.execute(
+                        f"SELECT id, document, distance FROM {self.table_name} WHERE collection_name = ? AND embedding MATCH ? ORDER BY distance LIMIT ?",
+                        (collection, query_embedding_bytes, num_docs * 2)
                     ).fetchall()
                 else:
-                    result = cursor.execute(
-                        f"SELECT document FROM {self.table_name} WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
-                        (query_embedding_bytes, num_docs)
+                    vector_results = cursor.execute(
+                        f"SELECT id, document, distance FROM {self.table_name} WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
+                        (query_embedding_bytes, num_docs * 2)
                     ).fetchall()
-                pages = [row[0] for row in result]
+                
+                # Keyword Search (FTS5)
+                fts_results = cursor.execute(
+                    f"SELECT rowid, document, rank FROM {self.table_name}_fts WHERE document MATCH ? ORDER BY rank LIMIT ?",
+                    (query, num_docs * 2)
+                ).fetchall()
+                
+                # Hybrid Search combining results using RRF (Reciprocal Rank Fusion)
+                k = 60
+                scores = {}
+                docs = {}
+                
+                for rank, (id, doc, dist) in enumerate(vector_results):
+                    scores[id] = scores.get(id, 0) + 1.0 / (k + rank + 1)
+                    docs[id] = doc
+                    
+                for rank, (id, doc, rank_score) in enumerate(fts_results):
+                    scores[id] = scores.get(id, 0) + 1.0 / (k + rank + 1)
+                    docs[id] = doc
+                
+                # Sort by score and take top num_docs
+                sorted_ids = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)[:num_docs]
+                pages = [docs[id] for id in sorted_ids]
         elif self.dburl.startswith("duckdb"):
             # Use direct SQL for DuckDB
             dimension = self._get_embedding_dimension()
             embedding_str = '[' + ','.join(str(v) for v in query_embedding) + ']'
             with self.connection as conn:
-                if collection:
-                    result = conn.sql(f"""
-                        SELECT document 
-                        FROM {self.table_name} 
-                        WHERE collection_name = {collection} 
-                        ORDER BY array_cosine_similarity(embedding, {embedding_str}) 
-                        LIMIT {num_docs}
-                    """).fetchall()
-                else:
-                    result = conn.sql(f"""
-                        SELECT document 
-                        FROM {self.table_name} 
-                        ORDER BY array_cosine_similarity(embedding, {embedding_str}) 
-                        LIMIT {num_docs}
-                    """).fetchall()
-                pages = [row[0] for row in result]
+                if ":memory:" in self.dburl:
+                    conn = self._init_duckdb()
+                
+                # Vector Search
+                vector_results = conn.sql(f"""
+                    SELECT id, document, array_cosine_similarity(embedding, {embedding_str}) as similarity
+                    FROM {self.table_name} 
+                    {f"WHERE collection_name = '{collection}'" if collection else ""}
+                    ORDER BY similarity DESC
+                    LIMIT {num_docs * 2}
+                """).fetchall()
+                
+                # Keyword Search (FTS)
+                try:
+                    conn.sql("LOAD fts;")
+                    fts_results = conn.sql(f"""
+                        SELECT id, document, fts_main_{self.table_name}.match_bm25(id, ?) as score
+                        FROM {self.table_name}
+                        WHERE score IS NOT NULL
+                        ORDER BY score DESC
+                        LIMIT {num_docs * 2}
+                    """, params=[query]).fetchall()
+                except Exception as e:
+                    logger.warning(f"FTS search failed: {e}")
+                    fts_results = []
+
+                # Hybrid Search combining results using RRF
+                k = 60
+                scores = {}
+                docs = {}
+                
+                for rank, (id, doc, sim) in enumerate(vector_results):
+                    scores[id] = scores.get(id, 0) + 1.0 / (k + rank + 1)
+                    docs[id] = doc
+                    
+                for rank, (id, doc, fts_score) in enumerate(fts_results):
+                    scores[id] = scores.get(id, 0) + 1.0 / (k + rank + 1)
+                    docs[id] = doc
+                
+                # Sort by score and take top num_docs
+                sorted_ids = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)[:num_docs]
+                pages = [docs[id] for id in sorted_ids]
         else:
             # PostgreSQL
             dimension = self._get_embedding_dimension()

@@ -23,48 +23,37 @@ class LibbyInterface(LibbyDBot):
 
     def __init__(self, name: str='Libby D. Bot', collection_name: str = 'Libby D. Bot', languages=['pt_BR', 'en'], model: str = 'qwen3', dburl: str= 'sqlite:///memory.db',
                  embed_db: str = 'duckdb:///embeddings.duckdb'):
-        # available_models = self.load_available_models()
-        # available_models = self.llm.available_models
-        # self.collection_name = collection_name
-        #
-        # if model not in available_models:
-        #     raise ValueError(f"Invalid model. Available models: {', '.join(available_models.keys())}")
-            
-        super().__init__(name=name, languages=languages, model=model, dburl=dburl)
-        self.DE = embed.DocEmbedder(col_name=collection_name, dburl=embed_db)
+        super().__init__(name=name, languages=languages, model=model, dburl=dburl, embed_db=embed_db)
+        if collection_name != name:
+            self.DE.collection_name = collection_name
 
     def embed(self, corpus_path: str ='.'):
         """
         Embed a corpus of documents
         :param corpus_path: path to a folder containing PDFs
-        :param collection_name: Name of the document collection
         :return:
         """
-        # DE = embed.DocEmbedder(collection_name, dburl=dburl)
-        print ("Processing your corpus...")
-        for d in glob(os.path.join(corpus_path, '*.pdf')):
-            try:
-                doc = fitz.open(d)
-            except EmptyFileError:
-                continue
-            n = doc.name
-            for page_number, page in enumerate(doc):
-                text = page.get_text()
-                if not text:
-                    continue
-                self.DE.embed_text(text, n, page_number)
+        print ("Processing your corpus using granular chunking...")
+        self.DE.embed_path(corpus_path)
         return self.DE
 
     def answer(self, question: str, collection_name: str = 'main'):
         """
-        Answer a question based on a collection of documents
+        Answer a question based on a collection of documents.
+        Prioritizes agentic tool-calling if supported by the base agent.
         :param question: Users question
         :param collection_name: collection of documents on which to base the answer
         :return: Answer to the question
         """
-        # DE = embed.DocEmbedder(collection_name)
+        # If the agent has tools registered, we can try to let it handle retrieval
+        if hasattr(self.llm, 'agent') and self.llm.agent.tools:
+            self.set_prompt(f"You are Libby D. Bot, a research Assistant. Use the search_library tool to find information if needed.")
+            # Clear manual context to encourage tool use
+            self.set_context("")
+            return self.ask(question)
+            
+        # Fallback to manual RAG
         context = self.DE.retrieve_docs(question, collection=collection_name, num_docs=5)
-        # LDB = LibbyDBot(model='llama3')
         self.set_prompt(f"You are Libby D. Bot, a research Assistant")
         self.set_context(context)
 
