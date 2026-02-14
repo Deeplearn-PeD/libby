@@ -23,7 +23,7 @@ dependencies = [
     "google-genai>=1.2.0",
 ]
 name = "libby"
-version = "0.5.0"
+version = "0.6.0"
 description = "Libby the Librarian Bot."
 readme = "README.md"
 
