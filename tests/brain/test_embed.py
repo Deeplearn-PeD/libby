@@ -96,7 +96,7 @@ def test_get_embedded_documents():
     
     # Should return list of tuples (doc_name, collection_name)
     assert isinstance(embedded_docs, list)
-    assert len(embedded_docs) >= 3  # Only 2 unique documents
+    assert len(embedded_docs) >= 2  # At least 2 unique documents found in this test
     
     # Check that we have the expected documents
     doc_names = [doc[0] for doc in embedded_docs]

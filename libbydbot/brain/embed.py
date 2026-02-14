@@ -68,26 +68,15 @@ class DocEmbedder:
 
         if self.dburl.startswith("sqlite"):
             self.table_name = 'embedding_sqlite'
-            # For SQLite, use native connection instead of SQLAlchemy
-            self._create_sqlite_table(self.connection.cursor())  # Create table if it doesn't exist
-            self.engine = None  # No SQLAlchemy engine for SQLite
-            self.embedding = None  # Will use direct SQL queries
+            self._create_sqlite_table(self.connection.cursor())
+            self.engine = None
+            self.embedding = None
         elif self.dburl.startswith("duckdb"):
-            # For DuckDB, we'll use SQL directly via a connection
             self.table_name = 'embedding_duckdb'
-            try:
-                logger.info(f"Connecting to database with dburl: {self.dburl}")
-                if ':memory:' in self.dburl:
-                    self.engine = duckdb.connect()
-                else:
-                    self.engine = duckdb.connect(self.dburl.split(":///")[-1])
-            except NoSuchModuleError as exc:
-                logger.error(f"Invalid dburl string passed to DocEmbedder: \n{exc}")
-                self.engine = duckdb.connect()
-            self.embedding = None  # Not using SQLAlchemy ORM for DuckDB
-            # Ensure vss extension is loaded, table and index exist
-            if self._should_create_tables():
-                self._init_duckdb()
+            self.engine = None # We'll use self._connection
+            self.embedding = None
+            # The connection property will handle _init_duckdb
+            _ = self.connection
         else:
             # PostgreSQL
             try:
@@ -115,8 +104,11 @@ class DocEmbedder:
         and create HNSW index.
         """
         dimension = self._get_embedding_dimension()
-        db_path = urlparse(self.dburl).path
-        conn = duckdb.connect(db_path)
+        db_path = self.dburl.split(":///")[1] if ":///" in self.dburl else ":memory:"
+        if db_path == ":memory:":
+            conn = duckdb.connect(":memory:")
+        else:
+            conn = duckdb.connect(db_path)
         
         # Install and load vss extension
         conn.sql("INSTALL vss;")
@@ -128,10 +120,12 @@ class DocEmbedder:
         ).fetchall()
         # result is a list of tuples; we check if count > 0
         if result[0][0] == 0:
+            # Create sequence for auto-incrementing ID
+            conn.sql(f"CREATE SEQUENCE IF NOT EXISTS {self.table_name}_seq;")
             # Create table
             create_sql = f"""
             CREATE TABLE {self.table_name} (
-                id INTEGER PRIMARY KEY,
+                id INTEGER PRIMARY KEY DEFAULT nextval('{self.table_name}_seq'),
                 collection_name TEXT,
                 doc_name TEXT,
                 page_number INTEGER,
@@ -171,10 +165,10 @@ class DocEmbedder:
                         f"SELECT name FROM sqlite_master WHERE type='table' AND name='{self.table_name}'").fetchone()
                 return result is None
             elif self.dburl.startswith("duckdb"):
-                with self.connection as conn:
-                    result = conn.sql(
-                        f"SELECT COUNT(*) FROM information_schema.tables WHERE table_name = '{self.table_name}';"
-                    ).fetchall()
+                conn = self.connection
+                result = conn.sql(
+                    f"SELECT COUNT(*) FROM information_schema.tables WHERE table_name = '{self.table_name}';"
+                ).fetchall()
                 # result is a list of tuples; we check if count == 0
                 return result[0][0] == 0
             else:
@@ -190,24 +184,28 @@ class DocEmbedder:
     def connection(self):
         """
         Get database connection. For SQLite, returns the native connection.
-        For DuckDB, returns the duckdb connection object (self.engine).
+        For DuckDB, returns the duckdb connection object.
         For PostgreSQL, returns the SQLAlchemy engine.
         """
+        if self._connection:
+            return self._connection
+            
         if self.dburl.startswith("sqlite"):
-            return self._get_sqlite_connection()
+            self._connection = self._get_sqlite_connection()
+            return self._connection
         elif self.dburl.startswith("duckdb"):
-            # self.engine is already a duckdb connection
-            return duckdb.connect() if ":memory" in self.dburl else duckdb.connect(self.dburl.split(":///")[-1])
+            self._connection = self._init_duckdb()
+            return self._connection
         else: # PostgreSQL
             return self.engine
 
     def _get_sqlite_connection(self):
-        dbpath = urlparse(self.dburl).path
+        dbpath = self.dburl.split(":///")[1] if ":///" in self.dburl else ":memory:"
         # Handle in-memory databases
-        if dbpath == "/:memory:":
+        if dbpath == ":memory:":
             connection = sqlite3.connect(":memory:", check_same_thread=False)
         else:
-            connection = sqlite3.connect(dbpath[1:], check_same_thread=False)
+            connection = sqlite3.connect(dbpath, check_same_thread=False)
         connection.row_factory = sqlite3.Row
         connection.enable_load_extension(True)
         sqlite_vec.load(connection)
@@ -246,6 +244,7 @@ class DocEmbedder:
         create_fts_sql = f"""
         CREATE VIRTUAL TABLE IF NOT EXISTS {self.table_name}_fts USING fts5(
             document,
+            doc_hash UNINDEXED,
             content='{self.table_name}',
             content_rowid='rowid'
         );
@@ -315,16 +314,13 @@ class DocEmbedder:
                 cursor = conn.cursor()
                 if self._should_create_tables():
                     self._create_sqlite_table(cursor)
-                q = f"SELECT rowid FROM {self.table_name} WHERE doc_hash=?"
+                q = f"SELECT doc_hash FROM {self.table_name} WHERE doc_hash=?"
                 result = cursor.execute(q, (hash,)).fetchone()
             return result is not None
         elif self.dburl.startswith("duckdb"):
-            with self.connection as conn:
-                if ":memory:" in self.dburl:
-                    conn = self._init_duckdb()
-
-                result = conn.sql(
-                    f"SELECT id FROM {self.table_name} WHERE doc_hash = ?", params=[hash]).fetchall()
+            conn = self.connection
+            result = conn.sql(
+                f"SELECT id FROM {self.table_name} WHERE doc_hash = ?", params=[hash]).fetchall()
             return len(result) > 0
         else:
             # PostgreSQL
@@ -365,8 +361,7 @@ class DocEmbedder:
                     """, (self.collection_name, docname, page_number, document_hash, doctext, embedding_bytes))
                     
                     # Update FTS table
-                    last_id = cursor.lastrowid
-                    cursor.execute(f"INSERT INTO {self.table_name}_fts(rowid, document) VALUES (?, ?)", (last_id, doctext))
+                    cursor.execute(f"INSERT INTO {self.table_name}_fts(rowid, document, doc_hash) VALUES (?, ?, ?)", (cursor.lastrowid, doctext, document_hash))
                     
                     conn.commit()
                 except sqlite3.IntegrityError as e:
@@ -378,24 +373,22 @@ class DocEmbedder:
             dimension = self._get_embedding_dimension()
             # Convert embedding list to a string representation for DuckDB array literal
             embedding_str = '[' + ','.join(str(v) for v in embedding) + ']'
-            with self.connection as conn:
-                if ":memory:" in self.dburl:
-                    conn = self._init_duckdb()
-                try:
-                    # Use conn.sql() for direct DuckDB SQL execution
-                    conn.sql(f"""
-                        INSERT INTO {self.table_name} (doc_hash, doc_name, collection_name, page_number, document, embedding)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    """, parameters=[
-                        document_hash,
-                        docname,
-                        self.collection_name,
-                        page_number,
-                        doctext,
-                        embedding_str
-                    ])
-                except Exception as e:
-                    logger.warning(f"Document {docname} page {page_number} may already exist or error: {e}")
+            conn = self.connection
+            try:
+                # Use conn.sql() for direct DuckDB SQL execution
+                conn.sql(f"""
+                    INSERT INTO {self.table_name} (doc_hash, doc_name, collection_name, page_number, document, embedding)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, params=[
+                    document_hash,
+                    docname,
+                    self.collection_name,
+                    page_number,
+                    doctext,
+                    embedding_str
+                ])
+            except Exception as e:
+                logger.warning(f"Document {docname} page {page_number} may already exist or error: {e}")
         else:
             # PostgreSQL
             with Session(self.engine) as session:
@@ -456,18 +449,18 @@ class DocEmbedder:
                 # Vector Search
                 if collection:
                     vector_results = cursor.execute(
-                        f"SELECT rowid, document, distance FROM {self.table_name} WHERE collection_name = ? AND embedding MATCH ? ORDER BY distance LIMIT ?",
+                        f"SELECT doc_hash, document, distance FROM {self.table_name} WHERE collection_name = ? AND embedding MATCH ? ORDER BY distance LIMIT ?",
                         (collection, query_embedding_bytes, num_docs * 2)
                     ).fetchall()
                 else:
                     vector_results = cursor.execute(
-                        f"SELECT rowid, document, distance FROM {self.table_name} WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
+                        f"SELECT doc_hash, document, distance FROM {self.table_name} WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
                         (query_embedding_bytes, num_docs * 2)
                     ).fetchall()
                 
                 # Keyword Search (FTS5)
                 fts_results = cursor.execute(
-                    f"SELECT rowid, document, rank FROM {self.table_name}_fts WHERE document MATCH ? ORDER BY rank LIMIT ?",
+                    f"SELECT doc_hash, document, rank FROM {self.table_name}_fts WHERE document MATCH ? ORDER BY rank LIMIT ?",
                     (query, num_docs * 2)
                 ).fetchall()
                 
@@ -476,64 +469,61 @@ class DocEmbedder:
                 scores = {}
                 docs = {}
                 
-                for rank, (rowid, doc, dist) in enumerate(vector_results):
-                    scores[rowid] = scores.get(rowid, 0) + 1.0 / (k + rank + 1)
-                    docs[rowid] = doc
+                for rank, (d_hash, doc, dist) in enumerate(vector_results):
+                    scores[d_hash] = scores.get(d_hash, 0) + 1.0 / (k + rank + 1)
+                    docs[d_hash] = doc
                     
-                for rank, (rowid, doc, rank_score) in enumerate(fts_results):
-                    scores[rowid] = scores.get(rowid, 0) + 1.0 / (k + rank + 1)
-                    docs[rowid] = doc
+                for rank, (d_hash, doc, rank_score) in enumerate(fts_results):
+                    scores[d_hash] = scores.get(d_hash, 0) + 1.0 / (k + rank + 1)
+                    docs[d_hash] = doc
                 
                 # Sort by score and take top num_docs
                 sorted_ids = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)[:num_docs]
-                pages = [docs[rowid] for rowid in sorted_ids]
+                pages = [docs[d_hash] for d_hash in sorted_ids]
         elif self.dburl.startswith("duckdb"):
             # Use direct SQL for DuckDB
             dimension = self._get_embedding_dimension()
             embedding_str = '[' + ','.join(str(v) for v in query_embedding) + ']'
-            with self.connection as conn:
-                if ":memory:" in self.dburl:
-                    conn = self._init_duckdb()
-                
-                # Vector Search
-                vector_results = conn.sql(f"""
-                    SELECT id, document, array_cosine_similarity(embedding, {embedding_str}::FLOAT[{dimension}]) as similarity
-                    FROM {self.table_name} 
-                    {f"WHERE collection_name = '{collection}'" if collection else ""}
-                    ORDER BY similarity DESC
+            conn = self.connection
+            
+            # Vector Search
+            vector_results = conn.sql(f"""
+                SELECT id, document, array_cosine_similarity(embedding, {embedding_str}::FLOAT[{dimension}]) as similarity
+                FROM {self.table_name} 
+                {f"WHERE collection_name = '{collection}'" if collection else ""}
+                ORDER BY similarity DESC
+                LIMIT {num_docs * 2}
+            """).fetchall()
+            
+            # Keyword Search (FTS)
+            try:
+                conn.sql("LOAD fts;")
+                fts_results = conn.sql(f"""
+                    SELECT id, document, fts_main_{self.table_name}.match_bm25(id, ?) as score
+                    FROM {self.table_name}
+                    WHERE score IS NOT NULL
+                    ORDER BY score DESC
                     LIMIT {num_docs * 2}
-                """).fetchall()
+                """, params=[query]).fetchall()
+            except Exception as e:
+                logger.warning(f"FTS search failed: {e}")
+                fts_results = []
+            
+            # Hybrid Search merging
+            k = 60
+            scores = {}
+            docs = {}
+            
+            for rank, (d_id, doc, sim) in enumerate(vector_results):
+                scores[d_id] = scores.get(d_id, 0) + 1.0 / (k + rank + 1)
+                docs[d_id] = doc
                 
-                # Keyword Search (FTS)
-                try:
-                    conn.sql("LOAD fts;")
-                    fts_results = conn.sql(f"""
-                        SELECT id, document, fts_main_{self.table_name}.match_bm25(id, ?) as score
-                        FROM {self.table_name}
-                        WHERE score IS NOT NULL
-                        ORDER BY score DESC
-                        LIMIT {num_docs * 2}
-                    """, params=[query]).fetchall()
-                except Exception as e:
-                    logger.warning(f"FTS search failed: {e}")
-                    fts_results = []
-
-                # Hybrid Search combining results using RRF
-                k = 60
-                scores = {}
-                docs = {}
-                
-                for rank, (id, doc, sim) in enumerate(vector_results):
-                    scores[id] = scores.get(id, 0) + 1.0 / (k + rank + 1)
-                    docs[id] = doc
-                    
-                for rank, (id, doc, fts_score) in enumerate(fts_results):
-                    scores[id] = scores.get(id, 0) + 1.0 / (k + rank + 1)
-                    docs[id] = doc
-                
-                # Sort by score and take top num_docs
-                sorted_ids = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)[:num_docs]
-                pages = [docs[id] for id in sorted_ids]
+            for rank, (d_id, doc, fts_score) in enumerate(fts_results):
+                scores[d_id] = scores.get(d_id, 0) + 1.0 / (k + rank + 1)
+                docs[d_id] = doc
+            
+            sorted_ids = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)[:num_docs]
+            pages = [docs[d_id] for d_id in sorted_ids]
         else:
             # PostgreSQL
             dimension = self._get_embedding_dimension()
@@ -569,10 +559,10 @@ class DocEmbedder:
                 ).fetchall()
             return [(row[0], row[1]) for row in result]
         elif self.dburl.startswith("duckdb"):
-            with self.connection as conn:
-                result = conn.sql(
-                    f"SELECT DISTINCT doc_name, collection_name FROM {self.table_name}"
-                ).fetchall()
+            conn = self.connection
+            result = conn.sql(
+                f"SELECT DISTINCT doc_name, collection_name FROM {self.table_name}"
+            ).fetchall()
             return [(row[0], row[1]) for row in result]
         else:
             # PostgreSQL
@@ -582,12 +572,13 @@ class DocEmbedder:
                 return [(row[0], row[1]) for row in result]
 
     def __del__(self):
-        if self.dburl.startswith("sqlite") and self._connection:
-            self._connection.close()
-        # For DuckDB, self.engine is a duckdb connection, not an SQLAlchemy engine
-        # It doesn't have a dispose() method, so we should close it if it exists
+        if self._connection:
+            try:
+                self._connection.close()
+            except:
+                pass
         if hasattr(self, 'engine') and self.engine:
-            if self.dburl.startswith("duckdb"):
-                self.engine.close()
-            else:
+            try:
                 self.engine.dispose()
+            except:
+                pass
