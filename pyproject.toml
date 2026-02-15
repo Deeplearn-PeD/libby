@@ -3,17 +3,17 @@ authors = [{ name = "Flávio Codeço Coelho", email = "fccoelho@gmail.com" }]
 license = "GPL-3.0-only"
 requires-python = ">=3.12,<3.14"
 dependencies = [
-    "fire<1.0.0,>=0.6.0",
-    "pgvector<1.0.0,>=0.2.5",
-    "python-dotenv<2.0.0,>=1.0.1",
-    "asyncpg<1.0.0,>=0.29.0",
-    "sqlalchemy<3.0.0,>=2.0.29",
-    "pymupdf<2.0.0,>=1.24.1",
-    "loguru<1.0.0,>=0.7.2",
-    "psycopg2-binary<3.0.0,>=2.9.9",
+    "fire>=0.6.0",
+    "pgvector>=0.2.5",
+    "python-dotenv>=1.0.1",
+    "asyncpg>=0.29.0",
+    "sqlalchemy>=2.0.29",
+    "pymupdf>=1.24.1",
+    "loguru>=0.7.2",
+    "psycopg2-binary>=2.9.9",
     "base-ai-agent @ git+https://github.com/Deeplearn-PeD/base-ai-agent.git@main",
-    "sqlmodel<1.0.0,>=0.0.18",
-    "pymupdf4llm<1.0.0,>=0.0.5",
+    "sqlmodel>=0.0.18",
+    "pymupdf4llm>=0.0.5",
     "sqlite-vss>=0.1.2",
     "duckdb>=1.1.3",
     "duckdb-engine>=0.14.0",
@@ -46,4 +46,4 @@ dev = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest<9.0.0,>=8.1.1", "mkdocs<2.0.0,>=1.5.3"]
+dev = ["pytest>=8.1.1", "mkdocs>=1.5.3"]
