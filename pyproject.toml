@@ -9,7 +9,7 @@ dependencies = [
     "asyncpg>=0.29.0",
     "sqlalchemy>=2.0.29",
     "pymupdf>=1.24.1",
-    "loguru>=0.7.2",
+    "loguru>=0.6,<0.7",
     "psycopg2-binary>=2.9.9",
     "base-ai-agent @ git+https://github.com/Deeplearn-PeD/base-ai-agent.git@main",
     "sqlmodel>=0.0.18",
