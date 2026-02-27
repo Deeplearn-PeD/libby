@@ -1,0 +1,47 @@
+version: '3.8'
+
+services:
+  libby-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: libby-api:latest
+    container_name: libby-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - libby-data:/data
+    environment:
+      # Database configuration
+      - EMBED_DB=/data/embeddings.duckdb
+      - COLLECTION_NAME=main
+      
+      # Ollama configuration (connect to host's Ollama)
+      - OLLAMA_HOST=http://host.docker.internal:11434
+      - OLLAMA_API_BASE=http://host.docker.internal:11434
+      
+      # Embedding model (change if using different model)
+      - EMBEDDING_MODEL=mxbai-embed-large
+      
+      # Optional: API keys for other providers
+      # - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      # - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    
+    # Allow container to access host services (Ollama)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    
+    # Restart policy
+    restart: unless-stopped
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  libby-data:
+    driver: local

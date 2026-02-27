@@ -1,0 +1,63 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+docs/
+site/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Database files (we want fresh ones in container)
+*.db
+*.duckdb
+*.sqlite
+
+# Temporary and result files
+*.txt
+*.log
+*.jpeg
+*.jpg
+*.png
+*.gif
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Other
+LICENSE
+README.md
+mkdocs.yml
+check_*.py
+verify_*.py

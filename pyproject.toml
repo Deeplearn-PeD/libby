@@ -21,6 +21,9 @@ dependencies = [
     "pytest>=8.3.4",
     "sqlite-vec>=0.1.6",
     "google-genai>=1.2.0",
+    "fastapi>=0.115.0",
+    "python-multipart>=0.0.9",
+    "uvicorn>=0.30.0",
 ]
 name = "libby"
 version = "0.6.0"
@@ -32,6 +35,7 @@ package = true
 
 [project.scripts]
 libby = "libbydbot.cli:main"
+libby-server = "libbydbot.api.main:run"
 
 [tool.setuptools.package-data]
 libbydbot = ["config.yml"]
