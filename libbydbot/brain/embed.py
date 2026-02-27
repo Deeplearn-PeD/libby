@@ -2,6 +2,7 @@
 import os
 from glob import glob
 from hashlib import sha256
+from pathlib import Path
 import sqlite3
 from urllib.parse import urlparse
 
@@ -129,6 +130,7 @@ class DocEmbedder:
         if db_path == ":memory:":
             conn = duckdb.connect(":memory:")
         else:
+            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
             conn = duckdb.connect(db_path)
 
         # Install and load vss extension
