@@ -111,217 +111,170 @@ Once the server is running, access the interactive API documentation at:
 
 ### API Usage Examples
 
-**Embed text:**
+#### POST /api/embed/text
+
+Embed raw text content into the vector database.
+
+**Request:**
 
 ```bash
 curl -X POST "http://localhost:8000/api/embed/text" \
   -H "Content-Type: application/json" \
   -d '{
-    "text": "Your document text here",
-    "doc_name": "note.txt",
+    "text": "Machine learning is a subset of artificial intelligence...",
+    "doc_name": "ml_notes.txt",
     "page_number": 0,
-    "collection_name": "my_collection"
+    "collection_name": "research"
   }'
 ```
 
-**Upload a PDF:**
+**Response:**
+
+```json
+{
+  "success": true,
+  "doc_name": "ml_notes.txt",
+  "doc_hash": "abc123def456",
+  "message": "Successfully embedded text from 'ml_notes.txt' into collection 'research'"
+}
+```
+
+#### POST /api/embed/upload
+
+Upload and embed a PDF file. The file is automatically chunked and embedded.
+
+**Request:**
 
 ```bash
 curl -X POST "http://localhost:8000/api/embed/upload" \
   -F "file=@document.pdf" \
-  -F "collection_name=my_collection" \
+  -F "collection_name=research" \
   -F "chunk_size=800" \
   -F "chunk_overlap=100"
 ```
 
-**Search documents:**
+**Response:**
+
+```json
+{
+  "success": true,
+  "doc_name": "document.pdf",
+  "chunks_embedded": 15,
+  "collection_name": "research",
+  "message": "Successfully embedded 15 chunks from 'document.pdf' into collection 'research'"
+}
+```
+
+#### POST /api/retrieve
+
+Perform hybrid search (vector + keyword) across your documents.
+
+**Request:**
 
 ```bash
 curl -X POST "http://localhost:8000/api/retrieve" \
   -H "Content-Type: application/json" \
   -d '{
     "query": "What is machine learning?",
-    "collection_name": "my_collection",
+    "collection_name": "research",
     "num_docs": 5
   }'
 ```
 
-**Response format:**
+**Response:**
 
 ```json
 {
   "query": "What is machine learning?",
-  "collection_name": "my_collection",
+  "collection_name": "research",
   "documents": [
     {
-      "doc_name": "doc1.pdf",
-      "page_number": 0,
-      "content": "Machine learning is...",
+      "doc_name": "ml_intro.pdf",
+      "page_number": 1,
+      "content": "Machine learning is a subset of artificial intelligence...",
       "score": 0.95
+    },
+    {
+      "doc_name": "ai_basics.pdf",
+      "page_number": 5,
+      "content": "ML algorithms learn patterns from data...",
+      "score": 0.87
     }
   ],
-  "total": 1
+  "total": 2
 }
 ```
 
-**List documents:**
+#### GET /api/documents
+
+List all embedded documents, optionally filtered by collection.
+
+**Request (all documents):**
 
 ```bash
 curl "http://localhost:8000/api/documents"
-curl "http://localhost:8000/api/documents?collection_name=my_collection"
 ```
 
-**List collections:**
+**Request (filtered by collection):**
+
+```bash
+curl "http://localhost:8000/api/documents?collection_name=research"
+```
+
+**Response:**
+
+```json
+{
+  "documents": [
+    {"doc_name": "ml_intro.pdf", "collection_name": "research"},
+    {"doc_name": "ai_basics.pdf", "collection_name": "research"},
+    {"doc_name": "notes.txt", "collection_name": "personal"}
+  ],
+  "total": 3
+}
+```
+
+#### GET /api/collections
+
+List all collections with their document counts.
+
+**Request:**
 
 ```bash
 curl "http://localhost:8000/api/collections"
 ```
 
-**Health check:**
-
-```bash
-curl "http://localhost:8000/api/health"
-```
-
-### Environment Variables
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `EMBED_DB` | Database URL for embeddings | `duckdb:///data/embeddings.duckdb` |
-| `EMBEDDING_MODEL` | Embedding model to use | `mxbai-embed-large` |
-| `COLLECTION_NAME` | Default collection name | `main` |
-| `OLLAMA_HOST` | Ollama server URL | `http://localhost:11434` |
-| `GEMINI_API_KEY` | Google Gemini API key | - |
-| `OPENAI_API_KEY` | OpenAI API key | - |
-
-## REST API Server
-
-Libby provides a REST API server for programmatic access to embedding and retrieval functionality.
-
-### Running the API Server
-
-**Using the CLI:**
-
-```bash
-# Run with default settings (host 0.0.0.0, port 8000)
-uv run libby-server
-
-# Run with custom host and port
-uv run libby-server --host 0.0.0.0 --port 8080
-
-# Run with auto-reload for development
-uv run libby-server --reload
-```
-
-**Using uvicorn directly:**
-
-```bash
-uv run uvicorn libbydbot.api.main:app --host 0.0.0.0 --port 8000
-```
-
-**Using Docker:**
-
-```bash
-# Build and run with Docker
-docker build -t libby-api:latest .
-docker run -d -p 8000:8000 -v libby-data:/data \
-  -e OLLAMA_HOST=http://host.docker.internal:11434 \
-  --add-host=host.docker.internal:host-gateway \
-  libby-api:latest
-
-# Or use docker-compose
-docker-compose up -d
-```
-
-### API Documentation
-
-Once the server is running, access the interactive API documentation at:
-- Swagger UI: http://localhost:8000/docs
-- ReDoc: http://localhost:8000/redoc
-
-### API Endpoints
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/api/embed/text` | Embed raw text into the database |
-| `POST` | `/api/embed/upload` | Upload and embed PDF files |
-| `POST` | `/api/retrieve` | Hybrid search for documents (vector + keyword) |
-| `GET` | `/api/documents` | List all embedded documents |
-| `GET` | `/api/collections` | List all collections with document counts |
-| `GET` | `/api/health` | Health check endpoint |
-
-### API Usage Examples
-
-**Embed text:**
-
-```bash
-curl -X POST "http://localhost:8000/api/embed/text" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "text": "Your document text here",
-    "doc_name": "note.txt",
-    "page_number": 0,
-    "collection_name": "my_collection"
-  }'
-```
-
-**Upload a PDF:**
-
-```bash
-curl -X POST "http://localhost:8000/api/embed/upload" \
-  -F "file=@document.pdf" \
-  -F "collection_name=my_collection" \
-  -F "chunk_size=800" \
-  -F "chunk_overlap=100"
-```
-
-**Search documents:**
-
-```bash
-curl -X POST "http://localhost:8000/api/retrieve" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "query": "What is machine learning?",
-    "collection_name": "my_collection",
-    "num_docs": 5
-  }'
-```
-
-**Response format:**
+**Response:**
 
 ```json
 {
-  "query": "What is machine learning?",
-  "collection_name": "my_collection",
-  "documents": [
-    {
-      "doc_name": "doc1.pdf",
-      "page_number": 0,
-      "content": "Machine learning is...",
-      "score": 0.95
-    }
+  "collections": [
+    {"name": "research", "document_count": 15},
+    {"name": "personal", "document_count": 3},
+    {"name": "work", "document_count": 7}
   ],
-  "total": 1
+  "total": 3
 }
 ```
 
-**List documents:**
+#### GET /api/health
 
-```bash
-curl "http://localhost:8000/api/documents"
-curl "http://localhost:8000/api/documents?collection_name=my_collection"
-```
+Check the API server health status.
 
-**List collections:**
-
-```bash
-curl "http://localhost:8000/api/collections"
-```
-
-**Health check:**
+**Request:**
 
 ```bash
 curl "http://localhost:8000/api/health"
+```
+
+**Response:**
+
+```json
+{
+  "status": "healthy",
+  "database": "duckdb",
+  "version": "0.1.0"
+}
 ```
 
 ### Environment Variables
