@@ -140,6 +140,45 @@ for doc_name, collection in docs:
     print(f"{doc_name} in {collection}")
 ```
 
+##### `reembed(collection_name: str = "", new_model: str | None = None, batch_size: int = 100) -> dict`
+
+Re-embed documents with a new embedding model.
+
+```python
+# Re-embed all documents with a new model
+stats = embedder.reembed(new_model="mxbai-embed-large")
+
+# Re-embed specific collection
+stats = embedder.reembed(
+    collection_name="research",
+    new_model="embeddinggemma",
+    batch_size=100
+)
+print(f"Updated {stats['updated']}/{stats['total']} documents")
+print(f"Old model: {stats['old_model']}, New model: {stats['new_model']}")
+```
+
+##### `get_embedding_model_info() -> dict`
+
+Get information about embedding models used in the database.
+
+```python
+info = embedder.get_embedding_model_info()
+print(f"Total documents: {info['total_documents']}")
+for model, collections in info['models'].items():
+    for collection, count in collections.items():
+        print(f"  {model}: {count} docs in '{collection}'")
+```
+
+##### `_migrate_add_embedding_model()`
+
+Migrate existing database to add embedding_model column.
+
+```python
+# Run this first if you have an existing database
+embedder._migrate_add_embedding_model()
+```
+
 ---
 
 ### PDFPipeline
@@ -241,11 +280,11 @@ print(settings.default_embedding_model)  # "embeddinggemma"
 
 #### Available Embedding Models
 
-| Name | Code | Default |
-|------|------|---------|
-| GemmaEmbedding | `embeddinggemma` | Yes |
-| Mxbai | `mxbai-embed-large` | No |
-| Gemini | `gemini-embedding-001` | No |
+| Name | Code | Dimension | Default |
+|------|------|-----------|---------|
+| GemmaEmbedding | `embeddinggemma` | 768 | Yes |
+| Mxbai | `mxbai-embed-large` | 1024 | No |
+| Gemini | `gemini-embedding-001` | 1024 | No |
 
 ---
 
@@ -255,6 +294,8 @@ print(settings.default_embedding_model)  # "embeddinggemma"
 |--------|----------|-------------|
 | `POST` | `/api/embed/text` | Embed raw text |
 | `POST` | `/api/embed/upload` | Upload and embed PDF |
+| `POST` | `/api/embed/reembed` | Re-embed documents with new model |
+| `GET` | `/api/embed/model-info` | Get embedding model info |
 | `POST` | `/api/retrieve` | Hybrid search |
 | `GET` | `/api/documents` | List embedded documents |
 | `GET` | `/api/collections` | List collections |
@@ -273,6 +314,12 @@ libby answer "Your question?" --collection_name my_collection
 
 # Generate content
 libby generate "Your prompt" --output_file output.txt
+
+# Re-embed documents with a new model
+libby reembed --new_model mxbai-embed-large --collection_name research
+
+# View embedding model info
+libby model-info
 
 # Start API server
 libby-server --host 0.0.0.0 --port 8000

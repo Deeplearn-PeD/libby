@@ -85,3 +85,32 @@ class ErrorResponse(BaseModel):
     error: str = Field(..., description="Error type")
     message: str = Field(..., description="Error message")
     detail: str | None = Field(None, description="Additional details")
+
+
+class ReembedRequest(BaseModel):
+    collection_name: str = Field(
+        "", description="Collection to re-embed (empty for all)"
+    )
+    new_model: str = Field(
+        "", description="New embedding model (empty for settings default)"
+    )
+    batch_size: int = Field(100, ge=1, le=1000, description="Batch size for processing")
+
+
+class ReembedResponse(BaseModel):
+    success: bool = Field(..., description="Whether the re-embedding was successful")
+    total: int = Field(..., description="Total documents to re-embed")
+    updated: int = Field(..., description="Number of documents successfully updated")
+    old_model: str = Field(..., description="Previous embedding model")
+    new_model: str = Field(..., description="New embedding model used")
+    errors: list[str] = Field(
+        default_factory=list, description="List of errors encountered"
+    )
+    message: str = Field(..., description="Status message")
+
+
+class ModelInfoResponse(BaseModel):
+    models: dict[str, dict[str, int]] = Field(
+        ..., description="Model usage by collection (model -> collection -> count)"
+    )
+    total_documents: int = Field(..., description="Total number of documents")

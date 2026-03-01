@@ -11,6 +11,9 @@ from libbydbot.api.schemas import (
     EmbedTextRequest,
     EmbedTextResponse,
     EmbedUploadResponse,
+    ReembedRequest,
+    ReembedResponse,
+    ModelInfoResponse,
 )
 from libbydbot.brain.embed import DocEmbedder
 
@@ -116,3 +119,64 @@ async def upload_and_embed(
     finally:
         if temp_dir and os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
+
+
+@router.post("/reembed", response_model=ReembedResponse)
+def reembed_embeddings(request: ReembedRequest, embedder: EmbedderDep):
+    """
+    Re-embed documents with a new embedding model.
+
+    This operation:
+    1. Migrates the database schema if needed (adds embedding_model column)
+    2. Regenerates embeddings for all matching documents
+    3. Updates the embedding_model field for each document
+
+    - **collection_name**: Collection to re-embed (empty for all)
+    - **new_model**: New embedding model (empty for settings default)
+    - **batch_size**: Batch size for processing (default: 100)
+    """
+    try:
+        # Run migration first
+        embedder._migrate_add_embedding_model()
+
+        # Perform re-embedding
+        stats = embedder.reembed(
+            collection_name=request.collection_name,
+            new_model=request.new_model if request.new_model else None,
+            batch_size=request.batch_size,
+        )
+
+        return ReembedResponse(
+            success=True,
+            total=stats["total"],
+            updated=stats["updated"],
+            old_model=stats["old_model"],
+            new_model=stats["new_model"],
+            errors=stats["errors"],
+            message=f"Successfully re-embedded {stats['updated']}/{stats['total']} documents with model '{stats['new_model']}'",
+        )
+    except Exception as e:
+        logger.error(f"Error re-embedding: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/model-info", response_model=ModelInfoResponse)
+def get_model_info(embedder: EmbedderDep):
+    """
+    Get information about embedding models used in the database.
+
+    Returns a breakdown of documents by model and collection.
+    """
+    try:
+        # Run migration first to ensure column exists
+        embedder._migrate_add_embedding_model()
+
+        info = embedder.get_embedding_model_info()
+
+        return ModelInfoResponse(
+            models=info["models"],
+            total_documents=info["total_documents"],
+        )
+    except Exception as e:
+        logger.error(f"Error getting model info: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

@@ -158,6 +158,60 @@ embedder = DocEmbedder(
 )
 ```
 
+### Re-embedding Documents
+
+When you change your embedding model in settings, you can re-embed existing documents:
+
+```bash
+# Using CLI - re-embed all documents with a new model
+libby reembed --new_model mxbai-embed-large
+
+# Re-embed a specific collection
+libby reembed --collection_name research --new_model embeddinggemma
+
+# View current embedding models in use
+libby model-info
+```
+
+Using Python:
+
+```python
+from libbydbot.brain.embed import DocEmbedder
+
+embedder = DocEmbedder(col_name="my_collection", dburl="duckdb:///embeddings.duckdb")
+
+# Run migration first (adds embedding_model column if needed)
+embedder._migrate_add_embedding_model()
+
+# Check current model info
+info = embedder.get_embedding_model_info()
+print(info)
+
+# Re-embed with a new model
+stats = embedder.reembed(
+    collection_name="research",  # Empty for all collections
+    new_model="mxbai-embed-large",  # None for settings default
+    batch_size=100
+)
+print(f"Updated {stats['updated']}/{stats['total']} documents")
+```
+
+Using REST API:
+
+```bash
+# Re-embed via API
+curl -X POST "http://localhost:8000/api/embed/reembed" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "collection_name": "research",
+    "new_model": "mxbai-embed-large",
+    "batch_size": 100
+  }'
+
+# Get model info
+curl "http://localhost:8000/api/embed/model-info"
+```
+
 ### Article Summarization
 
 ```python

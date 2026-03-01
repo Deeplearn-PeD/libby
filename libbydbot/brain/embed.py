@@ -58,6 +58,7 @@ class Embedding(Base):
     page_number = Column(Integer)
     doc_hash = Column(String, unique=True)
     document = Column(String)
+    embedding_model = Column(String, default="embeddinggemma")
     embedding = Column(Vector(1024))
 
 
@@ -159,6 +160,7 @@ class DocEmbedder:
                 page_number INTEGER,
                 doc_hash TEXT UNIQUE,
                 document TEXT,
+                embedding_model TEXT DEFAULT 'embeddinggemma',
                 embedding FLOAT[{dimension}]
             );
             """
@@ -271,6 +273,7 @@ class DocEmbedder:
             page_number INTEGER,
             doc_hash TEXT,
             document TEXT,
+            embedding_model TEXT,
             embedding float[{dimension}]
         );
         """
@@ -299,7 +302,9 @@ class DocEmbedder:
         Get the embedding dimension based on the model
         """
         if self.embedding_model == "gemini-embedding-001":
-            return 1024  # 1536
+            return 1024  # Can be configured up to 1536
+        elif self.embedding_model == "embeddinggemma":
+            return 768
         else:  # mxbai-embed-large and other Ollama models
             return 1024
 
@@ -406,8 +411,8 @@ class DocEmbedder:
                     )
                     cursor.execute(
                         f"""
-                        INSERT INTO {self.table_name} (collection_name, doc_name, page_number, doc_hash, document, embedding)
-                        VALUES (?, ?, ?, ?, ?, ?)
+                        INSERT INTO {self.table_name} (collection_name, doc_name, page_number, doc_hash, document, embedding_model, embedding)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                         (
                             self.collection_name,
@@ -415,6 +420,7 @@ class DocEmbedder:
                             page_number,
                             document_hash,
                             doctext,
+                            self.embedding_model,
                             embedding_bytes,
                         ),
                     )
@@ -444,8 +450,8 @@ class DocEmbedder:
                 # Use conn.sql() for direct DuckDB SQL execution
                 conn.sql(
                     f"""
-                    INSERT INTO {self.table_name} (doc_hash, doc_name, collection_name, page_number, document, embedding)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO {self.table_name} (doc_hash, doc_name, collection_name, page_number, document, embedding_model, embedding)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                     params=[
                         document_hash,
@@ -453,6 +459,7 @@ class DocEmbedder:
                         self.collection_name,
                         page_number,
                         doctext,
+                        self.embedding_model,
                         embedding_str,
                     ],
                 )
@@ -469,6 +476,7 @@ class DocEmbedder:
                     collection_name=self.collection_name,
                     page_number=page_number,
                     document=doctext,
+                    embedding_model=self.embedding_model,
                     embedding=embedding,
                 )
                 try:
@@ -849,6 +857,605 @@ class DocEmbedder:
                 ).distinct()
                 result = session.execute(statement).fetchall()
                 return [(row[0], row[1]) for row in result]
+
+    def _migrate_add_embedding_model(self):
+        """
+        Add embedding_model column to existing tables if it doesn't exist.
+        For SQLite, this requires recreating the table.
+        """
+        if self.dburl.startswith("sqlite"):
+            self._migrate_sqlite_add_embedding_model()
+        elif self.dburl.startswith("duckdb"):
+            self._migrate_duckdb_add_embedding_model()
+        else:
+            self._migrate_postgres_add_embedding_model()
+
+    def _migrate_sqlite_add_embedding_model(self):
+        """
+        Migrate SQLite table to add embedding_model column.
+        SQLite virtual tables (vec0) don't support ALTER TABLE ADD COLUMN,
+        so we need to recreate the table with data preserved.
+        """
+        with self.connection as conn:
+            cursor = conn.cursor()
+
+            # Check if embedding_model column exists
+            result = cursor.execute(f"PRAGMA table_info({self.table_name})").fetchall()
+            columns = [row[1] for row in result]
+
+            if "embedding_model" in columns:
+                logger.info("SQLite table already has embedding_model column")
+                return
+
+            logger.info("Migrating SQLite table to add embedding_model column...")
+
+            # Create backup table name
+            backup_table = f"{self.table_name}_backup"
+
+            # Rename current table to backup
+            cursor.execute(f"ALTER TABLE {self.table_name} RENAME TO {backup_table}")
+
+            # Create new table with embedding_model column
+            dimension = self._get_embedding_dimension()
+            create_sql = f"""
+            CREATE VIRTUAL TABLE {self.table_name} USING vec0(
+                collection_name TEXT,
+                doc_name TEXT,
+                page_number INTEGER,
+                doc_hash TEXT,
+                document TEXT,
+                embedding_model TEXT,
+                embedding float[{dimension}]
+            );
+            """
+            cursor.execute(create_sql)
+
+            # Copy data from backup, setting embedding_model to 'unknown' for old records
+            cursor.execute(f"""
+                INSERT INTO {self.table_name} 
+                (collection_name, doc_name, page_number, doc_hash, document, embedding_model, embedding)
+                SELECT collection_name, doc_name, page_number, doc_hash, document, 'unknown', embedding
+                FROM {backup_table}
+            """)
+
+            # Drop backup table
+            cursor.execute(f"DROP TABLE {backup_table}")
+
+            conn.commit()
+            logger.info("SQLite migration completed successfully")
+
+    def _migrate_duckdb_add_embedding_model(self):
+        """
+        Migrate DuckDB table to add embedding_model column.
+        """
+        conn = self.connection
+
+        # Check if column exists
+        result = conn.sql(f"""
+            SELECT column_name FROM information_schema.columns 
+            WHERE table_name = '{self.table_name}' AND column_name = 'embedding_model'
+        """).fetchall()
+
+        if len(result) > 0:
+            logger.info("DuckDB table already has embedding_model column")
+            return
+
+        logger.info("Migrating DuckDB table to add embedding_model column...")
+        conn.sql(
+            f"ALTER TABLE {self.table_name} ADD COLUMN embedding_model TEXT DEFAULT 'unknown'"
+        )
+        logger.info("DuckDB migration completed successfully")
+
+    def _migrate_postgres_add_embedding_model(self):
+        """
+        Migrate PostgreSQL table to add embedding_model column.
+        """
+        with Session(self.engine) as session:
+            # Check if column exists
+            result = session.execute(
+                text("""
+                SELECT column_name FROM information_schema.columns 
+                WHERE table_name = 'embedding' AND column_name = 'embedding_model'
+            """)
+            ).fetchall()
+
+            if len(result) > 0:
+                logger.info("PostgreSQL table already has embedding_model column")
+                return
+
+            logger.info("Migrating PostgreSQL table to add embedding_model column...")
+            session.execute(
+                text(
+                    "ALTER TABLE embedding ADD COLUMN embedding_model TEXT DEFAULT 'unknown'"
+                )
+            )
+            session.commit()
+            logger.info("PostgreSQL migration completed successfully")
+
+    def reembed(
+        self,
+        collection_name: str = "",
+        new_model: str | None = None,
+        batch_size: int = 100,
+    ) -> dict:
+        """
+        Re-embed all documents with a new embedding model.
+
+        :param collection_name: Collection to re-embed (empty = all collections)
+        :param new_model: New embedding model (None = use current default from settings)
+        :param batch_size: Number of documents to process per batch
+        :return: Stats dict with count of updated documents and any errors
+        """
+        from libbydbot.settings import Settings
+
+        # Determine the new model
+        if new_model is None:
+            settings = Settings()
+            new_model = settings.default_embedding_model
+
+        old_model = self.embedding_model
+        logger.info(f"Re-embedding documents from model '{old_model}' to '{new_model}'")
+
+        # Update the embedding model
+        self.embedding_model = new_model
+
+        # Reconfigure client if needed
+        if "gemini" in new_model.lower():
+            self.client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+        else:
+            self.client = ollama.Client(
+                host=os.getenv("OLLAMA_HOST", "http://localhost:11434")
+            )
+
+        stats = {
+            "total": 0,
+            "updated": 0,
+            "errors": [],
+            "old_model": old_model,
+            "new_model": new_model,
+        }
+
+        if self.dburl.startswith("sqlite"):
+            return self._reembed_sqlite(collection_name, batch_size, stats)
+        elif self.dburl.startswith("duckdb"):
+            return self._reembed_duckdb(collection_name, batch_size, stats)
+        else:
+            return self._reembed_postgres(collection_name, batch_size, stats)
+
+    def _reembed_sqlite(
+        self, collection_name: str, batch_size: int, stats: dict
+    ) -> dict:
+        """
+        Re-embed documents in SQLite.
+        For SQLite, we need to recreate the table due to vec0 limitations.
+        """
+        import struct
+
+        logger.info("Re-embedding SQLite database (this requires table recreation)...")
+
+        with self.connection as conn:
+            cursor = conn.cursor()
+
+            # Get all documents
+            if collection_name:
+                cursor.execute(
+                    f"SELECT id, collection_name, doc_name, page_number, doc_hash, document FROM {self.table_name} WHERE collection_name = ?",
+                    (collection_name,),
+                )
+            else:
+                cursor.execute(
+                    f"SELECT id, collection_name, doc_name, page_number, doc_hash, document FROM {self.table_name}"
+                )
+
+            documents = cursor.fetchall()
+            stats["total"] = len(documents)
+
+            if len(documents) == 0:
+                logger.info("No documents to re-embed")
+                return stats
+
+            # Create backup table
+            backup_table = f"{self.table_name}_backup_reembed"
+            cursor.execute(f"DROP TABLE IF EXISTS {backup_table}")
+            cursor.execute(f"ALTER TABLE {self.table_name} RENAME TO {backup_table}")
+
+            # Recreate FTS backup
+            fts_backup = f"{self.table_name}_fts_backup_reembed"
+            cursor.execute(f"DROP TABLE IF EXISTS {fts_backup}")
+            cursor.execute(f"ALTER TABLE {self.table_name}_fts RENAME TO {fts_backup}")
+
+            # Create new tables
+            dimension = self._get_embedding_dimension()
+            create_table_sql = f"""
+            CREATE VIRTUAL TABLE {self.table_name} USING vec0(
+                collection_name TEXT,
+                doc_name TEXT,
+                page_number INTEGER,
+                doc_hash TEXT,
+                document TEXT,
+                embedding_model TEXT,
+                embedding float[{dimension}]
+            );
+            """
+            create_fts_sql = f"""
+            CREATE VIRTUAL TABLE {self.table_name}_fts USING fts5(
+                document,
+                doc_hash UNINDEXED,
+                content='{self.table_name}',
+                content_rowid='rowid'
+            );
+            """
+            cursor.execute(create_table_sql)
+            cursor.execute(create_fts_sql)
+
+            # Process documents
+            for i, (
+                doc_id,
+                col_name,
+                doc_name,
+                page_num,
+                doc_hash,
+                document,
+            ) in enumerate(documents):
+                try:
+                    # Generate new embedding
+                    embedding = self._generate_embedding(document)
+                    embedding_bytes = struct.pack(f"{len(embedding)}f", *embedding)
+
+                    # Insert into new table
+                    cursor.execute(
+                        f"""
+                        INSERT INTO {self.table_name} (collection_name, doc_name, page_number, doc_hash, document, embedding_model, embedding)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            col_name,
+                            doc_name,
+                            page_num,
+                            doc_hash,
+                            document,
+                            self.embedding_model,
+                            embedding_bytes,
+                        ),
+                    )
+
+                    # Update FTS
+                    cursor.execute(
+                        f"INSERT INTO {self.table_name}_fts(rowid, document, doc_hash) VALUES (?, ?, ?)",
+                        (cursor.lastrowid, document, doc_hash),
+                    )
+
+                    stats["updated"] += 1
+
+                    # Progress reporting
+                    if (i + 1) % batch_size == 0 or (i + 1) == len(documents):
+                        logger.info(
+                            f"Progress: {i + 1}/{len(documents)} documents re-embedded"
+                        )
+                        conn.commit()
+
+                except Exception as e:
+                    error_msg = f"Error re-embedding {doc_name} page {page_num}: {e}"
+                    logger.error(error_msg)
+                    stats["errors"].append(error_msg)
+
+            # Drop backup tables
+            cursor.execute(f"DROP TABLE {backup_table}")
+            cursor.execute(f"DROP TABLE {fts_backup}")
+            conn.commit()
+
+        logger.info(
+            f"SQLite re-embedding complete: {stats['updated']}/{stats['total']} documents updated"
+        )
+        return stats
+
+    def _reembed_duckdb(
+        self, collection_name: str, batch_size: int, stats: dict
+    ) -> dict:
+        """
+        Re-embed documents in DuckDB.
+        If the embedding dimension changes, the table is recreated.
+        """
+        conn = self.connection
+        new_dimension = self._get_embedding_dimension()
+
+        # Get current dimension from table schema
+        current_dimension_result = conn.sql(f"""
+            SELECT data_type FROM information_schema.columns 
+            WHERE table_name = '{self.table_name}' AND column_name = 'embedding'
+        """).fetchone()
+
+        dimension_changed = False
+        if current_dimension_result:
+            current_type = current_dimension_result[0]
+            # Extract dimension from FLOAT[N]
+            import re
+
+            match = re.search(r"FLOAT\[(\d+)\]", current_type)
+            if match:
+                current_dimension = int(match.group(1))
+                dimension_changed = current_dimension != new_dimension
+                if dimension_changed:
+                    logger.info(
+                        f"Dimension change detected: {current_dimension} -> {new_dimension}. Table will be recreated."
+                    )
+
+        # Get all documents
+        if collection_name:
+            result = conn.sql(
+                f"SELECT id, collection_name, doc_name, page_number, doc_hash, document FROM {self.table_name} WHERE collection_name = ?",
+                params=[collection_name],
+            ).fetchall()
+        else:
+            result = conn.sql(
+                f"SELECT id, collection_name, doc_name, page_number, doc_hash, document FROM {self.table_name}"
+            ).fetchall()
+
+        documents = result
+        stats["total"] = len(documents)
+
+        if len(documents) == 0:
+            logger.info("No documents to re-embed")
+            return stats
+
+        if dimension_changed:
+            return self._reembed_duckdb_recreate(
+                collection_name, batch_size, stats, new_dimension
+            )
+
+        # Process documents with same dimension
+        for i, (doc_id, col_name, doc_name, page_num, doc_hash, document) in enumerate(
+            documents
+        ):
+            try:
+                embedding = self._generate_embedding(document)
+                embedding_str = "[" + ",".join(str(v) for v in embedding) + "]"
+
+                conn.sql(
+                    f"""
+                    UPDATE {self.table_name} 
+                    SET embedding = ?::FLOAT[{new_dimension}], embedding_model = ?
+                    WHERE id = ?
+                    """,
+                    params=[embedding_str, self.embedding_model, doc_id],
+                )
+
+                stats["updated"] += 1
+
+                if (i + 1) % batch_size == 0 or (i + 1) == len(documents):
+                    logger.info(
+                        f"Progress: {i + 1}/{len(documents)} documents re-embedded"
+                    )
+
+            except Exception as e:
+                error_msg = f"Error re-embedding {doc_name} page {page_num}: {e}"
+                logger.error(error_msg)
+                stats["errors"].append(error_msg)
+
+        logger.info(
+            f"DuckDB re-embedding complete: {stats['updated']}/{stats['total']} documents updated"
+        )
+        return stats
+
+    def _reembed_duckdb_recreate(
+        self, collection_name: str, batch_size: int, stats: dict, new_dimension: int
+    ) -> dict:
+        """
+        Re-embed documents in DuckDB by recreating the table (used when dimension changes).
+        """
+        conn = self.connection
+
+        # Get all documents with full data
+        if collection_name:
+            result = conn.sql(
+                f"SELECT id, collection_name, doc_name, page_number, doc_hash, document FROM {self.table_name} WHERE collection_name = ?",
+                params=[collection_name],
+            ).fetchall()
+        else:
+            result = conn.sql(
+                f"SELECT id, collection_name, doc_name, page_number, doc_hash, document FROM {self.table_name}"
+            ).fetchall()
+
+        documents = result
+        stats["total"] = len(documents)
+
+        if len(documents) == 0:
+            logger.info("No documents to re-embed")
+            return stats
+
+        logger.info(f"Recreating DuckDB table with new dimension {new_dimension}...")
+
+        # Rename current table as backup
+        backup_table = f"{self.table_name}_backup_reembed"
+        conn.sql(f"DROP TABLE IF EXISTS {backup_table}")
+        conn.sql(f"ALTER TABLE {self.table_name} RENAME TO {backup_table}")
+
+        # Create new table with new dimension
+        conn.sql(f"CREATE SEQUENCE IF NOT EXISTS {self.table_name}_seq;")
+        create_sql = f"""
+        CREATE TABLE {self.table_name} (
+            id INTEGER PRIMARY KEY DEFAULT nextval('{self.table_name}_seq'),
+            collection_name TEXT,
+            doc_name TEXT,
+            page_number INTEGER,
+            doc_hash TEXT UNIQUE,
+            document TEXT,
+            embedding_model TEXT DEFAULT 'embeddinggemma',
+            embedding FLOAT[{new_dimension}]
+        );
+        """
+        conn.sql(create_sql)
+
+        # Recreate FTS index
+        conn.sql("INSTALL fts;")
+        conn.sql("LOAD fts;")
+        conn.sql(f"PRAGMA drop_fts_index('{self.table_name}');")
+        conn.sql(f"PRAGMA create_fts_index('{self.table_name}', 'id', 'document');")
+
+        # Process documents
+        for i, (doc_id, col_name, doc_name, page_num, doc_hash, document) in enumerate(
+            documents
+        ):
+            try:
+                embedding = self._generate_embedding(document)
+                embedding_str = "[" + ",".join(str(v) for v in embedding) + "]"
+
+                conn.sql(
+                    f"""
+                    INSERT INTO {self.table_name} (collection_name, doc_name, page_number, doc_hash, document, embedding_model, embedding)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    params=[
+                        col_name,
+                        doc_name,
+                        page_num,
+                        doc_hash,
+                        document,
+                        self.embedding_model,
+                        embedding_str,
+                    ],
+                )
+
+                stats["updated"] += 1
+
+                if (i + 1) % batch_size == 0 or (i + 1) == len(documents):
+                    logger.info(
+                        f"Progress: {i + 1}/{len(documents)} documents re-embedded"
+                    )
+
+            except Exception as e:
+                error_msg = f"Error re-embedding {doc_name} page {page_num}: {e}"
+                logger.error(error_msg)
+                stats["errors"].append(error_msg)
+
+        # Drop backup table
+        conn.sql(f"DROP TABLE {backup_table}")
+
+        # Recreate HNSW index (only for in-memory or with experimental persistence)
+        try:
+            conn.sql("SET hnsw_enable_experimental_persistence = true;")
+            conn.sql(f"""
+                CREATE INDEX {self.table_name}_index 
+                ON {self.table_name} USING HNSW(embedding) 
+                WITH (metric='cosine');
+            """)
+            logger.info("Created HNSW index on embedding column.")
+        except Exception as e:
+            logger.warning(
+                f"Could not create HNSW index (this is OK for disk-based DBs): {e}"
+            )
+
+        logger.info(
+            f"DuckDB re-embedding complete: {stats['updated']}/{stats['total']} documents updated"
+        )
+        return stats
+
+    def _reembed_postgres(
+        self, collection_name: str, batch_size: int, stats: dict
+    ) -> dict:
+        """
+        Re-embed documents in PostgreSQL.
+        """
+        with Session(self.engine) as session:
+            # Get all documents
+            if collection_name:
+                statement = select(self.embedding).where(
+                    self.embedding.collection_name == collection_name
+                )
+            else:
+                statement = select(self.embedding)
+
+            documents = session.execute(statement).scalars().all()
+            stats["total"] = len(documents)
+
+            if len(documents) == 0:
+                logger.info("No documents to re-embed")
+                return stats
+
+            # Process documents
+            for i, doc in enumerate(documents):
+                try:
+                    # Generate new embedding
+                    embedding = self._generate_embedding(doc.document)
+
+                    # Update the record
+                    doc.embedding = embedding
+                    doc.embedding_model = self.embedding_model
+
+                    stats["updated"] += 1
+
+                    # Progress reporting and commit in batches
+                    if (i + 1) % batch_size == 0 or (i + 1) == len(documents):
+                        session.commit()
+                        logger.info(
+                            f"Progress: {i + 1}/{len(documents)} documents re-embedded"
+                        )
+
+                except Exception as e:
+                    session.rollback()
+                    error_msg = (
+                        f"Error re-embedding {doc.doc_name} page {doc.page_number}: {e}"
+                    )
+                    logger.error(error_msg)
+                    stats["errors"].append(error_msg)
+
+        logger.info(
+            f"PostgreSQL re-embedding complete: {stats['updated']}/{stats['total']} documents updated"
+        )
+        return stats
+
+    def get_embedding_model_info(self) -> dict:
+        """
+        Get information about embedding models used in the database.
+
+        :return: Dict with model counts per collection
+        """
+        info = {"models": {}, "total_documents": 0}
+
+        if self.dburl.startswith("sqlite"):
+            with self.connection as conn:
+                cursor = conn.cursor()
+                result = cursor.execute(
+                    f"SELECT embedding_model, collection_name, COUNT(*) as count FROM {self.table_name} GROUP BY embedding_model, collection_name"
+                ).fetchall()
+                for model, collection, count in result:
+                    if model is None:
+                        model = "unknown"
+                    if model not in info["models"]:
+                        info["models"][model] = {}
+                    info["models"][model][collection] = count
+                    info["total_documents"] += count
+
+        elif self.dburl.startswith("duckdb"):
+            conn = self.connection
+            result = conn.sql(
+                f"SELECT embedding_model, collection_name, COUNT(*) as count FROM {self.table_name} GROUP BY embedding_model, collection_name"
+            ).fetchall()
+            for model, collection, count in result:
+                if model is None:
+                    model = "unknown"
+                if model not in info["models"]:
+                    info["models"][model] = {}
+                info["models"][model][collection] = count
+                info["total_documents"] += count
+        else:
+            with Session(self.engine) as session:
+                result = session.execute(
+                    text("""
+                        SELECT embedding_model, collection_name, COUNT(*) as count 
+                        FROM embedding 
+                        GROUP BY embedding_model, collection_name
+                    """)
+                ).fetchall()
+                for model, collection, count in result:
+                    if model is None:
+                        model = "unknown"
+                    if model not in info["models"]:
+                        info["models"][model] = {}
+                    info["models"][model][collection] = count
+                    info["total_documents"] += count
+
+        return info
 
     def __del__(self):
         if self._connection:
