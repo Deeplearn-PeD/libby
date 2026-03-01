@@ -1,5 +1,10 @@
-site_name: Libby d. Bot Documentation
+site_name: Libby D. Bot Documentation
 site_url: https://github.com/Deeplearn-PeD/libby
+site_description: AI-powered librarian for RAG document embedding and retrieval
+site_author: Flávio Codeço Coelho
+repo_url: https://github.com/Deeplearn-PeD/libby
+repo_name: GitHub
+
 nav:
   - Home: index.md
   - Tutorial: tutorial.md
@@ -7,5 +12,18 @@ nav:
   - About: about.md
   - Contact: contact.md
   - License: license.md
-  - GitHub: https://github.com/Deeplearn-PeD/libby
-theme: readthedocs
+
+theme:
+  name: readthedocs
+  highlightjs: true
+  hljs_languages:
+    - python
+    - bash
+    - json
+
+markdown_extensions:
+  - admonition
+  - codehilite
+  - tables
+  - toc:
+      permalink: true

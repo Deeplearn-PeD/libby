@@ -1,133 +1,208 @@
-# Building a Local Knowledge Base
+# Tutorial
 
-This tutorial will guide you through creating a local document collection and using Libby to process and index them for AI-powered retrieval and generation.
+This tutorial will guide you through using Libby D. Bot to create embeddings from your documents and query them.
 
-## Step 1: Setting Up Your Environment
+## Step 1: Installation
 
-First, ensure you have Libby installed and the required dependencies:
-
-```bash
-pip install libby
-pip install pyzotero pdfminer.six
-```
-
-## Step 2: Collecting Documents
-
-### Option 1: From Zotero Library
-If you use Zotero for reference management:
-
-```python
-from pyzotero import zotero
-
-# Initialize Zotero client
-zot = zotero.Zotero(library_id, library_type, api_key)
-
-# Get all PDF attachments
-items = zot.everything(zot.top())
-pdfs = [item for item in items if item['data']['contentType'] == 'application/pdf']
-```
-
-### Option 2: From Local Directory
-For local PDF collections:
+Install Libby using pip or uv:
 
 ```bash
-# Create organized directory structure
-mkdir -p documents/pdfs documents/texts
+# Using pip
+pip install -U libby
+
+# Using uv (recommended)
+uv sync
 ```
 
-## Step 3: Processing PDFs
+## Step 2: Setting Up Environment Variables
 
-Extract text from PDFs using PDFMiner:
+Create a `.env` file in your project directory:
 
-```python
-from pdfminer.high_level import extract_text
+```bash
+# Optional: Ollama server URL (default: http://localhost:11434)
+OLLAMA_HOST=http://localhost:11434
 
-def process_pdf(pdf_path, output_dir):
-    text = extract_text(pdf_path)
-    output_path = os.path.join(output_dir, os.path.basename(pdf_path) + '.txt')
-    with open(output_path, 'w') as f:
-        f.write(text)
+# Optional: Gemini API key (for Gemini models)
+GEMINI_API_KEY=your_api_key
+
+# Optional: OpenAI API key (for GPT models)
+OPENAI_API_KEY=your_api_key
+
+# Optional: Database URL for embeddings
+EMBED_DB=duckdb:///data/embeddings.duckdb
 ```
 
-## Step 4: Ingesting Documents into Libby
+## Step 3: Preparing Your Documents
 
-Use the FileSystemIngester to process your documents:
+Place your PDF documents in a directory:
 
-```python
-from libbydbot.brain.ingest import FileSystemIngester
-
-ingester = FileSystemIngester(path="documents")
-ingester.ingest()
+```bash
+mkdir -p documents
+# Copy your PDFs to the documents folder
 ```
 
-## Step 5: Creating Embeddings
+## Step 4: Creating Embeddings
 
-Create vector embeddings for semantic search:
+Use the CLI to embed your documents:
+
+```bash
+# Basic usage
+libby embed --corpus_path ./documents
+
+# With custom collection name
+libby embed --corpus_path ./documents --collection_name research
+```
+
+The embedding process:
+1. Extracts text from PDFs using PyMuPDF
+2. Splits text into chunks (default: 800 chars with 100 char overlap)
+3. Generates vector embeddings using the default model (embeddinggemma)
+4. Stores embeddings in the database
+
+## Step 5: Querying Your Documents
+
+### Using the CLI
+
+```bash
+# Ask a question
+libby answer "What are the main findings?"
+
+# Specify a collection
+libby answer "What are the main findings?" --collection_name research
+```
+
+### Using Python API
 
 ```python
+from libbydbot.brain import LibbyDBot
 from libbydbot.brain.embed import DocEmbedder
 
-embedder = DocEmbedder(col_name="my_knowledge_base")
-for doc in documents:
-    embedder.embed_text(
-        doctext=doc['text'],
-        docname=doc['name'],
-        page_number=doc['page']
-    )
-```
-
-## Step 6: Querying Your Knowledge Base
-
-Now you can query your documents:
-
-```python
-results = embedder.retrieve_docs(
-    query="What are the key findings?",
-    num_docs=3
+# Initialize the bot
+bot = LibbyDBot(
+    name="MyBot",
+    model="llama3.2",
+    embed_db="duckdb:///embeddings.duckdb"
 )
 
-for result in results:
-    print(f"Document: {result['docname']}")
-    print(f"Relevance: {result['score']}")
-    print(f"Content: {result['content'][:200]}...")
+# Retrieve relevant documents
+context = bot.DE.retrieve_docs(
+    query="What are the key findings?",
+    collection="research",
+    num_docs=5
+)
+
+# Ask a question with context
+bot.set_context(context)
+response = bot.ask("Summarize the main findings")
+print(response)
+```
+
+## Step 6: Using the REST API
+
+### Start the Server
+
+```bash
+# Using the CLI
+uv run libby-server
+
+# With custom options
+uv run libby-server --host 0.0.0.0 --port 8080 --reload
+```
+
+### API Examples
+
+#### Embed Text
+
+```bash
+curl -X POST "http://localhost:8000/api/embed/text" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "text": "Machine learning is a subset of AI...",
+    "doc_name": "notes.txt",
+    "collection_name": "research"
+  }'
+```
+
+#### Upload and Embed PDF
+
+```bash
+curl -X POST "http://localhost:8000/api/embed/upload" \
+  -F "file=@document.pdf" \
+  -F "collection_name=research"
+```
+
+#### Retrieve Documents
+
+```bash
+curl -X POST "http://localhost:8000/api/retrieve" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "What is machine learning?",
+    "collection_name": "research",
+    "num_docs": 5
+  }'
 ```
 
 ## Advanced Usage
 
-### Using the AI Agent
-You can combine document retrieval with AI generation:
+### Custom Embedding Model
 
 ```python
-from libbydbot import LibbyDBot
+from libbydbot.brain.embed import DocEmbedder
 
-libby = LibbyDBot()
-context = "\n".join([r['content'] for r in results])
-response = libby.ask(f"Based on these documents: {context}\nWhat are the main conclusions?")
-print(response)
+# Use a specific embedding model
+embedder = DocEmbedder(
+    col_name="my_collection",
+    dburl="duckdb:///embeddings.duckdb",
+    embedding_model="mxbai-embed-large"
+)
 ```
 
-### Managing Memory
-Libby maintains conversation history:
+### Article Summarization
+
+```python
+from libbydbot.brain.analyze import ArticleSummarizer
+
+summarizer = ArticleSummarizer(model="llama3.2")
+summary = summarizer.summarize(article_text)
+
+print(f"Title: {summary.title}")
+print(f"Research Question: {summary.research_question}")
+print(f"Results: {summary.results}")
+```
+
+### Memory and Chat History
 
 ```python
 from libbydbot.brain.memory import History
 
-history = History()
-history.add_message("user", "What is the capital of France?")
-history.add_message("assistant", "The capital of France is Paris.")
+history = History(dburl="sqlite:///memory.db")
+history.memorize(
+    user_id=1,
+    question="What is AI?",
+    response="AI is artificial intelligence...",
+    context="Machine learning context"
+)
+```
+
+## Docker Deployment
+
+```bash
+# Build and run
+docker build -t libby-api:latest .
+docker run -d -p 8000:8000 \
+  -v libby-data:/data \
+  -e OLLAMA_HOST=http://host.docker.internal:11434 \
+  --add-host=host.docker.internal:host-gateway \
+  libby-api:latest
+
+# Or use docker-compose
+docker-compose up -d
 ```
 
 ## Next Steps
-- Explore different AI models
-- Set up PostgreSQL for production use
+
+- Explore different AI models (Llama3, Gemma, GPT-4o, Qwen3)
+- Set up PostgreSQL with pgvector for production
 - Create custom document processing pipelines
-
-
-
-below we use bash to move all PDF files in a directory tree to a folder called `pdfs` and then we use the `pdf2txt.py` script from the `pdfminer` library to extract the text from the PDF files. 
-```bash
-find . -name "*.pdf" -exec cp {} pdfs \;
-cd pdfs
-for f in *.pdf; do pdf2txt.py $f > $f.txt; done
-```
-
+- Integrate with your existing applications via the REST API

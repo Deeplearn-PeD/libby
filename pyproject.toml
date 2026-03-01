@@ -47,6 +47,7 @@ exclude = ["site*"]
 [dependency-groups]
 dev = [
     #    "aider-chat>=0.70.0",
+    "mkdocs>=1.6.1",
 ]
 
 [project.optional-dependencies]

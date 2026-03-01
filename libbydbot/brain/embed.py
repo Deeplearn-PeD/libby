@@ -66,11 +66,16 @@ class DocEmbedder:
         self,
         col_name,
         dburl: str = "",
-        embedding_model: str = "mxbai-embed-large",
+        embedding_model: str | None = None,
         chunk_size: int = 800,
         chunk_overlap: int = 100,
     ):
         self.dburl = dburl if dburl else os.getenv("PGURL")
+        if embedding_model is None:
+            from libbydbot.settings import Settings
+
+            settings = Settings()
+            embedding_model = settings.default_embedding_model
         self.embedding_model = embedding_model
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
