@@ -153,6 +153,7 @@ def reembed_embeddings(request: ReembedRequest, embedder: EmbedderDep):
             old_model=stats["old_model"],
             new_model=stats["new_model"],
             errors=stats["errors"],
+            backup_table=stats.get("backup_table"),
             message=f"Successfully re-embedded {stats['updated']}/{stats['total']} documents with model '{stats['new_model']}'",
         )
     except Exception as e:

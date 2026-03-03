@@ -167,6 +167,13 @@ class LibbyInterface(LibbyDBot):
             if len(stats["errors"]) > 5:
                 print(f"    ... and {len(stats['errors']) - 5} more errors")
 
+        if "backup_table" in stats and stats["backup_table"]:
+            print(f"\n  Backup table: {stats['backup_table']}")
+            print(f"  The backup table has been preserved for safety.")
+            print(
+                f"  You can drop it manually after verifying the re-embedding was successful."
+            )
+
         return stats
 
     def model_info(self):

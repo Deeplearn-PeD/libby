@@ -106,6 +106,9 @@ class ReembedResponse(BaseModel):
     errors: list[str] = Field(
         default_factory=list, description="List of errors encountered"
     )
+    backup_table: str | None = Field(
+        None, description="Name of backup table (for DuckDB, kept for safety)"
+    )
     message: str = Field(..., description="Status message")
 
 

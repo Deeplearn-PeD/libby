@@ -176,8 +176,8 @@ class DocEmbedder:
             if ":memory:" in self.dburl:
                 # Create HNSW index.
                 conn.sql(f"""
-                    CREATE INDEX embedding_duckdb_index 
-                    ON {self.table_name} USING HNSW(embedding) 
+                    CREATE INDEX embedding_duckdb_index
+                    ON {self.table_name} USING HNSW(embedding)
                     WITH (metric='cosine');
                 """)
                 logger.info("Created HNSW index on embedding column.")
@@ -581,7 +581,7 @@ class DocEmbedder:
             # Vector Search
             vector_results = conn.sql(f"""
                 SELECT id, document, array_cosine_similarity(embedding, {embedding_str}::FLOAT[{dimension}]) as similarity
-                FROM {self.table_name} 
+                FROM {self.table_name}
                 {f"WHERE collection_name = '{collection}'" if collection else ""}
                 ORDER BY similarity DESC
                 LIMIT {num_docs * 2}
@@ -680,8 +680,8 @@ class DocEmbedder:
                 # Keyword Search (FTS5) with join to get metadata
                 fts_results = cursor.execute(
                     f"""
-                    SELECT f.doc_hash, t.doc_name, t.page_number, f.document, f.rank 
-                    FROM {self.table_name}_fts f 
+                    SELECT f.doc_hash, t.doc_name, t.page_number, f.document, f.rank
+                    FROM {self.table_name}_fts f
                     JOIN {self.table_name} t ON f.doc_hash = t.doc_hash
                     WHERE f.document MATCH ? ORDER BY f.rank LIMIT ?
                     """,
@@ -734,7 +734,7 @@ class DocEmbedder:
             # Vector Search with metadata
             vector_results = conn.sql(f"""
                 SELECT id, doc_name, page_number, document, array_cosine_similarity(embedding, {embedding_str}::FLOAT[{dimension}]) as similarity
-                FROM {self.table_name} 
+                FROM {self.table_name}
                 {f"WHERE collection_name = '{collection}'" if collection else ""}
                 ORDER BY similarity DESC
                 LIMIT {num_docs * 2}
@@ -912,7 +912,7 @@ class DocEmbedder:
 
             # Copy data from backup, setting embedding_model to 'unknown' for old records
             cursor.execute(f"""
-                INSERT INTO {self.table_name} 
+                INSERT INTO {self.table_name}
                 (collection_name, doc_name, page_number, doc_hash, document, embedding_model, embedding)
                 SELECT collection_name, doc_name, page_number, doc_hash, document, 'unknown', embedding
                 FROM {backup_table}
@@ -932,7 +932,7 @@ class DocEmbedder:
 
         # Check if column exists
         result = conn.sql(f"""
-            SELECT column_name FROM information_schema.columns 
+            SELECT column_name FROM information_schema.columns
             WHERE table_name = '{self.table_name}' AND column_name = 'embedding_model'
         """).fetchall()
 
@@ -954,7 +954,7 @@ class DocEmbedder:
             # Check if column exists
             result = session.execute(
                 text("""
-                SELECT column_name FROM information_schema.columns 
+                SELECT column_name FROM information_schema.columns
                 WHERE table_name = 'embedding' AND column_name = 'embedding_model'
             """)
             ).fetchall()
@@ -1161,7 +1161,7 @@ class DocEmbedder:
 
         # Get current dimension from table schema
         current_dimension_result = conn.sql(f"""
-            SELECT data_type FROM information_schema.columns 
+            SELECT data_type FROM information_schema.columns
             WHERE table_name = '{self.table_name}' AND column_name = 'embedding'
         """).fetchone()
 
@@ -1213,7 +1213,7 @@ class DocEmbedder:
 
                 conn.sql(
                     f"""
-                    UPDATE {self.table_name} 
+                    UPDATE {self.table_name}
                     SET embedding = ?::FLOAT[{new_dimension}], embedding_model = ?
                     WHERE id = ?
                     """,
@@ -1242,6 +1242,7 @@ class DocEmbedder:
     ) -> dict:
         """
         Re-embed documents in DuckDB by recreating the table (used when dimension changes).
+        This version uses a safe approach: create temp table, verify, then swap.
         """
         conn = self.connection
 
@@ -1264,17 +1265,20 @@ class DocEmbedder:
             return stats
 
         logger.info(f"Recreating DuckDB table with new dimension {new_dimension}...")
+        logger.info(f"Processing {len(documents)} documents...")
 
-        # Rename current table as backup
+        # Use a temporary table name
+        temp_table = f"{self.table_name}_temp_new"
         backup_table = f"{self.table_name}_backup_reembed"
-        conn.sql(f"DROP TABLE IF EXISTS {backup_table}")
-        conn.sql(f"ALTER TABLE {self.table_name} RENAME TO {backup_table}")
 
-        # Create new table with new dimension
-        conn.sql(f"CREATE SEQUENCE IF NOT EXISTS {self.table_name}_seq;")
+        # Clean up any existing temp/backup tables
+        conn.sql(f"DROP TABLE IF EXISTS {temp_table}")
+
+        # Create new TEMPORARY table with new dimension
+        conn.sql(f"CREATE SEQUENCE IF NOT EXISTS {temp_table}_seq;")
         create_sql = f"""
-        CREATE TABLE {self.table_name} (
-            id INTEGER PRIMARY KEY DEFAULT nextval('{self.table_name}_seq'),
+        CREATE TABLE {temp_table} (
+            id INTEGER PRIMARY KEY DEFAULT nextval('{temp_table}_seq'),
             collection_name TEXT,
             doc_name TEXT,
             page_number INTEGER,
@@ -1285,14 +1289,12 @@ class DocEmbedder:
         );
         """
         conn.sql(create_sql)
+        logger.info(f"Created temporary table {temp_table}")
 
-        # Recreate FTS index
-        conn.sql("INSTALL fts;")
-        conn.sql("LOAD fts;")
-        conn.sql(f"PRAGMA drop_fts_index('{self.table_name}');")
-        conn.sql(f"PRAGMA create_fts_index('{self.table_name}', 'id', 'document');")
+        # Process documents into temp table
+        successful_embeddings = 0
+        failed_embeddings = 0
 
-        # Process documents
         for i, (doc_id, col_name, doc_name, page_num, doc_hash, document) in enumerate(
             documents
         ):
@@ -1302,7 +1304,7 @@ class DocEmbedder:
 
                 conn.sql(
                     f"""
-                    INSERT INTO {self.table_name} (collection_name, doc_name, page_number, doc_hash, document, embedding_model, embedding)
+                    INSERT INTO {temp_table} (collection_name, doc_name, page_number, doc_hash, document, embedding_model, embedding)
                     VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     params=[
@@ -1316,27 +1318,92 @@ class DocEmbedder:
                     ],
                 )
 
+                successful_embeddings += 1
                 stats["updated"] += 1
 
                 if (i + 1) % batch_size == 0 or (i + 1) == len(documents):
                     logger.info(
-                        f"Progress: {i + 1}/{len(documents)} documents re-embedded"
+                        f"Progress: {i + 1}/{len(documents)} documents processed ({successful_embeddings} successful, {failed_embeddings} failed)"
                     )
 
             except Exception as e:
+                failed_embeddings += 1
                 error_msg = f"Error re-embedding {doc_name} page {page_num}: {e}"
                 logger.error(error_msg)
                 stats["errors"].append(error_msg)
 
-        # Drop backup table
-        conn.sql(f"DROP TABLE {backup_table}")
+        # Verify that we have documents in the temp table
+        temp_count = conn.sql(f"SELECT COUNT(*) FROM {temp_table}").fetchone()[0]
+        logger.info(f"Temporary table has {temp_count} documents")
+
+        # Check if we have a reasonable number of documents
+        # We allow some failures but at least 50% should succeed
+        if temp_count == 0:
+            error_msg = "CRITICAL: No documents were successfully embedded! Keeping original table."
+            logger.error(error_msg)
+            stats["errors"].append(error_msg)
+            conn.sql(f"DROP TABLE {temp_table}")
+            return stats
+
+        if temp_count < len(documents) * 0.5:
+            error_msg = f"WARNING: Only {temp_count}/{len(documents)} documents were successfully embedded. Keeping original table."
+            logger.error(error_msg)
+            stats["errors"].append(error_msg)
+            conn.sql(f"DROP TABLE {temp_table}")
+            return stats
+
+        # Load FTS extension
+        conn.sql("INSTALL fts;")
+        conn.sql("LOAD fts;")
+
+        # Drop HNSW index if it exists on main table
+        try:
+            conn.sql(f"DROP INDEX IF EXISTS {self.table_name}_index;")
+            logger.info("Dropped existing HNSW index")
+        except Exception as e:
+            logger.warning(f"Could not drop HNSW index (may not exist): {e}")
+
+        # Drop FTS-related tables for main table
+        try:
+            fts_table_patterns = [
+                f"fts_main_{self.table_name}",
+                f"fts_data_{self.table_name}",
+                f"fts_stats_{self.table_name}",
+                f"fts_segments_{self.table_name}",
+                f"fts_lists_{self.table_name}",
+            ]
+            for fts_table in fts_table_patterns:
+                try:
+                    conn.sql(f"DROP TABLE IF EXISTS {fts_table};")
+                except:
+                    pass
+            logger.info("Cleaned up existing FTS tables")
+        except Exception as e:
+            logger.info(f"FTS cleanup skipped: {e}")
+
+        # Now swap the tables: main -> backup, temp -> main
+        conn.sql(f"DROP TABLE IF EXISTS {backup_table}")
+        conn.sql(f"ALTER TABLE {self.table_name} RENAME TO {backup_table}")
+        logger.info(f"Renamed {self.table_name} to {backup_table} (backup)")
+
+        conn.sql(f"ALTER TABLE {temp_table} RENAME TO {self.table_name}")
+        conn.sql(f"DROP SEQUENCE IF EXISTS {self.table_name}_seq")
+        conn.sql(f"ALTER SEQUENCE {temp_table}_seq RENAME TO {self.table_name}_seq")
+        logger.info(f"Renamed {temp_table} to {self.table_name}")
+
+        # Recreate FTS index on new main table
+        try:
+            conn.sql(f"PRAGMA create_fts_index('{self.table_name}', 'id', 'document');")
+            logger.info("Created FTS index on new table")
+        except Exception as e:
+            logger.warning(f"Could not create FTS index: {e}")
 
         # Recreate HNSW index (only for in-memory or with experimental persistence)
         try:
             conn.sql("SET hnsw_enable_experimental_persistence = true;")
             conn.sql(f"""
-                CREATE INDEX {self.table_name}_index 
-                ON {self.table_name} USING HNSW(embedding) 
+                CREATE INDEX {self.table_name}_index
+                ON {self.table_name} USING HNSW(embedding)
                 WITH (metric='cosine');
             """)
             logger.info("Created HNSW index on embedding column.")
@@ -1345,8 +1412,27 @@ class DocEmbedder:
                 f"Could not create HNSW index (this is OK for disk-based DBs): {e}"
             )
 
+        # Final verification
+        final_count = conn.sql(f"SELECT COUNT(*) FROM {self.table_name}").fetchone()[0]
+        logger.info(f"Final verification: {final_count} documents in new table")
+
+        if final_count != temp_count:
+            logger.error(f"Count mismatch! Expected {temp_count}, got {final_count}")
+            stats["errors"].append(
+                f"Count mismatch: expected {temp_count}, got {final_count}"
+            )
+
+        # Add info about backup table
+        stats["backup_table"] = backup_table
+        logger.info(
+            f"Backup table '{backup_table}' has been preserved. You can drop it manually after verification."
+        )
+
         logger.info(
             f"DuckDB re-embedding complete: {stats['updated']}/{stats['total']} documents updated"
+        )
+        logger.info(
+            f"Successfully embedded: {successful_embeddings}, Failed: {failed_embeddings}"
         )
         return stats
 
@@ -1442,8 +1528,8 @@ class DocEmbedder:
             with Session(self.engine) as session:
                 result = session.execute(
                     text("""
-                        SELECT embedding_model, collection_name, COUNT(*) as count 
-                        FROM embedding 
+                        SELECT embedding_model, collection_name, COUNT(*) as count
+                        FROM embedding
                         GROUP BY embedding_model, collection_name
                     """)
                 ).fetchall()

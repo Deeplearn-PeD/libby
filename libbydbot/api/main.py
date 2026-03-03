@@ -25,7 +25,7 @@ async def lifespan(app: FastAPI):
     global app_state
 
     dburl = os.getenv("EMBED_DB", "duckdb:///data/embeddings.duckdb")
-    embedding_model = os.getenv("EMBEDDING_MODEL", "mxbai-embed-large")
+    embedding_model = os.getenv("EMBEDDING_MODEL", "embeddinggemma")
 
     logger.info(f"Initializing DocEmbedder with dburl={dburl}, model={embedding_model}")
 
