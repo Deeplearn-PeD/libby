@@ -88,8 +88,53 @@ docker run -d -p 8000:8000 -v libby-data:/data \
   --add-host=host.docker.internal:host-gateway \
   libby-api:latest
 
-# Or use docker-compose
+# Or use docker-compose (includes SFTP server)
 docker-compose up -d
+```
+
+### SFTP Document Ingestion
+
+Libby includes an SFTP server for automated document ingestion. Upload PDFs via SFTP and they'll be automatically embedded every 5 minutes.
+
+**Setup:**
+
+```bash
+# 1. Generate SSH keys for SFTP authentication
+./scripts/setup-ssh-keys.sh
+
+# 2. Start all services (API + SFTP + Document Watcher)
+docker-compose up -d
+
+# 3. Check service status
+docker-compose ps
+```
+
+**Upload Documents via SFTP:**
+
+```bash
+# Connect to SFTP server
+sftp -i ssh_keys/ssh_host_ed25519_key -P 2222 libby@localhost
+
+# Upload a PDF
+sftp> put document.pdf
+sftp> bye
+```
+
+**How it works:**
+
+1. Upload PDFs to the SFTP server (port 2222)
+2. Document watcher monitors the upload directory every 5 minutes
+3. New PDFs are automatically sent to the Libby API for embedding
+4. Processed files are moved to `processed/` directory
+5. Failed files are moved to `failed/` directory
+
+**View watcher logs:**
+
+```bash
+docker logs libby-watcher
+
+# Or follow logs in real-time
+docker logs -f libby-watcher
 ```
 
 ### API Documentation
@@ -288,6 +333,16 @@ curl "http://localhost:8000/api/health"
 | `GEMINI_API_KEY` | Google Gemini API key | - |
 | `OPENAI_API_KEY` | OpenAI API key | - |
 
+### Document Watcher Configuration
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `CRON_SCHEDULE` | Cron schedule for document processing | `*/5 * * * *` (every 5 min) |
+| `CHUNK_SIZE` | Text chunk size for embedding | `800` |
+| `CHUNK_OVERLAP` | Overlap between chunks | `100` |
+| `WATCH_DIR` | Directory to watch for new PDFs | `/data/uploads` |
+| `LIBBY_API_URL` | Libby API endpoint | `http://libby-api:8000` |
+
 ## Features
 
 - Multiple language support (English and Portuguese)
@@ -297,6 +352,8 @@ curl "http://localhost:8000/api/health"
 - Content generation capabilities
 - REST API for programmatic access
 - Docker support for containerized deployment
+- SFTP server for automated document ingestion
+- Automatic document processing via cron-based watcher
 
 ## Configuration
 

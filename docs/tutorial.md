@@ -241,6 +241,8 @@ history.memorize(
 
 ## Docker Deployment
 
+### Basic Deployment
+
 ```bash
 # Build and run
 docker build -t libby-api:latest .
@@ -254,9 +256,112 @@ docker run -d -p 8000:8000 \
 docker-compose up -d
 ```
 
+### Full Deployment with SFTP Ingestion
+
+For production deployments with automated document ingestion, use the full docker-compose stack:
+
+```bash
+# 1. Setup SSH keys for SFTP authentication
+./scripts/setup-ssh-keys.sh
+```
+
+This generates:
+- `ssh_keys/ssh_host_ed25519_key` - Private key (keep secure!)
+- `ssh_keys/ssh_host_ed25519_key.pub` - Public key
+- `ssh_keys/authorized_keys` - Authorized keys for SFTP user
+
+```bash
+# 2. Start all services
+docker-compose up -d
+
+# 3. Verify all services are running
+docker-compose ps
+```
+
+Expected output:
+```
+NAME              STATUS    PORTS
+libby-api         healthy   0.0.0.0:8000->8000/tcp
+libby-sftp        healthy   0.0.0.0:2222->22/tcp
+libby-watcher     healthy
+```
+
+**Architecture:**
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Docker Compose Stack                      │
+├─────────────────┬─────────────────┬─────────────────────────┤
+│   libby-api     │   libby-sftp    │   libby-watcher         │
+│   Port: 8000    │   Port: 2222    │   Polls every 5 min     │
+└────────┬────────┴────────┬────────┴─────────────────────────┘
+         │                 │
+         └────────┬────────┘
+                  │
+         ┌────────┴────────┐
+         │   shared volume │
+         │   /data/uploads │
+         └─────────────────┘
+```
+
+**Uploading Documents:**
+
+```bash
+# Connect to SFTP
+sftp -i ssh_keys/ssh_host_ed25519_key -P 2222 libby@localhost
+
+# Upload PDFs
+sftp> put research_paper.pdf
+sftp> put data_report.pdf
+sftp> ls
+research_paper.pdf
+data_report.pdf
+sftp> bye
+```
+
+**Monitoring Processing:**
+
+```bash
+# View watcher logs
+docker logs libby-watcher
+
+# Follow logs in real-time
+docker logs -f libby-watcher
+
+# Check processed files (inside container)
+docker exec libby-watcher ls -la /data/uploads/processed/
+
+# Check failed files
+docker exec libby-watcher ls -la /data/uploads/failed/
+```
+
+**Configuration via Environment:**
+
+Create a `.env` file to customize behavior:
+
+```bash
+# .env
+COLLECTION_NAME=research
+CHUNK_SIZE=800
+CHUNK_OVERLAP=100
+CRON_SCHEDULE=*/5 * * * *
+EMBEDDING_MODEL=mxbai-embed-large
+```
+
+**Stopping Services:**
+
+```bash
+# Stop all services
+docker-compose down
+
+# Stop and remove volumes (clears all data)
+docker-compose down -v
+```
+
 ## Next Steps
 
 - Explore different AI models (Llama3, Gemma, GPT-4o, Qwen3)
 - Set up PostgreSQL with pgvector for production
 - Create custom document processing pipelines
 - Integrate with your existing applications via the REST API
+- Deploy with SFTP for automated document ingestion from external systems

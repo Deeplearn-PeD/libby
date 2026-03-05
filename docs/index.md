@@ -53,6 +53,20 @@ uv run libby-server
 # Access interactive docs at http://localhost:8000/docs
 ```
 
+### Docker with SFTP
+
+```bash
+# Setup SSH keys
+./scripts/setup-ssh-keys.sh
+
+# Start all services (API + SFTP + Watcher)
+docker-compose up -d
+
+# Upload documents via SFTP
+sftp -i ssh_keys/ssh_host_ed25519_key -P 2222 libby@localhost
+sftp> put document.pdf
+```
+
 ## Features
 
 - **Multiple Database Support**: SQLite, DuckDB, and PostgreSQL
@@ -61,3 +75,5 @@ uv run libby-server
 - **Embedding Models**: embeddinggemma (default), mxbai-embed-large, gemini-embedding-001
 - **Multi-language**: English and Portuguese support
 - **Docker Ready**: Containerized deployment support
+- **SFTP Ingestion**: Automated document upload and processing via SFTP
+- **Document Watcher**: Cron-based monitoring for new documents

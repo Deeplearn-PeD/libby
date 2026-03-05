@@ -1,0 +1,32 @@
+FROM python:3.12-slim
+
+LABEL maintainer="Flávio Codeço Coelho <fccoelho@gmail.com>"
+LABEL description="Libby Document Watcher - Monitors SFTP directory and embeds documents via Libby API"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir \
+    requests>=2.31.0 \
+    loguru>=0.7.0
+
+COPY scripts/watch_sftp.py /app/watch_sftp.py
+COPY scripts/cron-wrapper.sh /app/cron-wrapper.sh
+RUN chmod +x /app/cron-wrapper.sh
+
+RUN mkdir -p /data/uploads /var/log
+
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV WATCH_DIR=/data/uploads
+ENV LIBBY_API_URL=http://libby-api:8000
+ENV COLLECTION_NAME=main
+ENV CRON_SCHEDULE="*/5 * * * *"
+
+HEALTHCHECK --interval=60s --timeout=10s --start-period=10s --retries=3 \
+    CMD test -f /var/log/watcher.log || exit 1
+
+CMD ["/app/cron-wrapper.sh"]

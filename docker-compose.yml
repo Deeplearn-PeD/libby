@@ -12,29 +12,14 @@ services:
     volumes:
       - libby-data:/data
     environment:
-      # Database configuration
       - EMBED_DB=/data/embeddings.duckdb
       - COLLECTION_NAME=main
-      
-      # Ollama configuration (connect to host's Ollama)
       - OLLAMA_HOST=http://host.docker.internal:11434
       - OLLAMA_API_BASE=http://host.docker.internal:11434
-      
-      # Embedding model (change if using different model)
       - EMBEDDING_MODEL=mxbai-embed-large
-      
-      # Optional: API keys for other providers
-      # - GEMINI_API_KEY=${GEMINI_API_KEY:-}
-      # - OPENAI_API_KEY=${OPENAI_API_KEY:-}
-    
-    # Allow container to access host services (Ollama)
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    
-    # Restart policy
     restart: unless-stopped
-    
-    # Health check
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
       interval: 30s
@@ -42,6 +27,48 @@ services:
       retries: 3
       start_period: 10s
 
+  sftp:
+    image: atmoz/sftp:alpine
+    container_name: libby-sftp
+    volumes:
+      - libby-uploads:/home/libby/upload
+      - ./ssh_keys:/etc/sftp/keys:ro
+    ports:
+      - "2222:22"
+    command: libby::1001:1001:upload
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep sshd || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  document-watcher:
+    build:
+      context: .
+      dockerfile: Dockerfile.watcher
+    image: libby-watcher:latest
+    container_name: libby-watcher
+    volumes:
+      - libby-uploads:/data/uploads
+      - watcher-logs:/var/log
+    environment:
+      - WATCH_DIR=/data/uploads
+      - LIBBY_API_URL=http://libby-api:8000
+      - COLLECTION_NAME=${COLLECTION_NAME:-main}
+      - CHUNK_SIZE=${CHUNK_SIZE:-800}
+      - CHUNK_OVERLAP=${CHUNK_OVERLAP:-100}
+      - CRON_SCHEDULE=${CRON_SCHEDULE:-*/5 * * * *}
+    depends_on:
+      libby-api:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   libby-data:
+    driver: local
+  libby-uploads:
+    driver: local
+  watcher-logs:
     driver: local
