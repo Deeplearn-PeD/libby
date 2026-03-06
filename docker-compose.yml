@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   libby-api:
     build:
@@ -8,67 +6,41 @@ services:
     image: libby-api:latest
     container_name: libby-api
     ports:
-      - "8000:8000"
+      - "8001:8000"
+      # Ollama port not exposed externally (used internally only)
+      # Uncomment below if you need external access to Ollama
+      # - "11435:11434"
     volumes:
       - libby-data:/data
+      - ollama-models:/root/.ollama  # Persist Ollama models
     environment:
-      - EMBED_DB=/data/embeddings.duckdb
+      # Database configuration
+      - EMBED_DB=duckdb:///data/embeddings.duckdb
       - COLLECTION_NAME=main
-      - OLLAMA_HOST=http://host.docker.internal:11434
-      - OLLAMA_API_BASE=http://host.docker.internal:11434
+      
+      # Ollama configuration (internal)
+      - OLLAMA_HOST=http://localhost:11434
+      
+      # Embedding model
       - EMBEDDING_MODEL=mxbai-embed-large
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      
+      # Optional: API keys for other providers
+      # - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      # - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    
+    # Restart policy
     restart: unless-stopped
+    
+    # Health check (increased start_period for Ollama initialization)
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10s
-
-  sftp:
-    image: atmoz/sftp:alpine
-    container_name: libby-sftp
-    volumes:
-      - libby-uploads:/home/libby/upload
-      - ./ssh_keys:/etc/sftp/keys:ro
-    ports:
-      - "2222:22"
-    command: libby::1001:1001:upload
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "pgrep sshd || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
-
-  document-watcher:
-    build:
-      context: .
-      dockerfile: Dockerfile.watcher
-    image: libby-watcher:latest
-    container_name: libby-watcher
-    volumes:
-      - libby-uploads:/data/uploads
-      - watcher-logs:/var/log
-    environment:
-      - WATCH_DIR=/data/uploads
-      - LIBBY_API_URL=http://libby-api:8000
-      - COLLECTION_NAME=${COLLECTION_NAME:-main}
-      - CHUNK_SIZE=${CHUNK_SIZE:-800}
-      - CHUNK_OVERLAP=${CHUNK_OVERLAP:-100}
-      - CRON_SCHEDULE=${CRON_SCHEDULE:-*/5 * * * *}
-    depends_on:
-      libby-api:
-        condition: service_healthy
-    restart: unless-stopped
+      start_period: 60s
 
 volumes:
   libby-data:
     driver: local
-  libby-uploads:
-    driver: local
-  watcher-logs:
+  ollama-models:
     driver: local

@@ -114,7 +114,7 @@ uv run libby-server --host 0.0.0.0 --port 8080 --reload
 #### Embed Text
 
 ```bash
-curl -X POST "http://localhost:8000/api/embed/text" \
+curl -X POST "http://localhost:8001/api/embed/text" \
   -H "Content-Type: application/json" \
   -d '{
     "text": "Machine learning is a subset of AI...",
@@ -126,7 +126,7 @@ curl -X POST "http://localhost:8000/api/embed/text" \
 #### Upload and Embed PDF
 
 ```bash
-curl -X POST "http://localhost:8000/api/embed/upload" \
+curl -X POST "http://localhost:8001/api/embed/upload" \
   -F "file=@document.pdf" \
   -F "collection_name=research"
 ```
@@ -134,7 +134,7 @@ curl -X POST "http://localhost:8000/api/embed/upload" \
 #### Retrieve Documents
 
 ```bash
-curl -X POST "http://localhost:8000/api/retrieve" \
+curl -X POST "http://localhost:8001/api/retrieve" \
   -H "Content-Type: application/json" \
   -d '{
     "query": "What is machine learning?",
@@ -200,7 +200,7 @@ Using REST API:
 
 ```bash
 # Re-embed via API
-curl -X POST "http://localhost:8000/api/embed/reembed" \
+curl -X POST "http://localhost:8001/api/embed/reembed" \
   -H "Content-Type: application/json" \
   -d '{
     "collection_name": "research",
@@ -209,7 +209,7 @@ curl -X POST "http://localhost:8000/api/embed/reembed" \
   }'
 
 # Get model info
-curl "http://localhost:8000/api/embed/model-info"
+curl "http://localhost:8001/api/embed/model-info"
 ```
 
 ### Article Summarization
@@ -241,122 +241,23 @@ history.memorize(
 
 ## Docker Deployment
 
-### Basic Deployment
-
 ```bash
-# Build and run
+# Build and run with Docker (includes Ollama server and mxbai-embed-large model)
 docker build -t libby-api:latest .
-docker run -d -p 8000:8000 \
+docker run -d -p 8001:8000 \
   -v libby-data:/data \
-  -e OLLAMA_HOST=http://host.docker.internal:11434 \
-  --add-host=host.docker.internal:host-gateway \
+  -v ollama-models:/root/.ollama \
+  -e EMBED_DB=duckdb:///data/embeddings.duckdb \
   libby-api:latest
 
-# Or use docker-compose
-docker-compose up -d
+# Or use docker compose (recommended)
+docker compose up -d
 ```
 
-### Full Deployment with SFTP Ingestion
-
-For production deployments with automated document ingestion, use the full docker-compose stack:
-
-```bash
-# 1. Setup SSH keys for SFTP authentication
-./scripts/setup-ssh-keys.sh
-```
-
-This generates:
-- `ssh_keys/ssh_host_ed25519_key` - Private key (keep secure!)
-- `ssh_keys/ssh_host_ed25519_key.pub` - Public key
-- `ssh_keys/authorized_keys` - Authorized keys for SFTP user
-
-```bash
-# 2. Start all services
-docker-compose up -d
-
-# 3. Verify all services are running
-docker-compose ps
-```
-
-Expected output:
-```
-NAME              STATUS    PORTS
-libby-api         healthy   0.0.0.0:8000->8000/tcp
-libby-sftp        healthy   0.0.0.0:2222->22/tcp
-libby-watcher     healthy
-```
-
-**Architecture:**
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Docker Compose Stack                      │
-├─────────────────┬─────────────────┬─────────────────────────┤
-│   libby-api     │   libby-sftp    │   libby-watcher         │
-│   Port: 8000    │   Port: 2222    │   Polls every 5 min     │
-└────────┬────────┴────────┬────────┴─────────────────────────┘
-         │                 │
-         └────────┬────────┘
-                  │
-         ┌────────┴────────┐
-         │   shared volume │
-         │   /data/uploads │
-         └─────────────────┘
-```
-
-**Uploading Documents:**
-
-```bash
-# Connect to SFTP
-sftp -i ssh_keys/ssh_host_ed25519_key -P 2222 libby@localhost
-
-# Upload PDFs
-sftp> put research_paper.pdf
-sftp> put data_report.pdf
-sftp> ls
-research_paper.pdf
-data_report.pdf
-sftp> bye
-```
-
-**Monitoring Processing:**
-
-```bash
-# View watcher logs
-docker logs libby-watcher
-
-# Follow logs in real-time
-docker logs -f libby-watcher
-
-# Check processed files (inside container)
-docker exec libby-watcher ls -la /data/uploads/processed/
-
-# Check failed files
-docker exec libby-watcher ls -la /data/uploads/failed/
-```
-
-**Configuration via Environment:**
-
-Create a `.env` file to customize behavior:
-
-```bash
-# .env
-COLLECTION_NAME=research
-CHUNK_SIZE=800
-CHUNK_OVERLAP=100
-CRON_SCHEDULE=*/5 * * * *
-EMBEDDING_MODEL=mxbai-embed-large
-```
-
-**Stopping Services:**
-
-```bash
-# Stop all services
-docker-compose down
-
-# Stop and remove volumes (clears all data)
-docker-compose down -v
-```
+> **Note:** 
+> - Port 8001 is used to avoid conflicts. Change to `8000:8000` if port 8000 is available.
+> - The Docker image includes Ollama server with the `mxbai-embed-large` embedding model pre-installed.
+> - Models are persisted in the `ollama-models` volume for faster restarts.
 
 ## Next Steps
 
@@ -364,4 +265,3 @@ docker-compose down -v
 - Set up PostgreSQL with pgvector for production
 - Create custom document processing pipelines
 - Integrate with your existing applications via the REST API
-- Deploy with SFTP for automated document ingestion from external systems

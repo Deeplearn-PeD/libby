@@ -53,6 +53,7 @@ class Embedding(Base):
     __table_args__ = {"extend_existing": True}
     # id_seq = Sequence("id_seq", metadata=Base.metadata)
     id = Column(Integer, autoincrement=True, primary_key=True)
+    # id = Column(Integer, id_seq, server_default=id_seq.next_value(), primary_key=True)
     collection_name = Column(String)
     doc_name = Column(String)
     page_number = Column(Integer)

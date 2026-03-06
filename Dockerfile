@@ -3,11 +3,16 @@ FROM python:3.12-slim
 LABEL maintainer="Flávio Codeço Coelho <fccoelho@gmail.com>"
 LABEL description="Libby D. Bot API - AI-powered librarian for RAG document embedding and retrieval"
 
-# Install system dependencies for PyMuPDF (PDF processing)
+# Install system dependencies for PyMuPDF (PDF processing) and Ollama
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
+    git \
+    zstd \
     && rm -rf /var/lib/apt/lists/*
+
+# Install Ollama
+RUN curl -fsSL https://ollama.com/install.sh | sh
 
 # Set working directory
 WORKDIR /app
@@ -25,18 +30,22 @@ RUN uv sync --frozen --no-dev
 # Create directory for persistent database files
 RUN mkdir -p /data
 
+# Copy startup script
+COPY docker/start.sh /start.sh
+RUN chmod +x /start.sh
+
 # Environment variables
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
-ENV EMBED_DB=/data/embeddings.duckdb
-ENV OLLAMA_HOST=http://host.docker.internal:11434
+ENV EMBED_DB=duckdb:///data/embeddings.duckdb
+ENV OLLAMA_HOST=http://localhost:11434
 
-# Expose port
-EXPOSE 8000
+# Expose ports (8000 for API, 11434 for Ollama)
+EXPOSE 8000 11434
 
 # Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD curl -f http://localhost:8000/api/health || exit 1
 
-# Run the API server
-CMD ["uv", "run", "uvicorn", "libbydbot.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run the startup script
+CMD ["/start.sh"]

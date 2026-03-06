@@ -165,3 +165,29 @@ Llama3.2 (default), Gemma3, GPT-4o, Qwen3, Gemini
 - SQLite: `sqlite:///path/to/db.sqlite`
 - DuckDB: `duckdb:///path/to/db.duckdb`
 - PostgreSQL: Full postgresql:// URL
+
+## Release Process
+
+Use the release script to commit changes, bump version, and create git tags:
+
+```bash
+./scripts/release.sh
+```
+
+The script will:
+1. Show current git status and pending changes
+2. Ask for version bump type (major/minor/patch)
+3. Update version in `pyproject.toml`
+4. Commit all changes with a message
+5. Create an annotated git tag (e.g., `v0.9.0`)
+
+After running the script, push changes with:
+```bash
+git push && git push --tags
+```
+
+### Version Bump Guidelines
+
+- **patch**: Bug fixes, documentation updates, small tweaks (0.8.0 → 0.8.1)
+- **minor**: New features, backward-compatible changes (0.8.0 → 0.9.0)
+- **major**: Breaking changes, major refactors (0.8.0 → 1.0.0)
