@@ -320,24 +320,40 @@ Libby D. Bot now uses PostgreSQL with the pgvector extension as the default data
 
 ### Migrating from DuckDB
 
-If you have existing embeddings in DuckDB, you can migrate them to PostgreSQL:
+**📋 Complete Migration Guide**: See [docs/COMPLETE_MIGRATION_GUIDE.md](docs/COMPLETE_MIGRATION_GUIDE.md) for comprehensive instructions.
+
+#### Quick Migration
+
+If you have existing embeddings in DuckDB, you can easily migrate them to PostgreSQL:
 
 ```bash
 # Ensure PostgreSQL is running
 docker compose up -d postgres
 
-# Run the migration script
-uv run python scripts/migrate_duckdb_to_postgres.py \
-  --duckdb-path /path/to/embeddings.duckdb \
-  --postgres-url postgresql://libby:yourpassword@localhost:5432/libby
+# Simple migration (if dimensions match)
+./scripts/migrate.sh
+
+# Migration with re-embedding (if dimensions don't match)
+./scripts/migrate.sh --re-embed
 ```
 
-The migration script will:
-- Create necessary tables in PostgreSQL
-- Enable the pgvector extension
-- Migrate all embeddings while preserving document hashes
-- Skip duplicates automatically
-- Show progress with a progress bar
+#### What Gets Migrated
+
+- ✅ Document embeddings
+- ✅ Document metadata (names, page numbers, hashes)
+- ✅ **Collection names** (preserved from DuckDB)
+- ✅ Document text content
+
+#### Migration Features
+
+- **Automatic dimension detection** - Detects 768 vs 1024 dimension mismatches
+- **Re-embedding support** - Automatically re-embeds when needed
+- **Collection preservation** - Maintains original collection names
+- **Progress tracking** - Real-time progress with time estimation
+- **Dry-run mode** - Preview without making changes
+- **Resume capability** - Continue interrupted migrations
+
+For detailed instructions, troubleshooting, and advanced options, see the [Complete Migration Guide](docs/COMPLETE_MIGRATION_GUIDE.md).
 
 ### Alternative Database Backends
 
