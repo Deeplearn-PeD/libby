@@ -37,7 +37,9 @@ RUN chmod +x /start.sh
 # Environment variables
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
-ENV EMBED_DB=duckdb:///data/embeddings.duckdb
+# Database URL will be set via environment variable in docker-compose
+# Default to PostgreSQL (overridden by docker-compose)
+ENV EMBED_DB=postgresql://libby:libby123@postgres:5432/libby
 ENV OLLAMA_HOST=http://localhost:11434
 
 # Expose ports (8000 for API, 11434 for Ollama)

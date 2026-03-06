@@ -79,9 +79,9 @@ class LibbyDBot(Persona):
         name: str = "Libby D. Bot",
         languages=["pt_BR", "en"],
         model: str = "llama3.2",
-        dburl: str = "sqlite:///memory.db",
+        dburl: str = "postgresql://libby:libby123@localhost:5432/libby",
         provider: str = None,
-        embed_db: str = "duckdb:///embeddings.duckdb",
+        embed_db: str = "postgresql://libby:libby123@localhost:5432/libby",
     ):
         if model.lower() == "gemma":
             model = "gemma3"

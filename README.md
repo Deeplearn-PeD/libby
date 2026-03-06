@@ -81,22 +81,30 @@ uv run uvicorn libbydbot.api.main:app --host 0.0.0.0 --port 8000
 **Using Docker:**
 
 ```bash
-# Build and run with Docker (includes Ollama server and mxbai-embed-large model)
-docker build -t libby-api:latest .
-docker run -d -p 8001:8000 \
-  -v libby-data:/data \
-  -v ollama-models:/root/.ollama \
-  -e EMBED_DB=duckdb:///data/embeddings.duckdb \
-  libby-api:latest
+# Copy and configure environment variables
+cp .env.example .env
+# IMPORTANT: Edit .env and set a secure POSTGRES_PASSWORD
 
-# Or use docker compose (recommended)
+# Build and run with Docker Compose (recommended)
+# This will start PostgreSQL with pgvector, the API, and backup services
 docker compose up -d
+
+# View logs
+docker compose logs -f
+
+# Stop services
+docker compose down
 ```
 
 > **Note:** 
 > - Port 8001 is used to avoid conflicts. Change to `8000:8000` if port 8000 is available.
-> - The Docker image includes Ollama server with the `mxbai-embed-large` embedding model pre-installed.
+> - The Docker setup includes:
+>   - **PostgreSQL with pgvector**: Default database backend with vector similarity search
+>   - **Ollama server**: With the `mxbai-embed-large` embedding model pre-installed
+>   - **Automatic backups**: Daily backups at 2 AM (configurable)
 > - Models are persisted in the `ollama-models` volume for faster restarts.
+> - PostgreSQL data is persisted in the `postgres-data` volume.
+> - **Security**: You MUST set a secure `POSTGRES_PASSWORD` in your `.env` file before running.
 
 ### API Documentation
 
@@ -278,7 +286,7 @@ curl "http://localhost:8001/api/health"
 ```json
 {
   "status": "healthy",
-  "database": "duckdb",
+  "database": "postgresql",
   "version": "0.1.0"
 }
 ```
@@ -287,12 +295,89 @@ curl "http://localhost:8001/api/health"
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `EMBED_DB` | Database URL for embeddings | `duckdb:///data/embeddings.duckdb` |
+| `POSTGRES_DB` | PostgreSQL database name | `libby` |
+| `POSTGRES_USER` | PostgreSQL username | `libby` |
+| `POSTGRES_PASSWORD` | PostgreSQL password (REQUIRED) | - |
+| `EMBED_DB` | Database URL for embeddings (auto-generated) | `postgresql://libby:***@postgres:5432/libby` |
 | `EMBEDDING_MODEL` | Embedding model to use | `mxbai-embed-large` |
 | `COLLECTION_NAME` | Default collection name | `main` |
 | `OLLAMA_HOST` | Ollama server URL | `http://localhost:11434` |
 | `GEMINI_API_KEY` | Google Gemini API key | - |
 | `OPENAI_API_KEY` | OpenAI API key | - |
+| `BACKUP_RETENTION_DAYS` | Days to keep PostgreSQL backups | `7` |
+| `BACKUP_SCHEDULE` | Backup schedule (cron format) | `0 2 * * *` |
+
+## Database Configuration
+
+### PostgreSQL (Default/Recommended)
+
+Libby D. Bot now uses PostgreSQL with the pgvector extension as the default database backend. This provides:
+
+- **Better scalability** for large document collections
+- **Production-ready** performance and reliability
+- **Vector similarity search** using pgvector extension
+- **Automatic backups** with configurable retention
+
+### Migrating from DuckDB
+
+If you have existing embeddings in DuckDB, you can migrate them to PostgreSQL:
+
+```bash
+# Ensure PostgreSQL is running
+docker compose up -d postgres
+
+# Run the migration script
+uv run python scripts/migrate_duckdb_to_postgres.py \
+  --duckdb-path /path/to/embeddings.duckdb \
+  --postgres-url postgresql://libby:yourpassword@localhost:5432/libby
+```
+
+The migration script will:
+- Create necessary tables in PostgreSQL
+- Enable the pgvector extension
+- Migrate all embeddings while preserving document hashes
+- Skip duplicates automatically
+- Show progress with a progress bar
+
+### Alternative Database Backends
+
+While PostgreSQL is recommended, Libby also supports:
+
+- **DuckDB**: Good for development/testing (`duckdb:///path/to/embeddings.duckdb`)
+- **SQLite**: For simple use cases (`sqlite:///path/to/embeddings.db`)
+
+To use an alternative backend, set the `EMBED_DB` environment variable accordingly.
+
+## Backup and Restore
+
+### Automated Backups
+
+The Docker setup includes automated PostgreSQL backups:
+
+- **Schedule**: Daily at 2 AM (configurable via `BACKUP_SCHEDULE`)
+- **Retention**: 7 days (configurable via `BACKUP_RETENTION_DAYS`)
+- **Location**: Stored in the `postgres-backups` volume
+
+### Manual Backup
+
+```bash
+# Create a manual backup
+docker compose exec postgres-backup /backup.sh --manual
+
+# List available backups
+docker compose exec postgres-backup /backup.sh --list
+```
+
+### Restore from Backup
+
+```bash
+# Copy backup from container
+docker cp libby-postgres-backup:/backups/libby_backup_YYYYMMDD_HHMMSS.sql.gz ./
+
+# Restore to PostgreSQL
+gunzip -c libby_backup_YYYYMMDD_HHMMSS.sql.gz | \
+  docker compose exec -T postgres psql -U libby -d libby
+```
 
 ## Features
 

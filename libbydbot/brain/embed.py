@@ -72,7 +72,13 @@ class DocEmbedder:
         chunk_size: int = 800,
         chunk_overlap: int = 100,
     ):
-        self.dburl = dburl if dburl else os.getenv("PGURL")
+        self.dburl = (
+            dburl
+            if dburl
+            else os.getenv(
+                "EMBED_DB", "postgresql://libby:libby123@localhost:5432/libby"
+            )
+        )
         if embedding_model is None:
             from libbydbot.settings import Settings
 
@@ -111,21 +117,55 @@ class DocEmbedder:
                 logger.error(f"Invalid dburl string passed to DocEmbedder: \n{exc}")
                 self.engine = create_engine("sqlite:///data/embedding.db")
             if self.dburl.lower().startswith("postgres"):
+                # Enable pgvector extension (defense in depth - should already be enabled by init script)
+                logger.info("Ensuring pgvector extension is enabled...")
+                try:
+                    with Session(self.engine) as session:
+                        session.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
+                        session.commit()
+
+                        # Verify extension is loaded
+                        result = session.execute(
+                            text("SELECT 1 FROM pg_extension WHERE extname='vector'")
+                        ).fetchone()
+
+                        if result:
+                            logger.success("pgvector extension is enabled and ready")
+                        else:
+                            logger.error("pgvector extension could not be enabled")
+                            raise RuntimeError(
+                                "pgvector extension is required but could not be enabled"
+                            )
+                except Exception as e:
+                    logger.error(f"Failed to enable pgvector extension: {e}")
+                    logger.error(
+                        "Make sure you are using the pgvector/pgvector Docker image"
+                    )
+                    raise
+
                 self.embedding = Embedding
 
         self.collection_name = col_name
 
         # Check if tables exist and create them only if they don't exist
         if self._should_create_tables():
+            logger.info("Creating embedding tables...")
             if self.dburl.startswith("sqlite"):
                 self._create_sqlite_table(self.connection.cursor())
+                logger.success("SQLite embedding table created successfully")
             elif not self.dburl.startswith("duckdb"):
                 # PostgreSQL
+                logger.info(
+                    "Creating PostgreSQL embedding table with pgvector support..."
+                )
                 Base.metadata.create_all(
                     self.engine,
                     tables=[Base.metadata.sorted_tables[0]],
                     checkfirst=True,
                 )
+                logger.success("PostgreSQL embedding table created successfully")
+        else:
+            logger.info("Embedding tables already exist, skipping creation")
 
     def _init_duckdb(self):
         """
