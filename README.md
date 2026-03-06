@@ -81,22 +81,28 @@ uv run uvicorn libbydbot.api.main:app --host 0.0.0.0 --port 8000
 **Using Docker:**
 
 ```bash
-# Build and run with Docker
+# Build and run with Docker (includes Ollama server and mxbai-embed-large model)
 docker build -t libby-api:latest .
-docker run -d -p 8000:8000 -v libby-data:/data \
-  -e OLLAMA_HOST=http://host.docker.internal:11434 \
-  --add-host=host.docker.internal:host-gateway \
+docker run -d -p 8001:8000 \
+  -v libby-data:/data \
+  -v ollama-models:/root/.ollama \
+  -e EMBED_DB=duckdb:///data/embeddings.duckdb \
   libby-api:latest
 
-# Or use docker-compose
-docker-compose up -d
+# Or use docker compose (recommended)
+docker compose up -d
 ```
+
+> **Note:** 
+> - Port 8001 is used to avoid conflicts. Change to `8000:8000` if port 8000 is available.
+> - The Docker image includes Ollama server with the `mxbai-embed-large` embedding model pre-installed.
+> - Models are persisted in the `ollama-models` volume for faster restarts.
 
 ### API Documentation
 
 Once the server is running, access the interactive API documentation at:
-- Swagger UI: http://localhost:8000/docs
-- ReDoc: http://localhost:8000/redoc
+- Swagger UI: http://localhost:8001/docs
+- ReDoc: http://localhost:8001/redoc
 
 ### API Endpoints
 
@@ -118,7 +124,7 @@ Embed raw text content into the vector database.
 **Request:**
 
 ```bash
-curl -X POST "http://localhost:8000/api/embed/text" \
+curl -X POST "http://localhost:8001/api/embed/text" \
   -H "Content-Type: application/json" \
   -d '{
     "text": "Machine learning is a subset of artificial intelligence...",
@@ -146,7 +152,7 @@ Upload and embed a PDF file. The file is automatically chunked and embedded.
 **Request:**
 
 ```bash
-curl -X POST "http://localhost:8000/api/embed/upload" \
+curl -X POST "http://localhost:8001/api/embed/upload" \
   -F "file=@document.pdf" \
   -F "collection_name=research" \
   -F "chunk_size=800" \
@@ -172,7 +178,7 @@ Perform hybrid search (vector + keyword) across your documents.
 **Request:**
 
 ```bash
-curl -X POST "http://localhost:8000/api/retrieve" \
+curl -X POST "http://localhost:8001/api/retrieve" \
   -H "Content-Type: application/json" \
   -d '{
     "query": "What is machine learning?",
@@ -212,13 +218,13 @@ List all embedded documents, optionally filtered by collection.
 **Request (all documents):**
 
 ```bash
-curl "http://localhost:8000/api/documents"
+curl "http://localhost:8001/api/documents"
 ```
 
 **Request (filtered by collection):**
 
 ```bash
-curl "http://localhost:8000/api/documents?collection_name=research"
+curl "http://localhost:8001/api/documents?collection_name=research"
 ```
 
 **Response:**
@@ -241,7 +247,7 @@ List all collections with their document counts.
 **Request:**
 
 ```bash
-curl "http://localhost:8000/api/collections"
+curl "http://localhost:8001/api/collections"
 ```
 
 **Response:**
@@ -264,7 +270,7 @@ Check the API server health status.
 **Request:**
 
 ```bash
-curl "http://localhost:8000/api/health"
+curl "http://localhost:8001/api/health"
 ```
 
 **Response:**
