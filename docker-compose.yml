@@ -1,4 +1,24 @@
 services:
+  postgres:
+    image: 'pgvector/pgvector:pg16'
+    container_name: libby-postgres
+    environment:
+      - 'POSTGRES_DB=${POSTGRES_DB:-libby}'
+      - 'POSTGRES_USER=${POSTGRES_USER:-libby}'
+      - 'POSTGRES_PASSWORD=${POSTGRES_PASSWORD}'
+    volumes:
+      - 'postgres-data:/var/lib/postgresql/data'
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'pg_isready -U ${POSTGRES_USER:-libby} -d ${POSTGRES_DB:-libby}'
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - libby-network
   libby-api:
     build:
       context: .
