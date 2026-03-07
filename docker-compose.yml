@@ -1,97 +1,64 @@
 services:
-  postgres:
-    image: pgvector/pgvector:pg16
-    container_name: libby-postgres
-    environment:
-      - POSTGRES_DB=${POSTGRES_DB:-libby}
-      - POSTGRES_USER=${POSTGRES_USER:-libby}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-      - postgres-backups:/backups
-      - ./docker/init-db.sql:/docker-entrypoint-initdb.d/01-init-pgvector.sql:ro
-    ports:
-      - "5432:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-libby} -d ${POSTGRES_DB:-libby} && psql -U ${POSTGRES_USER:-libby} -d ${POSTGRES_DB:-libby} -c \"SELECT 1 FROM pg_extension WHERE extname='vector'\" | grep -q 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 60s
-    restart: unless-stopped
-    networks:
-      - libby-network
-
   libby-api:
     build:
       context: .
       dockerfile: Dockerfile
-    image: libby-api:latest
+    image: 'libby-api:latest'
     container_name: libby-api
     depends_on:
       postgres:
         condition: service_healthy
     ports:
-      - "8001:8000"
-      # Ollama port not exposed externally (used internally only)
-      # Uncomment below if you need external access to Ollama
-      # - "11435:11434"
+      - '8001:8000'
     volumes:
-      - libby-data:/data
-      - ollama-models:/root/.ollama  # Persist Ollama models
+      - 'libby-data:/data'
+      - 'ollama-models:/root/.ollama'
     environment:
-      # Database configuration
-      - EMBED_DB=postgresql://${POSTGRES_USER:-libby}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-libby}
+      - 'EMBED_DB=postgresql://${POSTGRES_USER:-libby}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-libby}'
       - COLLECTION_NAME=main
-      
-      # Ollama configuration (internal)
-      - OLLAMA_HOST=http://localhost:11434
-      
-      # Embedding model
-      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-mxbai-embed-large}
-      
-      # Optional: API keys for other providers
-      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
-    
-    # Restart policy
+      - 'OLLAMA_HOST=http://localhost:11434'
+      - 'EMBEDDING_MODEL=${EMBEDDING_MODEL:-mxbai-embed-large}'
+      - 'GEMINI_API_KEY=${GEMINI_API_KEY:-}'
+      - 'OPENAI_API_KEY=${OPENAI_API_KEY:-}'
     restart: unless-stopped
-    
-    # Health check (increased start_period for Ollama initialization)
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      test:
+        - CMD
+        - curl
+        - '-f'
+        - 'http://localhost:8000/api/health'
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 60s
     networks:
       - libby-network
-
   postgres-backup:
-    image: pgvector/pgvector:pg16
+    image: 'pgvector/pgvector:pg16'
     container_name: libby-postgres-backup
     depends_on:
       postgres:
         condition: service_healthy
     environment:
-      - POSTGRES_DB=${POSTGRES_DB:-libby}
-      - POSTGRES_USER=${POSTGRES_USER:-libby}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - 'POSTGRES_DB=${POSTGRES_DB:-libby}'
+      - 'POSTGRES_USER=${POSTGRES_USER:-libby}'
+      - 'POSTGRES_PASSWORD=${POSTGRES_PASSWORD}'
       - POSTGRES_HOST=postgres
-      - BACKUP_RETENTION_DAYS=${BACKUP_RETENTION_DAYS:-7}
-      - BACKUP_SCHEDULE=${BACKUP_SCHEDULE:-0 2 * * *}
+      - 'BACKUP_RETENTION_DAYS=${BACKUP_RETENTION_DAYS:-7}'
+      - 'BACKUP_SCHEDULE=${BACKUP_SCHEDULE:-0 2 * * *}'
     volumes:
-      - postgres-backups:/backups
-      - ./scripts/backup-postgres.sh:/backup.sh:ro
-    entrypoint: ["/bin/sh", "-c", "/backup.sh"]
+      - 'postgres-backups:/backups'
+      - './scripts/backup-postgres.sh:/backup.sh:ro'
+    entrypoint:
+      - /bin/sh
+      - '-c'
+      - /backup.sh
     restart: unless-stopped
     networks:
       - libby-network
-
 networks:
   libby-network:
     driver: bridge
-
 volumes:
   postgres-data:
     driver: local
