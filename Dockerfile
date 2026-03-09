@@ -3,16 +3,13 @@ FROM python:3.12-slim
 LABEL maintainer="Flávio Codeço Coelho <fccoelho@gmail.com>"
 LABEL description="Libby D. Bot API - AI-powered librarian for RAG document embedding and retrieval"
 
-# Install system dependencies for PyMuPDF (PDF processing) and Ollama
+# Install system dependencies for PyMuPDF (PDF processing)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
     git \
     zstd \
     && rm -rf /var/lib/apt/lists/*
-
-# Install Ollama
-RUN curl -fsSL https://ollama.com/install.sh | sh
 
 # Set working directory
 WORKDIR /app
@@ -40,10 +37,10 @@ ENV PYTHONDONTWRITEBYTECODE=1
 # Database URL will be set via environment variable in docker-compose
 # Default to PostgreSQL (overridden by docker-compose)
 ENV EMBED_DB=postgresql://libby:libby123@postgres:5432/libby
-ENV OLLAMA_HOST=http://localhost:11434
+ENV OLLAMA_HOST=http://ollama:11434
 
-# Expose ports (8000 for API, 11434 for Ollama)
-EXPOSE 8000 11434
+# Expose port for API
+EXPOSE 8000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \

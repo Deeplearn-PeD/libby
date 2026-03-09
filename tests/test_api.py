@@ -144,11 +144,13 @@ class TestSchemaModels:
         response = HealthResponse(
             status="healthy",
             database="duckdb",
+            ollama="healthy",
             version="0.6.0",
         )
 
         assert response.status == "healthy"
         assert response.database == "duckdb"
+        assert response.ollama == "healthy"
         assert response.version == "0.6.0"
 
     def test_retrieved_document(self):

@@ -2,6 +2,7 @@ import os
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
+import requests
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -71,7 +72,10 @@ def create_app() -> FastAPI:
     def health_check():
         """Health check endpoint."""
         if app_state.embedder is None:
-            return HealthResponse(status="unhealthy", database="none", version="0.6.0")
+            return HealthResponse(
+                status="unhealthy", database="none", ollama="unknown", version="0.6.0"
+            )
+
         db_type = (
             "duckdb"
             if "duckdb" in app_state.embedder.dburl
@@ -79,7 +83,24 @@ def create_app() -> FastAPI:
             if "sqlite" in app_state.embedder.dburl
             else "postgresql"
         )
-        return HealthResponse(status="healthy", database=db_type, version="0.6.0")
+
+        ollama_host = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+        ollama_status = "unhealthy"
+        try:
+            response = requests.get(f"{ollama_host}/api/tags", timeout=2)
+            if response.status_code == 200:
+                ollama_status = "healthy"
+        except Exception:
+            ollama_status = "unreachable"
+
+        overall_status = "healthy" if ollama_status == "healthy" else "degraded"
+
+        return HealthResponse(
+            status=overall_status,
+            database=db_type,
+            ollama=ollama_status,
+            version="0.6.0",
+        )
 
     @app.get("/", tags=["root"])
     def root():

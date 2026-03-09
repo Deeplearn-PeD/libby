@@ -19,6 +19,31 @@ services:
     restart: unless-stopped
     networks:
       - libby-network
+  ollama:
+    image: 'ollama/ollama:latest'
+    container_name: libby-ollama
+    volumes:
+      - 'ollama-models:/root/.ollama'
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - '-f'
+        - 'http://localhost:11434/api/tags'
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    networks:
+      - libby-network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
   libby-api:
     build:
       context: .
@@ -28,15 +53,16 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      ollama:
+        condition: service_healthy
     ports:
       - '8001:8000'
     volumes:
       - 'libby-data:/data'
-      - 'ollama-models:/root/.ollama'
     environment:
       - 'EMBED_DB=postgresql://${POSTGRES_USER:-libby}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-libby}'
       - COLLECTION_NAME=main
-      - 'OLLAMA_HOST=http://localhost:11434'
+      - 'OLLAMA_HOST=http://ollama:11434'
       - 'EMBEDDING_MODEL=${EMBEDDING_MODEL:-mxbai-embed-large}'
       - 'GEMINI_API_KEY=${GEMINI_API_KEY:-}'
       - 'OPENAI_API_KEY=${OPENAI_API_KEY:-}'

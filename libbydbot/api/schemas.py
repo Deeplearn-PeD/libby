@@ -78,6 +78,7 @@ class CollectionListResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str = Field(..., description="Health status")
     database: str = Field(..., description="Database type being used")
+    ollama: str = Field(..., description="Ollama service status")
     version: str = Field(..., description="API version")
 
 
