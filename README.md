@@ -1,5 +1,13 @@
 # Libby D. Bot
 
+[![PyPI version](https://img.shields.io/pypi/v/libby.svg)](https://pypi.org/project/libby/)
+[![Python](https://img.shields.io/pypi/pyversions/libby.svg)](https://pypi.org/project/libby/)
+[![License](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+[![GitHub stars](https://img.shields.io/github/stars/Deeplearn-PeD/libby.svg?style=flat&logo=github&color=yellow)](https://github.com/Deeplearn-PeD/libby/stargazers)
+[![GitHub forks](https://img.shields.io/github/forks/Deeplearn-PeD/libby.svg?style=flat&logo=github)](https://github.com/Deeplearn-PeD/libby/network/members)
+[![GitHub issues](https://img.shields.io/github/issues/Deeplearn-PeD/libby.svg)](https://github.com/Deeplearn-PeD/libby/issues)
+[![GitHub pull requests](https://img.shields.io/github/issues-pr/Deeplearn-PeD/libby.svg)](https://github.com/Deeplearn-PeD/libby/pulls)
+[![GitHub last commit](https://img.shields.io/github/last-commit/Deeplearn-PeD/libby.svg)](https://github.com/Deeplearn-PeD/libby/commits/main)
 [![DOI](https://zenodo.org/badge/784398327.svg)](https://zenodo.org/doi/10.5281/zenodo.12744747)
 
 Libby the librarian. AI agent specialized in creating and querying embeddings for RAG (Retrieval Augmented Generation).
