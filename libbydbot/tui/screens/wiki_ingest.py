@@ -72,7 +72,7 @@ class WikiIngestScreen(Screen):
 
             pdf_paths = glob(os.path.join(path, "*.pdf"))
             if not pdf_paths:
-                self.call_from_thread(log.write, "No PDF files found.")
+                self.app.call_from_thread(log.write, "No PDF files found.")
                 return
 
             for pdf_path in pdf_paths:
@@ -83,19 +83,19 @@ class WikiIngestScreen(Screen):
                         text += page.get_text() + "\n"
                     doc_name = doc.metadata.get("title", os.path.basename(pdf_path))
                 except Exception as e:
-                    self.call_from_thread(log.write, f"Error reading {pdf_path}: {e}")
+                    self.app.call_from_thread(log.write, f"Error reading {pdf_path}: {e}")
                     continue
 
-                self.call_from_thread(log.write, f"Ingesting: {doc_name}...")
+                self.app.call_from_thread(log.write, f"Ingesting: {doc_name}...")
                 result = wiki.ingest_source(doc_name, text)
-                self.call_from_thread(
+                self.app.call_from_thread(
                     log.write,
                     f"  Done: {result['pages_touched']} pages touched, "
                     f"{result['entities_created']} entities, {result['concepts_created']} concepts",
                 )
 
-            self.call_from_thread(log.write, "Wiki ingest complete!")
-            self.call_from_thread(self.app.notify, "Wiki ingest complete!")
+            self.app.call_from_thread(log.write, "Wiki ingest complete!")
+            self.app.call_from_thread(self.app.notify, "Wiki ingest complete!")
         except Exception as e:
-            self.call_from_thread(log.write, f"Error: {e}")
-            self.call_from_thread(self.app.notify, f"Ingest failed: {e}", severity="error")
+            self.app.call_from_thread(log.write, f"Error: {e}")
+            self.app.call_from_thread(self.app.notify, f"Ingest failed: {e}", severity="error")

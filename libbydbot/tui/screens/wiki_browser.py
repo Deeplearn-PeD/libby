@@ -112,6 +112,6 @@ class WikiBrowserScreen(Screen):
                 f"  Contradictions: {len(report['contradictions'])}\n"
                 f"  Missing pages: {len(report['missing_pages'])}"
             )
-            self.call_from_thread(self.app.notify, msg)
+            self.app.call_from_thread(self.app.notify, msg)
         except Exception as e:
-            self.call_from_thread(self.app.notify, f"Lint failed: {e}", severity="error")
+            self.app.call_from_thread(self.app.notify, f"Lint failed: {e}", severity="error")

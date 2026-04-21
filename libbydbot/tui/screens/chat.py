@@ -124,7 +124,7 @@ class ChatScreen(Screen):
         except Exception as e:
             response = f"Error: {e}"
 
-        self.call_from_thread(self._on_response_ready, thinking_widget, response)
+        self.app.call_from_thread(self._on_response_ready, thinking_widget, response)
 
     def _on_response_ready(self, thinking_widget: Static, response: str) -> None:
         thinking_widget.remove()

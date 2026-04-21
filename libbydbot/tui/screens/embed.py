@@ -73,21 +73,21 @@ class EmbedScreen(Screen):
     def _embed_worker(self, path: str, collection: str, log: RichLog):
         def progress_callback(doc_name, chunk_idx, total):
             msg = f"  {doc_name} — chunk {chunk_idx + 1}/{total}"
-            self.call_from_thread(log.write, msg)
+            self.app.call_from_thread(log.write, msg)
 
         try:
             libby = self.app.libby
             if not libby:
-                self.call_from_thread(log.write, "Error: Libby not initialized.")
+                self.app.call_from_thread(log.write, "Error: Libby not initialized.")
                 return
 
             libby.DE.collection_name = collection
             libby.DE.embed_path(path, callback=progress_callback)
-            self.call_from_thread(log.write, "Embedding complete!")
-            self.call_from_thread(self.app.notify, "Embedding complete!")
+            self.app.call_from_thread(log.write, "Embedding complete!")
+            self.app.call_from_thread(self.app.notify, "Embedding complete!")
         except Exception as e:
-            self.call_from_thread(log.write, f"Error: {e}")
-            self.call_from_thread(self.app.notify, f"Embedding failed: {e}", severity="error")
+            self.app.call_from_thread(log.write, f"Error: {e}")
+            self.app.call_from_thread(self.app.notify, f"Embedding failed: {e}", severity="error")
         finally:
-            self.call_from_thread(self.query_one("#btn-embed-start", Button).update, disabled=False)
-            self.call_from_thread(self.query_one("#btn-embed-stop", Button).update, disabled=True)
+            self.app.call_from_thread(self.query_one("#btn-embed-start", Button).update, disabled=False)
+            self.app.call_from_thread(self.query_one("#btn-embed-stop", Button).update, disabled=True)
