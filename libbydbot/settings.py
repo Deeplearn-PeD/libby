@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field, PostgresDsn
 from typing import Dict, List, Any
@@ -20,10 +22,10 @@ class Settings(BaseSettings):
     }
 
     models: Dict[str, Dict[str, Any]] = {
-        "Llama3": {"code": "llama3.2", "is_default": True},
+        "Llama3": {"code": "llama3.2"},
         "Gemma": {"code": "gemma3"},
         "ChatGPT": {"code": "gpt-4o"},
-        "Qwen": {"code": "qwen3"},
+        "Qwen": {"code": "qwen3.5:4b", "is_default": True},
     }
 
     embedding_models: Dict[str, Dict[str, Any]] = {
@@ -31,6 +33,16 @@ class Settings(BaseSettings):
         "Mxbai": {"code": "mxbai-embed-large"},
         "Gemini": {"code": "gemini-embedding-001"},
     }
+
+    wiki_base_path: str = Field(
+        default_factory=lambda: str(Path.home() / ".libby" / "wikis"),
+        description="Base directory for LLM wikis",
+    )
+
+    wiki_auto_ingest: bool = Field(
+        default=False,
+        description="Automatically ingest documents into the wiki after embedding",
+    )
 
     @property
     def default_model(self) -> str:

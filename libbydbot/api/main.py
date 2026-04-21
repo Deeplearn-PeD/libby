@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
 from libbydbot.api.schemas import HealthResponse
-from libbydbot.api.routes import embed, retrieve
+from libbydbot.api.routes import embed, retrieve, wiki
 from libbydbot.brain.embed import DocEmbedder
 
 
@@ -67,6 +67,7 @@ def create_app() -> FastAPI:
 
     app.include_router(embed.router, prefix="/api")
     app.include_router(retrieve.router)
+    app.include_router(wiki.router, prefix="/api")
 
     @app.get("/api/health", response_model=HealthResponse, tags=["health"])
     def health_check():

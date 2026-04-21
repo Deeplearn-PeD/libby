@@ -118,3 +118,74 @@ class ModelInfoResponse(BaseModel):
         ..., description="Model usage by collection (model -> collection -> count)"
     )
     total_documents: int = Field(..., description="Total number of documents")
+
+
+# ── Wiki schemas ──
+
+
+class WikiIngestRequest(BaseModel):
+    doc_name: str = Field(..., description="Name of the document to ingest")
+    doc_content: str = Field(..., description="Full text content of the document")
+    collection_name: str = Field(
+        "main", description="Collection whose wiki to update"
+    )
+    source_type: str = Field("document", description="Type of source")
+
+
+class WikiIngestResponse(BaseModel):
+    success: bool = Field(..., description="Whether ingest succeeded")
+    source: str = Field(..., description="Source document name")
+    pages_touched: int = Field(..., description="Number of wiki pages created/updated")
+    entities_created: int = Field(..., description="Number of entity pages created/updated")
+    concepts_created: int = Field(..., description="Number of concept pages created/updated")
+    summary: str = Field(..., description="Generated summary of the source")
+    message: str = Field(..., description="Status message")
+
+
+class WikiQueryRequest(BaseModel):
+    question: str = Field(..., description="Question to answer from the wiki")
+    collection_name: str = Field("main", description="Collection wiki to query")
+    file_answer: bool = Field(
+        False, description="If True, save the answer as a new wiki page"
+    )
+
+
+class WikiQueryResponse(BaseModel):
+    question: str = Field(..., description="The original question")
+    answer: str = Field(..., description="Synthesized answer with citations")
+    sources_used: list[str] = Field(default_factory=list, description="Wiki pages cited")
+    confidence: str = Field(..., description="Confidence level: high, medium, or low")
+    gaps: list[str] = Field(default_factory=list, description="Information gaps")
+    suggested_followups: list[str] = Field(
+        default_factory=list, description="Suggested follow-up questions or sources"
+    )
+    filed_page: str | None = Field(None, description="Wiki page path if answer was filed")
+
+
+class WikiLintRequest(BaseModel):
+    collection_name: str = Field("main", description="Collection wiki to lint")
+    auto_fix: bool = Field(
+        False, description="If True, create stub pages for broken links"
+    )
+
+
+class WikiLintResponse(BaseModel):
+    orphan_pages: list[str] = Field(default_factory=list, description="Pages with no inbound links")
+    broken_links: list[str] = Field(
+        default_factory=list, description="Links pointing to non-existent pages"
+    )
+    contradictions: list[dict] = Field(default_factory=list, description="Detected contradictions")
+    stale_claims: list[dict] = Field(default_factory=list, description="Potentially outdated claims")
+    missing_pages: list[dict] = Field(default_factory=list, description="Important terms lacking pages")
+    suggestions: list[str] = Field(default_factory=list, description="General improvement suggestions")
+    fixes_applied: int = Field(0, description="Number of auto-fixes applied")
+
+
+class WikiStatusResponse(BaseModel):
+    collection: str = Field(..., description="Collection name")
+    wiki_path: str = Field(..., description="Filesystem path to the wiki")
+    total_pages: int = Field(..., description="Total number of wiki pages")
+    page_counts: dict[str, int] = Field(..., description="Breakdown by category")
+    orphan_pages: int = Field(..., description="Number of orphan pages")
+    broken_links: int = Field(..., description="Number of broken links")
+    last_operation: str = Field("", description="Most recent log entry")

@@ -143,7 +143,9 @@ libby/
 │       ├── embed.py     # Document embedding
 │       ├── ingest.py    # PDF ingestion
 │       ├── memory.py    # Chat history
-│       └── analyze.py   # Article summarization
+│       ├── analyze.py   # Article summarization
+│       ├── wiki.py      # LLM Wiki manager
+│       └── wiki_models.py # Structured wiki schemas
 ├── tests/
 │   ├── conftest.py      # Shared fixtures
 │   └── brain/
@@ -155,6 +157,8 @@ libby/
 - `PGURL` - PostgreSQL connection URL
 - `OLLAMA_HOST` - Ollama server URL (default: http://localhost:11434)
 - `GEMINI_API_KEY` - Google Gemini API key
+- `WIKI_BASE_PATH` - Base directory for LLM wikis (default: `~/.libby/wikis`)
+- `WIKI_AUTO_INGEST` - Automatically ingest documents into wiki after embedding (default: `False`)
 
 ## Supported Models
 
@@ -191,3 +195,82 @@ git push && git push --tags
 - **patch**: Bug fixes, documentation updates, small tweaks (0.8.0 → 0.8.1)
 - **minor**: New features, backward-compatible changes (0.8.0 → 0.9.0)
 - **major**: Breaking changes, major refactors (0.8.0 → 1.0.0)
+
+## LLM Wiki Conventions
+
+Libby maintains an **LLM Wiki** — a persistent, compounding markdown knowledge base that sits between raw embedded documents and the user. The wiki is stored as Obsidian-compatible markdown files.
+
+### Wiki Directory Structure
+
+Each collection gets its own wiki under `WIKI_BASE_PATH` (default: `~/.libby/wikis/<collection_name>/`):
+
+```
+<collection_name>/
+├── index.md          # Content-oriented catalog of all pages
+├── log.md            # Chronological append-only record of operations
+├── sources/          # One page per ingested source document
+├── entities/         # Pages for people, organizations, objects
+├── concepts/         # Pages for topics, theories, ideas
+└── synthesis/        # Overviews, answers, comparisons, analyses
+```
+
+### Page Format
+
+All pages use YAML frontmatter and Obsidian-style `[[wikilinks]]`:
+
+```markdown
+---
+title: Page Title
+date_created: 2026-04-21T10:00:00
+---
+
+# Page Title
+
+Content here with [[Other Page]] links.
+```
+
+### Ingest Workflow
+
+1. Read source content (from raw PDF or embedded chunks).
+2. Generate `SourceSummary` (entities, concepts, contradictions).
+3. Generate `WikiUpdatePlan` (pages to create/update).
+4. Write/update:
+   - `sources/<doc_name>.md`
+   - `entities/<entity>.md` (create or append mention)
+   - `concepts/<concept>.md` (create or append mention)
+   - `synthesis/overview.md` (if synthesis notes exist)
+5. Update `index.md` and append to `log.md`.
+
+### Query Workflow
+
+1. Read `index.md` to identify candidate pages.
+2. Read the most relevant pages (up to 15, keyword-ranked).
+3. LLM synthesizes a cited answer using `[[Page Name]]` citations.
+4. Optionally file the answer back into `synthesis/` and update `index.md`.
+
+### Lint Workflow
+
+Periodic health-checks scan for:
+- **Orphan pages** — pages with zero inbound wikilinks
+- **Broken links** — wikilinks pointing to non-existent pages
+- **Contradictions** — conflicting claims between pages
+- **Stale claims** — claims superseded by newer sources
+- **Missing pages** — important terms mentioned but lacking dedicated pages
+
+Auto-fix creates stub pages for broken links with `status: stub` frontmatter.
+
+### CLI Commands
+
+```bash
+uv run libby wiki_ingest --corpus_path /path/to/docs --collection_name my_collection
+uv run libby wiki_query "What is the main topic?" --collection_name my_collection --file_answer
+uv run libby wiki_lint --collection_name my_collection --auto_fix
+uv run libby wiki_status --collection_name my_collection
+```
+
+### REST API Endpoints
+
+- `POST /api/wiki/ingest` — ingest a source into the wiki
+- `POST /api/wiki/query` — query the wiki
+- `POST /api/wiki/lint` — lint the wiki
+- `GET /api/wiki/status/{collection_name}` — wiki statistics

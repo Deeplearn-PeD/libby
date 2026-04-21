@@ -59,6 +59,7 @@ services:
       - '8001:8000'
     volumes:
       - 'libby-data:/data'
+      - 'libby-wikis:/wikis'
     environment:
       - 'EMBED_DB=postgresql://${POSTGRES_USER:-libby}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-libby}'
       - COLLECTION_NAME=main
@@ -66,6 +67,7 @@ services:
       - 'EMBEDDING_MODEL=${EMBEDDING_MODEL:-mxbai-embed-large}'
       - 'GEMINI_API_KEY=${GEMINI_API_KEY:-}'
       - 'OPENAI_API_KEY=${OPENAI_API_KEY:-}'
+      - 'WIKI_BASE_PATH=/wikis'
     restart: unless-stopped
     healthcheck:
       test:
@@ -111,6 +113,8 @@ volumes:
   postgres-backups:
     driver: local
   libby-data:
+    driver: local
+  libby-wikis:
     driver: local
   ollama-models:
     driver: local

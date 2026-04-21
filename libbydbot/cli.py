@@ -6,6 +6,7 @@ import fitz
 from fitz import EmptyFileError
 from glob import glob
 from libbydbot.brain import LibbyDBot
+from libbydbot.brain.wiki import WikiManager
 from libbydbot.settings import Settings
 
 try:
@@ -194,6 +195,125 @@ class LibbyInterface(LibbyDBot):
                 print(f"    - Collection '{coll}': {count} documents")
 
         return info
+
+    # ────────────────────────── Wiki Commands ──────────────────────────
+
+    def _get_wiki(self, collection_name: str) -> WikiManager:
+        """Return a WikiManager for the given collection."""
+        wiki_base = settings.wiki_base_path if settings else ""
+        return WikiManager(
+            collection_name=collection_name,
+            wiki_base=wiki_base,
+            model=self.model,
+        )
+
+    def wiki_ingest(self, corpus_path: str = ".", collection_name: str = "main"):
+        """
+        Ingest documents from a path into the wiki for a collection.
+
+        Reads embedded documents (or raw PDFs) and integrates them into the
+        persistent markdown wiki, creating/updating entity and concept pages.
+
+        :param corpus_path: Path to folder containing PDFs
+        :param collection_name: Collection whose wiki to update
+        :return: Ingest statistics
+        """
+        wiki = self._get_wiki(collection_name)
+        results = []
+
+        for pdf_path in glob(os.path.join(corpus_path, "*.pdf")):
+            try:
+                doc = fitz.open(pdf_path)
+                text = ""
+                for page in doc:
+                    text += page.get_text() + "\n"
+                doc_name = doc.metadata.get("title", os.path.basename(pdf_path))
+            except Exception as e:
+                print(f"Error reading {pdf_path}: {e}")
+                continue
+
+            result = wiki.ingest_source(doc_name, text)
+            results.append(result)
+            print(f"  Ingested: {doc_name} ({result['pages_touched']} pages touched)")
+
+        if not results:
+            print("No PDF documents found to ingest into wiki.")
+        else:
+            total_pages = sum(r["pages_touched"] for r in results)
+            print(f"\nWiki ingest complete: {len(results)} sources, {total_pages} pages touched.")
+
+        return results
+
+    def wiki_query(self, question: str, collection_name: str = "main", file_answer: bool = False):
+        """
+        Query the wiki and synthesize an answer.
+
+        :param question: The question to answer
+        :param collection_name: Collection wiki to query
+        :param file_answer: If True, save the answer as a new wiki page
+        :return: Answer dictionary
+        """
+        wiki = self._get_wiki(collection_name)
+        result = wiki.query(question, file_answer=file_answer)
+
+        print(f"\nConfidence: {result['confidence']}")
+        print(f"Sources used: {', '.join(result['sources_used']) or 'None'}")
+        if result.get("gaps"):
+            print(f"Gaps: {', '.join(result['gaps'])}")
+        print(f"\n{result['answer']}")
+
+        if result.get("filed_page"):
+            print(f"\nAnswer filed to wiki page: {result['filed_page']}")
+
+        return result
+
+    def wiki_lint(self, collection_name: str = "main", auto_fix: bool = False):
+        """
+        Health-check the wiki.
+
+        :param collection_name: Collection wiki to lint
+        :param auto_fix: If True, create stub pages for broken links
+        :return: Lint report dictionary
+        """
+        wiki = self._get_wiki(collection_name)
+        report = wiki.lint(auto_fix=auto_fix)
+
+        print(f"Wiki Lint Report for '{collection_name}':")
+        print(f"  Orphan pages: {len(report['orphan_pages'])}")
+        print(f"  Broken links: {len(report['broken_links'])}")
+        print(f"  Contradictions: {len(report['contradictions'])}")
+        print(f"  Stale claims: {len(report['stale_claims'])}")
+        print(f"  Missing pages: {len(report['missing_pages'])}")
+        if report.get("fixes_applied"):
+            print(f"  Fixes applied: {report['fixes_applied']}")
+        if report.get("suggestions"):
+            print("\nSuggestions:")
+            for s in report["suggestions"]:
+                print(f"  - {s}")
+
+        return report
+
+    def wiki_status(self, collection_name: str = "main"):
+        """
+        Show wiki statistics.
+
+        :param collection_name: Collection wiki to inspect
+        :return: Status dictionary
+        """
+        wiki = self._get_wiki(collection_name)
+        status = wiki.status()
+
+        print(f"Wiki Status for '{collection_name}':")
+        print(f"  Path: {status['wiki_path']}")
+        print(f"  Total pages: {status['total_pages']}")
+        for category, count in status["page_counts"].items():
+            print(f"    {category}: {count}")
+        print(f"  Orphan pages: {status['orphan_pages']}")
+        print(f"  Broken links: {status['broken_links']}")
+        if status["last_operation"]:
+            print(f"  Last operation: {status['last_operation']}")
+
+        return status
 
 
 def main(corpus_path="."):
