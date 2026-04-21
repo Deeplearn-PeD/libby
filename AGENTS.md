@@ -23,12 +23,18 @@ uv run pytest tests/brain/              # Run tests in directory
 uv run pytest -k "embed"                # Run tests matching pattern
 ```
 
-### Running the CLI
+### Running the TUI
 
 ```bash
-uv run libby embed --corpus_path /path/to/docs --collection_name my_collection
-uv run libby answer "What is the main topic?" --collection_name my_collection
-uv run libby generate "Write a summary..." --output_file output.txt
+uv run libby              # Launch the interactive Textual TUI
+```
+
+### Running the Legacy CLI (for scripting)
+
+```bash
+uv run libby-cli embed --corpus_path /path/to/docs --collection_name my_collection
+uv run libby-cli answer "What is the main topic?" --collection_name my_collection
+uv run libby-cli generate "Write a summary..." --output_file output.txt
 ```
 
 ## Code Style Guidelines
@@ -136,8 +142,21 @@ Use `nest_asyncio.apply()` and `asyncio.run()` for async operations.
 libby/
 ├── libbydbot/           # Main package
 │   ├── __init__.py      # Persona class
-│   ├── cli.py           # CLI interface (Fire-based)
+│   ├── cli.py           # TUI entry point (Textual)
+│   ├── cli_legacy.py    # Legacy Fire-based CLI
 │   ├── settings.py      # Pydantic settings
+│   ├── tui/             # Textual TUI
+│   │   ├── app.py       # Main App
+│   │   ├── libby.tcss   # TUI styles
+│   │   ├── screens/     # TUI screens
+│   │   │   ├── dashboard.py
+│   │   │   ├── chat.py
+│   │   │   ├── embed.py
+│   │   │   ├── wiki_browser.py
+│   │   │   ├── wiki_ingest.py
+│   │   │   └── settings.py
+│   │   └── widgets/     # Reusable TUI widgets
+│   │       └── status_bar.py
 │   └── brain/           # Core functionality
 │       ├── __init__.py  # LibbyDBot class
 │       ├── embed.py     # Document embedding
@@ -148,6 +167,7 @@ libby/
 │       └── wiki_models.py # Structured wiki schemas
 ├── tests/
 │   ├── conftest.py      # Shared fixtures
+│   ├── test_tui.py      # TUI tests
 │   └── brain/
 └── pyproject.toml
 ```
@@ -259,14 +279,16 @@ Periodic health-checks scan for:
 
 Auto-fix creates stub pages for broken links with `status: stub` frontmatter.
 
-### CLI Commands
+### CLI Commands (Legacy)
 
 ```bash
-uv run libby wiki_ingest --corpus_path /path/to/docs --collection_name my_collection
-uv run libby wiki_query "What is the main topic?" --collection_name my_collection --file_answer
-uv run libby wiki_lint --collection_name my_collection --auto_fix
-uv run libby wiki_status --collection_name my_collection
+uv run libby-cli wiki_ingest --corpus_path /path/to/docs --collection_name my_collection
+uv run libby-cli wiki_query "What is the main topic?" --collection_name my_collection --file_answer
+uv run libby-cli wiki_lint --collection_name my_collection --auto_fix
+uv run libby-cli wiki_status --collection_name my_collection
 ```
+
+In the TUI, use the Wiki Browser screen (`Ctrl+W`) and the Ingest button.
 
 ### REST API Endpoints
 

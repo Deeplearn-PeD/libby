@@ -1,0 +1,141 @@
+/* Libby TUI Styles */
+
+#title {
+    text-align: center;
+    text-style: bold;
+    color: $accent;
+    height: 1;
+}
+
+Screen {
+    align: center middle;
+}
+
+/* Dashboard */
+#dashboard-grid {
+    grid-size: 2;
+    grid-columns: 2fr 1fr;
+    grid-rows: 1fr;
+    height: 1fr;
+    margin: 1 2;
+}
+
+#collections-panel {
+    border: solid $accent;
+    padding: 1 2;
+}
+
+#actions-panel {
+    border: solid $primary;
+    padding: 1 2;
+}
+
+#actions-panel Button {
+    margin: 1 0;
+    width: 100%;
+}
+
+/* Chat */
+#chat-container {
+    layout: vertical;
+    height: 1fr;
+    margin: 0 2;
+}
+
+#chat-history {
+    height: 1fr;
+    border: solid $accent;
+    padding: 1 2;
+    overflow-y: auto;
+}
+
+#chat-input-row {
+    height: auto;
+    margin: 1 0;
+}
+
+#chat-input {
+    width: 1fr;
+}
+
+.user-message {
+    color: $text;
+    background: $surface-darken-1;
+    padding: 1;
+    margin: 1 0;
+}
+
+.assistant-message {
+    color: $text;
+    background: $primary-darken-2;
+    padding: 1;
+    margin: 1 0;
+}
+
+/* Embed */
+#embed-container {
+    layout: vertical;
+    height: 1fr;
+    margin: 0 2;
+}
+
+#embed-top {
+    height: 2fr;
+    border: solid $accent;
+}
+
+#embed-progress {
+    height: 1fr;
+    border: solid $primary;
+    padding: 1;
+}
+
+/* Wiki Browser */
+#wiki-container {
+    layout: horizontal;
+    height: 1fr;
+    margin: 0 2;
+}
+
+#wiki-tree {
+    width: 25%;
+    border: solid $accent;
+    padding: 1;
+}
+
+#wiki-viewer {
+    width: 75%;
+    border: solid $primary;
+    padding: 1;
+}
+
+/* Settings */
+#settings-form {
+    layout: vertical;
+    height: auto;
+    margin: 2 4;
+    width: 60;
+}
+
+#settings-form Label {
+    margin: 1 0 0 0;
+}
+
+#settings-form Input, #settings-form Select {
+    width: 100%;
+}
+
+/* Status bar */
+#status-bar {
+    dock: bottom;
+    height: 1;
+    background: $surface;
+    color: $text;
+    content-align: left middle;
+    padding: 0 2;
+}
+
+/* Notifications */
+Notification {
+    color: $text;
+}

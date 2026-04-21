@@ -18,11 +18,8 @@ def patched_get_response(self, question: str, context: str = ""):
     import asyncio
     import nest_asyncio
 
-    nest_asyncio.apply()
-
     async def _run():
         history = self.chat_history.get_all()
-        # combine context into question for robustness if system_prompt fails
         full_prompt = (
             f"Context: {context}\n\nQuestion: {question}" if context else question
         )
@@ -31,7 +28,15 @@ def patched_get_response(self, question: str, context: str = ""):
             self.chat_history.enqueue(msg)
         return result.data
 
-    return asyncio.run(_run())
+    nest_asyncio.apply()
+    try:
+        return asyncio.run(_run())
+    except RuntimeError as e:
+        if "cannot be called from a running event loop" in str(e):
+            # Fallback: get the running loop and run until complete
+            loop = asyncio.get_event_loop()
+            return loop.run_until_complete(_run())
+        raise
 
 
 def patched_structured_get_response(
@@ -42,8 +47,6 @@ def patched_structured_get_response(
 
     import asyncio
     import nest_asyncio
-
-    nest_asyncio.apply()
 
     async def _run():
         history = self.chat_history.get_all()
@@ -57,7 +60,14 @@ def patched_structured_get_response(
             self.chat_history.enqueue(msg)
         return result.data
 
-    return asyncio.run(_run())
+    nest_asyncio.apply()
+    try:
+        return asyncio.run(_run())
+    except RuntimeError as e:
+        if "cannot be called from a running event loop" in str(e):
+            loop = asyncio.get_event_loop()
+            return loop.run_until_complete(_run())
+        raise
 
 
 LangModel.get_response = patched_get_response
@@ -139,13 +149,6 @@ class LibbyDBot(Persona):
             response = response.split("</think>")[-1].strip()
         self.history.memorize(user_id, question, response, self.context)
         return response
-
-    # def memorize(self, question: str, response: str):
-    #     self.set_context(question)
-    #     self.set_prompt(f"You are Libby D. Bot, a research Assistant, you should answer questions "
-    #                    f"based on the context provided below.\n{question}")
-    #     self.ask(response)
-    #     return True
 
     def _get_response(self, question):
         response = self.llm.get_response(question=question, context=self.context_prompt)

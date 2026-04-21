@@ -24,6 +24,7 @@ dependencies = [
     "fastapi>=0.115.0",
     "python-multipart>=0.0.9",
     "uvicorn>=0.30.0",
+    "textual>=8.2.4",
 ]
 name = "libby"
 version = "0.10.0"
@@ -35,6 +36,7 @@ package = true
 
 [project.scripts]
 libby = "libbydbot.cli:main"
+libby-cli = "libbydbot.cli_legacy:main"
 libby-server = "libbydbot.api.main:run"
 
 [tool.setuptools.package-data]
@@ -48,6 +50,7 @@ exclude = ["site*"]
 dev = [
     #    "aider-chat>=0.70.0",
     "mkdocs>=1.6.1",
+    "pytest-asyncio>=1.3.0",
 ]
 
 [project.optional-dependencies]

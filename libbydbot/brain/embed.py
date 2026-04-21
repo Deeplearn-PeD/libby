@@ -534,10 +534,11 @@ class DocEmbedder:
                     )
                     session.rollback()
 
-    def embed_path(self, corpus_path: str):
+    def embed_path(self, corpus_path: str, callback=None):
         """
         Embed all documents in a path using chunking.
         :param corpus_path:  path to a folder containing PDFs
+        :param callback: optional callable(doc_name, chunk_index, total_chunks) for progress reporting
         :return:
         """
         from libbydbot.brain.ingest import PDFPipeline
@@ -550,12 +551,18 @@ class DocEmbedder:
             docname = metadata.get("title", "Unknown")
             if isinstance(text, list):
                 # Text is already chunked
+                total = len(text)
                 for i, chunk in enumerate(text):
                     self.embed_text(chunk, docname, i)
+                    if callback:
+                        callback(docname, i, total)
             else:
                 # Legacy page-based dict
-                for page_number, page_text in text.items():
+                total = len(text)
+                for idx, (page_number, page_text) in enumerate(text.items()):
                     self.embed_text(page_text, docname, page_number)
+                    if callback:
+                        callback(docname, idx, total)
 
     def retrieve_docs(self, query: str, collection: str = "", num_docs: int = 5) -> str:
         """
