@@ -27,7 +27,7 @@ dependencies = [
     "textual>=8.2.4",
 ]
 name = "libby"
-version = "0.10.0"
+version = "1.0.0"
 description = "Libby the Librarian Bot."
 readme = "README.md"
 
