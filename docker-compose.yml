@@ -27,9 +27,8 @@ services:
     healthcheck:
       test:
         - CMD
-        - curl
-        - '-f'
-        - 'http://localhost:11434/api/tags'
+        - ollama
+        - list
       interval: 30s
       timeout: 10s
       retries: 3
@@ -37,13 +36,6 @@ services:
     restart: unless-stopped
     networks:
       - libby-network
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
   libby-api:
     build:
       context: .

@@ -94,7 +94,16 @@ class WikiBrowserScreen(Screen):
 
     def _run_lint(self):
         self.notify("Running wiki lint...")
-        self.run_worker(self._lint_worker(), thread=True)
+        self.run_worker(self._lint_worker, thread=True)
+
+    def _safe_call(self, fn, *args, **kwargs):
+        """Call fn directly if on the main thread, otherwise via call_from_thread."""
+        import threading
+
+        if threading.get_ident() == self.app._thread_id:
+            fn(*args, **kwargs)
+        else:
+            self.app.call_from_thread(fn, *args, **kwargs)
 
     def _lint_worker(self):
         try:
@@ -112,6 +121,6 @@ class WikiBrowserScreen(Screen):
                 f"  Contradictions: {len(report['contradictions'])}\n"
                 f"  Missing pages: {len(report['missing_pages'])}"
             )
-            self.app.call_from_thread(self.app.notify, msg)
+            self._safe_call(self.app.notify, msg)
         except Exception as e:
-            self.app.call_from_thread(self.app.notify, f"Lint failed: {e}", severity="error")
+            self._safe_call(self.app.notify, f"Lint failed: {e}", severity="error")

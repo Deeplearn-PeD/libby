@@ -1,30 +1,41 @@
 import unittest
-from libbydbot.cli import LibbyInterface
+from libbydbot.cli_legacy import LibbyInterface
 import os
 
+
 class TestLibbyInterface(unittest.TestCase):
+    DBURL = 'sqlite:///:memory:'
 
     def setUp(self):
-        self.libby = LibbyInterface(collection_name='test_collection')
+        self.libby = LibbyInterface(
+            collection_name='test_collection',
+            dburl=self.DBURL,
+            embed_db=self.DBURL,
+        )
 
     def test_initialization_default(self):
         self.assertEqual(self.libby.name, 'Libby D. Bot')
         self.assertEqual(self.libby.languages, ['pt_BR', 'en'])
         self.assertEqual(self.libby.model, 'llama3.2')
 
-
     def test_initialization_custom(self):
-        custom_libby = LibbyInterface(name='Custom Bot', languages=['en'], model='Gemma', dburl='sqlite:///custom.db')
+        custom_libby = LibbyInterface(
+            name='Custom Bot',
+            languages=['en'],
+            model='Gemma',
+            dburl='sqlite:///custom.db',
+            embed_db='sqlite:///custom.db',
+        )
         self.assertEqual(custom_libby.name, 'Custom Bot')
         self.assertEqual(custom_libby.languages, ['en'])
         self.assertEqual(custom_libby.model, 'gemma3')
 
     def test_invalid_model(self):
         with self.assertRaises(ValueError):
-            LibbyInterface(model='invalid_model')
+            LibbyInterface(model='invalid_model', dburl=self.DBURL, embed_db=self.DBURL)
 
     def test_default_model(self):
-        libby = LibbyInterface()
+        libby = LibbyInterface(dburl=self.DBURL, embed_db=self.DBURL)
         self.assertEqual(libby.model, 'llama3.2')  # Default model from config
 
     def test_embed(self):

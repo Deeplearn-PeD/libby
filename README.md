@@ -10,8 +10,15 @@
 [![GitHub last commit](https://img.shields.io/github/last-commit/Deeplearn-PeD/libby.svg)](https://github.com/Deeplearn-PeD/libby/commits/main)
 [![DOI](https://zenodo.org/badge/784398327.svg)](https://zenodo.org/doi/10.5281/zenodo.12744747)
 
-Libby the librarian. AI agent specialized in creating and querying embeddings for RAG (Retrieval Augmented Generation).
+Libby the librarian. AI agent specialized in creating and querying embeddings for RAG (Retrieval Augmented Generation). Now featuring an **LLM Wiki** — a persistent, compounding markdown knowledge base — and a rich **Terminal User Interface (TUI)**.
+
 ![Libby D. Bot](/libby.jpeg)
+
+## What's New
+
+- **Textual TUI** (`libby`) — A rich interactive terminal interface with screens for chat, embedding, wiki browsing, and settings.
+- **LLM Wiki** (`libby-cli wiki_*`) — A persistent markdown knowledge base that accumulates insights from your documents over time, with entity/concept extraction, synthesis, and automated health-checks.
+- **Legacy CLI** (`libby-cli`) — The original Fire-based command-line interface preserved for scripting.
 
 ## Installation
 
@@ -29,41 +36,140 @@ uv sync
 
 ## Usage
 
-Libby provides several commands through its CLI interface:
+### Interactive TUI (Recommended)
 
-### Creating Embeddings
-
-Create embeddings from your documents in a specified directory:
+Launch the rich terminal interface:
 
 ```bash
-libby embed --corpus_path /path/to/your/documents --collection_name your_collection
+uv run libby
 ```
 
-The `corpus_path` defaults to the current directory if not specified. The `collection_name` parameter allows you to organize your embeddings into different collections (defaults to 'main').
+The TUI opens on the **Dashboard** showing your collections and quick actions. Use keyboard shortcuts to navigate:
 
-### Querying Documents
+| Shortcut | Screen |
+|----------|--------|
+| `Ctrl+D` | Dashboard |
+| `Ctrl+C` | Chat |
+| `Ctrl+E` | Embed Documents |
+| `Ctrl+W` | Wiki Browser |
+| `Ctrl+S` | Settings |
+| `Ctrl+Q` | Quit |
 
-After creating embeddings, you can ask questions about your documents:
+#### Chat Screen
+
+Ask questions about your documents in an interactive chat. Switch between modes:
+- **RAG Answer** — Retrieve relevant chunks and answer
+- **Free Generate** — Creative generation with document context
+- **Wiki Query** — Query the accumulated LLM Wiki
+
+Chat history is persisted to the database and loaded on each session.
+
+#### Embed Screen
+
+Browse the filesystem, select a folder of PDFs, and embed them into a collection with live progress logging.
+
+#### Wiki Browser
+
+Navigate your collection's markdown wiki as a tree:
+- `sources/` — One page per ingested document
+- `entities/` — Extracted people, organizations, objects
+- `concepts/` — Topics, theories, ideas
+- `synthesis/` — Overviews, analyses, answers
+
+Select any page to render it as Markdown. Use **Refresh** to reload, **Ingest** to add documents, or **Lint** to health-check the wiki.
+
+#### Settings Screen
+
+Change the active LLM model, embedding model, and collection name.
+
+### Legacy CLI (Scripting)
+
+For automation and scripts, use the Fire-based CLI:
 
 ```bash
-libby answer "What is the main topic of the documents?" --collection_name your_collection
+# Creating embeddings
+libby-cli embed --corpus_path /path/to/your/documents --collection_name your_collection
+
+# Querying documents
+libby-cli answer "What is the main topic of the documents?" --collection_name your_collection
+
+# Generating content
+libby-cli generate "Write a summary of..." --output_file output.txt
 ```
 
-### Generating Content
+## LLM Wiki
 
-You can use Libby to generate content based on prompts:
+The LLM Wiki is a persistent, compounding markdown knowledge base that sits between your raw documents and your questions. Instead of re-deriving knowledge from scratch on every query, Libby **incrementally builds and maintains a wiki** — extracting entities, concepts, and synthesis that grow richer with every document you add.
+
+### Wiki Directory Structure
+
+Each collection gets its own wiki under `~/.libby/wikis/<collection_name>/`:
+
+```
+<collection_name>/
+├── index.md          # Content-oriented catalog of all pages
+├── log.md            # Chronological append-only record of operations
+├── sources/          # One page per ingested source document
+├── entities/         # Pages for people, organizations, objects
+├── concepts/         # Pages for topics, theories, ideas
+└── synthesis/        # Overviews, answers, comparisons, analyses
+```
+
+All pages use YAML frontmatter and Obsidian-style `[[wikilinks]]`:
+
+```markdown
+---
+title: Page Title
+date_created: 2026-04-21T10:00:00
+---
+
+# Page Title
+
+Content here with [[Other Page]] links.
+```
+
+### Wiki Commands
 
 ```bash
-# Generate using direct prompt
-libby generate "Write a summary of..." --output_file output.txt
+# Ingest documents into the wiki
+libby-cli wiki_ingest --corpus_path /path/to/docs --collection_name my_collection
 
-# Generate using prompt from file
-libby generate "" --prompt_file input_prompt.txt --output_file output.txt
+# Query the wiki
+libby-cli wiki_query "What is the main topic?" --collection_name my_collection --file_answer
+
+# Health-check the wiki
+libby-cli wiki_lint --collection_name my_collection --auto_fix
+
+# Show wiki statistics
+libby-cli wiki_status --collection_name my_collection
 ```
+
+### Wiki Workflows
+
+**Ingest** — When you add a source, Libby:
+1. Generates a structured summary (entities, concepts, contradictions)
+2. Plans which wiki pages to create/update
+3. Writes/updates source, entity, concept, and synthesis pages
+4. Updates `index.md` and appends to `log.md`
+
+**Query** — When you ask a question:
+1. Reads `index.md` to identify relevant pages
+2. Reads the most relevant pages (up to 15)
+3. Synthesizes a cited answer using `[[Page Name]]` citations
+4. Optionally files the answer back into `synthesis/`
+
+**Lint** — Periodic health-checks scan for:
+- **Orphan pages** — pages with zero inbound wikilinks
+- **Broken links** — wikilinks pointing to non-existent pages
+- **Contradictions** — conflicting claims between pages
+- **Stale claims** — claims superseded by newer sources
+- **Missing pages** — important terms lacking dedicated pages
+
+Auto-fix creates stub pages for broken links with `status: stub` frontmatter.
 
 ## REST API Server
 
-Libby D. Bot provides a REST API server for programmatic access to embedding and retrieval functionality.
+Libby D. Bot provides a REST API server for programmatic access to embedding, retrieval, and wiki functionality.
 
 ### Running the Server
 
@@ -104,12 +210,13 @@ docker compose logs -f
 docker compose down
 ```
 
-> **Note:** 
+> **Note:**
 > - Port 8001 is used to avoid conflicts. Change to `8000:8000` if port 8000 is available.
 > - The Docker setup includes:
 >   - **PostgreSQL with pgvector**: Default database backend with vector similarity search
 >   - **Ollama server**: With the `mxbai-embed-large` embedding model pre-installed
 >   - **Automatic backups**: Daily backups at 2 AM (configurable)
+>   - **Wiki persistence**: Wikis are stored in the `libby-wikis` volume mounted at `/wikis`
 > - Models are persisted in the `ollama-models` volume for faster restarts.
 > - PostgreSQL data is persisted in the `postgres-data` volume.
 > - **Security**: You MUST set a secure `POSTGRES_PASSWORD` in your `.env` file before running.
@@ -127,9 +234,13 @@ Once the server is running, access the interactive API documentation at:
 | `POST` | `/api/embed/text` | Embed raw text into the database |
 | `POST` | `/api/embed/upload` | Upload and embed PDF files |
 | `POST` | `/api/retrieve` | Hybrid search for documents (vector + keyword) |
-| `GET` | `/api/documents` | List all embedded documents |
-| `GET` | `/api/collections` | List all collections with document counts |
-| `GET` | `/api/health` | Health check endpoint |
+| `GET`  | `/api/documents` | List all embedded documents |
+| `GET`  | `/api/collections` | List all collections with document counts |
+| `POST` | `/api/wiki/ingest` | Ingest a source into the wiki |
+| `POST` | `/api/wiki/query` | Query the wiki |
+| `POST` | `/api/wiki/lint` | Lint the wiki |
+| `GET`  | `/api/wiki/status/{collection_name}` | Wiki statistics |
+| `GET`  | `/api/health` | Health check endpoint |
 
 ### API Usage Examples
 
@@ -161,45 +272,20 @@ curl -X POST "http://localhost:8001/api/embed/text" \
 }
 ```
 
-#### POST /api/embed/upload
+#### POST /api/wiki/ingest
 
-Upload and embed a PDF file. The file is automatically chunked and embedded.
-
-**Request:**
-
-```bash
-curl -X POST "http://localhost:8001/api/embed/upload" \
-  -F "file=@document.pdf" \
-  -F "collection_name=research" \
-  -F "chunk_size=800" \
-  -F "chunk_overlap=100"
-```
-
-**Response:**
-
-```json
-{
-  "success": true,
-  "doc_name": "document.pdf",
-  "chunks_embedded": 15,
-  "collection_name": "research",
-  "message": "Successfully embedded 15 chunks from 'document.pdf' into collection 'research'"
-}
-```
-
-#### POST /api/retrieve
-
-Perform hybrid search (vector + keyword) across your documents.
+Ingest a document into the LLM Wiki.
 
 **Request:**
 
 ```bash
-curl -X POST "http://localhost:8001/api/retrieve" \
+curl -X POST "http://localhost:8001/api/wiki/ingest" \
   -H "Content-Type: application/json" \
   -d '{
-    "query": "What is machine learning?",
+    "doc_name": "research_paper.pdf",
+    "doc_content": "The full text of the document...",
     "collection_name": "research",
-    "num_docs": 5
+    "source_type": "document"
   }'
 ```
 
@@ -207,95 +293,96 @@ curl -X POST "http://localhost:8001/api/retrieve" \
 
 ```json
 {
-  "query": "What is machine learning?",
-  "collection_name": "research",
-  "documents": [
-    {
-      "doc_name": "ml_intro.pdf",
-      "page_number": 1,
-      "content": "Machine learning is a subset of artificial intelligence...",
-      "score": 0.95
-    },
-    {
-      "doc_name": "ai_basics.pdf",
-      "page_number": 5,
-      "content": "ML algorithms learn patterns from data...",
-      "score": 0.87
-    }
-  ],
-  "total": 2
+  "success": true,
+  "source": "research_paper.pdf",
+  "pages_touched": 5,
+  "entities_created": 3,
+  "concepts_created": 2,
+  "summary": "This paper explores...",
+  "message": "Successfully ingested 'research_paper.pdf' into wiki 'research'"
 }
 ```
 
-#### GET /api/documents
+#### POST /api/wiki/query
 
-List all embedded documents, optionally filtered by collection.
-
-**Request (all documents):**
-
-```bash
-curl "http://localhost:8001/api/documents"
-```
-
-**Request (filtered by collection):**
-
-```bash
-curl "http://localhost:8001/api/documents?collection_name=research"
-```
-
-**Response:**
-
-```json
-{
-  "documents": [
-    {"doc_name": "ml_intro.pdf", "collection_name": "research"},
-    {"doc_name": "ai_basics.pdf", "collection_name": "research"},
-    {"doc_name": "notes.txt", "collection_name": "personal"}
-  ],
-  "total": 3
-}
-```
-
-#### GET /api/collections
-
-List all collections with their document counts.
+Query the wiki and synthesize an answer.
 
 **Request:**
 
 ```bash
-curl "http://localhost:8001/api/collections"
+curl -X POST "http://localhost:8001/api/wiki/query" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "question": "What are the key findings?",
+    "collection_name": "research",
+    "file_answer": false
+  }'
 ```
 
 **Response:**
 
 ```json
 {
-  "collections": [
-    {"name": "research", "document_count": 15},
-    {"name": "personal", "document_count": 3},
-    {"name": "work", "document_count": 7}
-  ],
-  "total": 3
+  "question": "What are the key findings?",
+  "answer": "The key findings include... [[Source Page]]",
+  "sources_used": ["sources/research_paper.md", "concepts/key_finding.md"],
+  "confidence": "high",
+  "gaps": [],
+  "suggested_followups": ["What methodology was used?"],
+  "filed_page": null
 }
 ```
 
-#### GET /api/health
+#### POST /api/wiki/lint
 
-Check the API server health status.
+Health-check the wiki.
 
 **Request:**
 
 ```bash
-curl "http://localhost:8001/api/health"
+curl -X POST "http://localhost:8001/api/wiki/lint" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "collection_name": "research",
+    "auto_fix": true
+  }'
 ```
 
 **Response:**
 
 ```json
 {
-  "status": "healthy",
-  "database": "postgresql",
-  "version": "0.1.0"
+  "orphan_pages": ["entities/old_entity.md"],
+  "broken_links": ["MissingConcept"],
+  "contradictions": [],
+  "stale_claims": [],
+  "missing_pages": [{"name": "MissingConcept", "page_type": "concept"}],
+  "suggestions": ["Add more cross-references between sources."],
+  "fixes_applied": 1
+}
+```
+
+#### GET /api/wiki/status/{collection_name}
+
+Get wiki statistics.
+
+**Request:**
+
+```bash
+curl "http://localhost:8001/api/wiki/status/research"
+```
+
+**Response:**
+
+```json
+{
+  "collection": "research",
+  "wiki_path": "/home/user/.libby/wikis/research",
+  "total_pages": 42,
+  "page_counts": {"sources": 10, "entities": 15, "concepts": 12, "synthesis": 5},
+  "orphan_pages": 2,
+  "broken_links": 1,
+  "last_operation": "## [2026-04-21 12:00] ingest | research_paper.pdf | touched 5 pages"
 }
 ```
 
@@ -312,6 +399,8 @@ curl "http://localhost:8001/api/health"
 | `OLLAMA_HOST` | Ollama server URL | `http://localhost:11434` |
 | `GEMINI_API_KEY` | Google Gemini API key | - |
 | `OPENAI_API_KEY` | OpenAI API key | - |
+| `WIKI_BASE_PATH` | Base directory for LLM wikis | `~/.libby/wikis` |
+| `WIKI_AUTO_INGEST` | Auto-ingest into wiki after embedding | `False` |
 | `BACKUP_RETENTION_DAYS` | Days to keep PostgreSQL backups | `7` |
 | `BACKUP_SCHEDULE` | Backup schedule (cron format) | `0 2 * * *` |
 
@@ -405,13 +494,16 @@ gunzip -c libby_backup_YYYYMMDD_HHMMSS.sql.gz | \
 
 ## Features
 
-- Multiple language support (English and Portuguese)
-- Various AI models available (Llama3, Gemma, ChatGPT)
-- PDF document processing and embedding
-- Question answering with context from your documents
-- Content generation capabilities
-- REST API for programmatic access
-- Docker support for containerized deployment
+- **Rich Textual TUI** — Interactive terminal interface with dashboards, chat, embedding, and wiki browsing
+- **LLM Wiki** — Persistent markdown knowledge base with entity/concept extraction, synthesis, and health-checks
+- **Multiple language support** (English and Portuguese)
+- **Various AI models** available (Llama3, Gemma, ChatGPT, Qwen, Gemini)
+- **PDF document processing** and embedding with chunking
+- **Question answering** with context from your documents
+- **Content generation** capabilities
+- **REST API** for programmatic access
+- **Docker support** for containerized deployment
+- **Obsidian-compatible** wiki format
 
 ## Configuration
 
@@ -420,8 +512,9 @@ Libby supports different AI models and languages. You can configure these throug
 Available Models:
 - Llama3 (default)
 - Gemma
-- Llama3-vision
 - ChatGPT
+- Qwen
+- Gemini
 
 Supported Languages:
 - English (en_US)

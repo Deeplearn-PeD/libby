@@ -91,6 +91,20 @@ Screen {
 }
 
 /* Wiki Browser */
+#wiki-controls {
+    height: auto;
+    margin: 0 2;
+    padding: 1 0;
+}
+
+#wiki-controls Button {
+    margin: 0 1;
+}
+
+#wiki-controls Input {
+    width: 20;
+}
+
 #wiki-container {
     layout: horizontal;
     height: 1fr;

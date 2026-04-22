@@ -9,12 +9,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", extra="allow"
     )
-    # pgurl: PostgresDsn
-    # duckurl: str
-    # openai_api_key: str
-    # google_api_key: str
-    # ollama_key: str
-    # language: str
+
 
     languages: Dict[str, Dict[str, Any]] = {
         "English": {"code": "en_US", "is_default": True},
@@ -25,7 +20,8 @@ class Settings(BaseSettings):
         "Llama3": {"code": "llama3.2"},
         "Gemma": {"code": "gemma3"},
         "ChatGPT": {"code": "gpt-4o"},
-        "Qwen": {"code": "qwen3.5:4b", "is_default": True},
+        "Qwen": {"code": "qwen3.5:4b"},
+        "Kimi": {"code": "kimi-k2.5", "is_default": True},
     }
 
     embedding_models: Dict[str, Dict[str, Any]] = {
@@ -42,6 +38,16 @@ class Settings(BaseSettings):
     wiki_auto_ingest: bool = Field(
         default=False,
         description="Automatically ingest documents into the wiki after embedding",
+    )
+
+    db_url: str = Field(
+        default_factory=lambda: f"sqlite:///{Path.home() / '.libby' / 'data' / 'libby.db'}",
+        description="Database URL for chat history",
+    )
+
+    embed_db_url: str = Field(
+        default_factory=lambda: f"sqlite:///{Path.home() / '.libby' / 'data' / 'embeddings.db'}",
+        description="Database URL for embeddings",
     )
 
     @property

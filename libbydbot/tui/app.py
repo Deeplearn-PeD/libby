@@ -4,6 +4,8 @@ Main Textual App for Libby D. Bot.
 Manages global state, screen navigation, and background workers.
 """
 
+from pathlib import Path
+
 from textual.app import App, ComposeResult
 from textual.reactive import reactive
 from textual.widgets import Footer, Header, Static
@@ -54,6 +56,7 @@ class LibbyApp(App):
         try:
             self._settings = Settings()
             self.current_model = self._settings.default_model
+            Path.home().joinpath(".libby", "data").mkdir(parents=True, exist_ok=True)
         except Exception as e:
             self.status_message = f"Settings error: {e}"
 
@@ -67,6 +70,8 @@ class LibbyApp(App):
                 self._libby = LibbyInterface(
                     collection_name=self.current_collection,
                     model=self.current_model,
+                    dburl=self._settings.db_url,
+                    embed_db=self._settings.embed_db_url,
                 )
                 self.status_message = f"Connected ({self.current_model})"
             except Exception as e:

@@ -96,7 +96,19 @@ class ChatScreen(Screen):
         self.query_one("#chat-history", Vertical).mount(thinking)
 
         mode = self.query_one("#chat-mode", Select).value
-        self.run_worker(self._get_response_worker(question, mode, thinking), thread=True)
+        self.run_worker(
+            lambda: self._get_response_worker(question, mode, thinking),
+            thread=True,
+        )
+
+    def _safe_call(self, fn, *args, **kwargs):
+        """Call fn directly if on the main thread, otherwise via call_from_thread."""
+        import threading
+
+        if threading.get_ident() == self.app._thread_id:
+            fn(*args, **kwargs)
+        else:
+            self.app.call_from_thread(fn, *args, **kwargs)
 
     def _get_response_worker(self, question: str, mode: str, thinking_widget: Static):
         """Background worker for LLM calls."""
@@ -124,7 +136,7 @@ class ChatScreen(Screen):
         except Exception as e:
             response = f"Error: {e}"
 
-        self.app.call_from_thread(self._on_response_ready, thinking_widget, response)
+        self._safe_call(self._on_response_ready, thinking_widget, response)
 
     def _on_response_ready(self, thinking_widget: Static, response: str) -> None:
         thinking_widget.remove()

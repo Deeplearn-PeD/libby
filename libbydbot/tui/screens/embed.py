@@ -62,7 +62,8 @@ class EmbedScreen(Screen):
         log.write(f"Collection: {collection}")
 
         self.run_worker(
-            self._embed_worker(self._selected_path, collection, log), thread=True
+            lambda: self._embed_worker(self._selected_path, collection, log),
+            thread=True,
         )
 
     def _stop_embedding(self) -> None:
@@ -70,24 +71,37 @@ class EmbedScreen(Screen):
         self.query_one("#btn-embed-start", Button).disabled = False
         self.query_one("#btn-embed-stop", Button).disabled = True
 
+    def _set_button_state(self, start_disabled: bool, stop_disabled: bool) -> None:
+        """Update button disabled states (safe to call from worker threads)."""
+        self.query_one("#btn-embed-start", Button).disabled = start_disabled
+        self.query_one("#btn-embed-stop", Button).disabled = stop_disabled
+
+    def _safe_call(self, fn, *args, **kwargs):
+        """Call fn directly if on the main thread, otherwise via call_from_thread."""
+        import threading
+
+        if threading.get_ident() == self.app._thread_id:
+            fn(*args, **kwargs)
+        else:
+            self.app.call_from_thread(fn, *args, **kwargs)
+
     def _embed_worker(self, path: str, collection: str, log: RichLog):
         def progress_callback(doc_name, chunk_idx, total):
             msg = f"  {doc_name} — chunk {chunk_idx + 1}/{total}"
-            self.app.call_from_thread(log.write, msg)
+            self._safe_call(log.write, msg)
 
         try:
             libby = self.app.libby
             if not libby:
-                self.app.call_from_thread(log.write, "Error: Libby not initialized.")
+                self._safe_call(log.write, "Error: Libby not initialized.")
                 return
 
             libby.DE.collection_name = collection
             libby.DE.embed_path(path, callback=progress_callback)
-            self.app.call_from_thread(log.write, "Embedding complete!")
-            self.app.call_from_thread(self.app.notify, "Embedding complete!")
+            self._safe_call(log.write, "Embedding complete!")
+            self._safe_call(self.app.notify, "Embedding complete!")
         except Exception as e:
-            self.app.call_from_thread(log.write, f"Error: {e}")
-            self.app.call_from_thread(self.app.notify, f"Embedding failed: {e}", severity="error")
+            self._safe_call(log.write, f"Error: {e}")
+            self._safe_call(self.app.notify, f"Embedding failed: {e}", severity="error")
         finally:
-            self.app.call_from_thread(self.query_one("#btn-embed-start", Button).update, disabled=False)
-            self.app.call_from_thread(self.query_one("#btn-embed-stop", Button).update, disabled=True)
+            self._safe_call(self._set_button_state, False, True)

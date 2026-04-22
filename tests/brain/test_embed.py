@@ -3,6 +3,24 @@ from unittest.mock import patch, MagicMock
 import numpy as np
 from libbydbot.brain.embed import DocEmbedder
 
+
+def _postgres_available() -> bool:
+    """Check if the local PostgreSQL test server is reachable."""
+    try:
+        import psycopg2
+        conn = psycopg2.connect(
+            host="localhost", database="libby", user="libby",
+            password="libby123", port=5432, connect_timeout=2
+        )
+        conn.close()
+        return True
+    except Exception:
+        return False
+
+
+PG_AVAILABLE = _postgres_available()
+
+
 @pytest.fixture(autouse=True)
 def mock_embeddings():
     with patch('libbydbot.brain.embed.DocEmbedder._generate_embedding') as mocked:
@@ -16,12 +34,14 @@ def mock_pgvector(monkeypatch):
     pass
 
 
-def test_embed_text():
-    embedder = DocEmbedder("test_collection", dburl='sqlite:///embedding.db', embedding_model='mxbai-embed-large')
+def test_embed_text(tmp_path):
+    db_path = tmp_path / "embedding.db"
+    embedder = DocEmbedder("test_collection", dburl=f'sqlite:///{db_path}', embedding_model='mxbai-embed-large')
     embedder.embed_text('doctext1', 'docname', 1)
     edocs = embedder.get_embedded_documents()
     assert len(edocs) == 1
 
+@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL not available")
 def test_embed_text_postgres():
     embedder = DocEmbedder("test_collection", embedding_model='mxbai-embed-large')
     embedder.embed_text('doctext1', 'docname', 1)
@@ -32,8 +52,9 @@ def test_instantiate_sqlite():
     embedder = DocEmbedder("test_collection", dburl="sqlite:///:memory:")
     assert embedder
 
-def test_instantiate_duckdb():
-    embedder = DocEmbedder("test_collection", dburl="duckdb:///embeddings.duckdb")
+def test_instantiate_duckdb(tmp_path):
+    db_path = tmp_path / "embeddings.duckdb"
+    embedder = DocEmbedder("test_collection", dburl=f"duckdb:///{db_path}")
     assert embedder
 
 def test_embed_duckdb_gemini():
@@ -41,13 +62,15 @@ def test_embed_duckdb_gemini():
     embedder.embed_text('doctext', 'docname', 1)
     assert embedder
 
+@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL not available")
 def test_embed_postgres_gemini():
     embedder = DocEmbedder("test_collection", embedding_model="gemini-embedding-001")
     embedder.embed_text('doctext', 'docname', 1)
     assert embedder
 
-def test_embed_duckdb_ollama():
-    embedder = DocEmbedder("test_collection", dburl="duckdb:///embeddings.duckdb", embedding_model="mxbai-embed-large")
+def test_embed_duckdb_ollama(tmp_path):
+    db_path = tmp_path / "embeddings.duckdb"
+    embedder = DocEmbedder("test_collection", dburl=f"duckdb:///{db_path}", embedding_model="mxbai-embed-large")
     embedder.embed_text('doctext', 'docname', 1)
     assert embedder
 
@@ -57,13 +80,15 @@ def test_embed_sqlite_memory():
     edocs = embedder.get_embedded_documents()
     assert len(edocs) == 1
 
-def test_retrieve_docs():
-    embedder = DocEmbedder("test_collection", dburl='sqlite:///embedding.db', embedding_model='mxbai-embed-large')
+def test_retrieve_docs(tmp_path):
+    db_path = tmp_path / "embedding.db"
+    embedder = DocEmbedder("test_collection", dburl=f'sqlite:///{db_path}', embedding_model='mxbai-embed-large')
     result = embedder.retrieve_docs('query', "test_collection" )
 
 
-def test_create_embedding():
-    embedder = DocEmbedder("test_collection", dburl='sqlite:///embedding.db', embedding_model='mxbai-embed-large')
+def test_create_embedding(tmp_path):
+    db_path = tmp_path / "embedding.db"
+    embedder = DocEmbedder("test_collection", dburl=f'sqlite:///{db_path}', embedding_model='mxbai-embed-large')
     assert 'embedding_sqlite' in embedder.embeddings_list
 
     embedder.embed_text('Our research also sheds light on longer-term trends linking the intensity of dengue epidemics ',
@@ -72,6 +97,7 @@ def test_create_embedding():
     assert len(res)
     assert 'dengue' in res
 
+@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL not available")
 def test_create_embedding_postgres():
     embedder = DocEmbedder("test_collection", embedding_model='mxbai-embed-large')
     assert 'embedding' in embedder.embeddings_list
@@ -83,8 +109,9 @@ def test_create_embedding_postgres():
     assert 'dengue' in res
 
 
-def test_get_embedded_documents():
-    embedder = DocEmbedder('test_collection', dburl='duckdb:///embeddings.duckdb', embedding_model='mxbai-embed-large')
+def test_get_embedded_documents(tmp_path):
+    db_path = tmp_path / "embeddings.duckdb"
+    embedder = DocEmbedder('test_collection', dburl=f'duckdb:///{db_path}', embedding_model='mxbai-embed-large')
     
     # Embed some test documents
     embedder.embed_text("First test document", "doc1.pdf", 1)
@@ -106,6 +133,7 @@ def test_get_embedded_documents():
     assert "doc2.pdf" in doc_names
     assert all(col == "test_collection" for col in collection_names)
 
+@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL not available")
 def test_get_embedded_documents_postgres():
     embedder = DocEmbedder('test_collection', embedding_model='mxbai-embed-large')
 

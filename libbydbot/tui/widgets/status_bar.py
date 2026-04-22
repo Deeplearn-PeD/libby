@@ -20,7 +20,10 @@ class StatusBar(Static):
         collection = getattr(app, "current_collection", "main")
         model = getattr(app, "current_model", "unknown")
         status = getattr(app, "status_message", "Ready")
-        self.update(f" Collection: {collection} | Model: {model} | {status} ")
+        self.update(
+            f" Collection: {collection} | Model: {model} | {status} "
+            f"| [b]Ctrl+Q[/b] to exit "
+        )
 
     def on_app_current_collection_changed(self, event):
         self.update_content()

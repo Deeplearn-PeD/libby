@@ -55,7 +55,19 @@ class WikiIngestScreen(Screen):
         log.write(f"Starting wiki ingest from: {self._selected_path}")
         log.write(f"Collection: {collection}")
 
-        self.run_worker(self._ingest_worker(self._selected_path, collection, log), thread=True)
+        self.run_worker(
+            lambda: self._ingest_worker(self._selected_path, collection, log),
+            thread=True,
+        )
+
+    def _safe_call(self, fn, *args, **kwargs):
+        """Call fn directly if on the main thread, otherwise via call_from_thread."""
+        import threading
+
+        if threading.get_ident() == self.app._thread_id:
+            fn(*args, **kwargs)
+        else:
+            self.app.call_from_thread(fn, *args, **kwargs)
 
     def _ingest_worker(self, path: str, collection: str, log: RichLog):
         import os
@@ -72,7 +84,7 @@ class WikiIngestScreen(Screen):
 
             pdf_paths = glob(os.path.join(path, "*.pdf"))
             if not pdf_paths:
-                self.app.call_from_thread(log.write, "No PDF files found.")
+                self._safe_call(log.write, "No PDF files found.")
                 return
 
             for pdf_path in pdf_paths:
@@ -83,19 +95,19 @@ class WikiIngestScreen(Screen):
                         text += page.get_text() + "\n"
                     doc_name = doc.metadata.get("title", os.path.basename(pdf_path))
                 except Exception as e:
-                    self.app.call_from_thread(log.write, f"Error reading {pdf_path}: {e}")
+                    self._safe_call(log.write, f"Error reading {pdf_path}: {e}")
                     continue
 
-                self.app.call_from_thread(log.write, f"Ingesting: {doc_name}...")
+                self._safe_call(log.write, f"Ingesting: {doc_name}...")
                 result = wiki.ingest_source(doc_name, text)
-                self.app.call_from_thread(
+                self._safe_call(
                     log.write,
                     f"  Done: {result['pages_touched']} pages touched, "
                     f"{result['entities_created']} entities, {result['concepts_created']} concepts",
                 )
 
-            self.app.call_from_thread(log.write, "Wiki ingest complete!")
-            self.app.call_from_thread(self.app.notify, "Wiki ingest complete!")
+            self._safe_call(log.write, "Wiki ingest complete!")
+            self._safe_call(self.app.notify, "Wiki ingest complete!")
         except Exception as e:
-            self.app.call_from_thread(log.write, f"Error: {e}")
-            self.app.call_from_thread(self.app.notify, f"Ingest failed: {e}", severity="error")
+            self._safe_call(log.write, f"Error: {e}")
+            self._safe_call(self.app.notify, f"Ingest failed: {e}", severity="error")

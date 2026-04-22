@@ -24,7 +24,7 @@ from libbydbot.brain.wiki_models import (
     WikiQueryAnswer,
     WikiUpdatePlan,
 )
-from base_agent.llminterface import StructuredLangModel
+from base_agent.llminterface import LangModel, StructuredLangModel
 
 logger = loguru.logger
 
@@ -144,13 +144,15 @@ class WikiManager:
         self,
         collection_name: str,
         wiki_base: str | Path = "",
-        model: str = "llama3.2",
+        model: str = "kimi-k2.5",
     ):
         self.collection_name = collection_name
         self.wiki_base = Path(wiki_base) if wiki_base else DEFAULT_WIKI_BASE
         self.wiki_dir = self.wiki_base / self._sanitize_name(collection_name)
         self.model = model
-        self._llm = StructuredLangModel(model=model)
+        self._struct_llm = StructuredLangModel(model=model)
+        self._llm = LangModel(model=model)
+        self._structured_output_supported: bool | None = None
         self._ensure_structure()
 
     # ────────────────────────── properties ──────────────────────────
@@ -392,6 +394,212 @@ class WikiManager:
             "summary": summary.summary,
         }
 
+    def _structured_llm_call(self, prompt: str, response_model, context: str = ""):
+        """
+        Call the LLM with structured output, falling back to plain text + JSON extraction.
+
+        Step 1: Try pydantic-ai's native structured output via self._struct_llm.
+        Step 2: If unsupported, use the plain-text agent (self._llm) with schema hints
+                and extract JSON from the response.
+        """
+        self._clear_chat_history()
+
+        # Step 1: Try structured output (only if not known to be unsupported)
+        if self._structured_output_supported is not False:
+            try:
+                result = self._struct_llm.get_response(
+                    question=prompt,
+                    context=context,
+                    response_model=response_model,
+                )
+                if isinstance(result, response_model):
+                    self._structured_output_supported = True
+                    return result
+                self._structured_output_supported = False
+                logger.warning(
+                    f"Structured output returned {type(result).__name__}, "
+                    f"falling back to plain-text agent"
+                )
+            except Exception as e:
+                self._structured_output_supported = False
+                logger.warning(f"Structured output failed ({e}), falling back to plain-text agent")
+
+        # Step 2: Plain-text agent with schema hint + JSON extraction
+        self._clear_chat_history()
+        schema_hint = self._build_schema_hint(response_model)
+        json_prompt = (
+            f"{prompt}\n\n"
+            f"Respond with ONLY a valid JSON object using exactly these fields:\n"
+            f"{schema_hint}\n\n"
+            f"No prose, no explanation, no markdown code blocks. Just the JSON object."
+        )
+        try:
+            raw = self._llm.get_response(question=json_prompt, context=context)
+            parsed = self._extract_json_from_response(raw, response_model)
+            if parsed is not None:
+                logger.info("Successfully extracted JSON from plain-text agent")
+                return parsed
+            logger.error("JSON extraction failed from plain-text agent response")
+        except Exception as e:
+            logger.error(f"Plain-text agent also failed: {e}")
+        return None
+
+    def _clear_chat_history(self):
+        """Clear both LLM agents' chat histories to avoid stale messages."""
+        self._struct_llm.chat_history.queue.clear()
+        self._llm.chat_history.queue.clear()
+
+    @staticmethod
+    def _build_schema_hint(model) -> str:
+        """Build a concise field description from a Pydantic model for LLM prompts."""
+        hints = []
+        for name, field_info in model.model_fields.items():
+            ann = field_info.annotation
+            desc = field_info.description or ""
+            required = field_info.is_required()
+            req_str = "required" if required else "optional"
+
+            # Check if the annotation is a list of Pydantic models
+            origin = getattr(ann, "__origin__", None)
+            if origin is list:
+                args = getattr(ann, "__args__", ())
+                if args and hasattr(args[0], "model_fields"):
+                    # Nested Pydantic model — show its fields
+                    sub_hints = []
+                    for sub_name, sub_field in args[0].model_fields.items():
+                        sub_ann = sub_field.annotation
+                        sub_type = getattr(sub_ann, "__name__", str(sub_ann))
+                        sub_req = "required" if sub_field.is_required() else "optional"
+                        sub_desc = sub_field.description or ""
+                        sub_hints.append(f'      "{sub_name}": {sub_type} ({sub_req}) {sub_desc}')
+                    hints.append(
+                        f'  "{name}": list of objects with fields:\n'
+                        + "\n".join(sub_hints)
+                    )
+                    continue
+
+                type_str = f"list of {getattr(args[0], '__name__', str(args[0])) if args else 'any'}"
+            elif hasattr(ann, "model_fields"):
+                sub_hints = []
+                for sub_name, sub_field in ann.model_fields.items():
+                    sub_type = getattr(sub_field.annotation, "__name__", str(sub_field.annotation))
+                    sub_req = "required" if sub_field.is_required() else "optional"
+                    sub_hints.append(f'      "{sub_name}": {sub_type} ({sub_req})')
+                hints.append(
+                    f'  "{name}": object with fields:\n' + "\n".join(sub_hints)
+                )
+                continue
+            else:
+                type_str = getattr(ann, "__name__", str(ann))
+
+            hints.append(f'  "{name}": {type_str} ({req_str}) — {desc}')
+        return "\n".join(hints)
+
+    def _extract_json_from_response(self, response, response_model):
+        """Try to extract and validate JSON from an LLM text response."""
+        import json as _json
+
+        raw = response if isinstance(response, str) else str(response)
+        text = raw.strip()
+
+        # Handle markdown code blocks first (most reliable signal)
+        if "```" in text:
+            match = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
+            if match:
+                candidate = match.group(1).strip()
+                parsed = self._try_parse_json(candidate, response_model, _json)
+                if parsed is not None:
+                    return parsed
+
+        # Try the whole text if it starts with {
+        if text.startswith("{"):
+            parsed = self._try_parse_json(text, response_model, _json)
+            if parsed is not None:
+                return parsed
+
+        # Scan for valid JSON objects from the END (JSON usually appears last)
+        # Use raw_decode for proper nested-brace handling
+        decoder = _json.JSONDecoder()
+        brace_positions = [i for i, ch in enumerate(text) if ch == "{"]
+        for i in reversed(brace_positions):
+            try:
+                obj, end = decoder.raw_decode(text, i)
+                candidate = _json.dumps(obj)
+                parsed = self._try_parse_json(candidate, response_model, _json)
+                if parsed is not None:
+                    return parsed
+            except _json.JSONDecodeError:
+                continue
+
+        return None
+
+    def _try_parse_json(self, json_str: str, response_model, _json):
+        """Try to parse a JSON string into a Pydantic model, with coercion."""
+        try:
+            return response_model.model_validate_json(json_str)
+        except Exception:
+            pass
+        try:
+            data = _json.loads(json_str)
+            data = self._coerce_to_schema(data, response_model)
+            return response_model.model_validate(data)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _coerce_to_schema(data: dict, model) -> dict:
+        """
+        Coerce raw LLM JSON data to match a Pydantic model's expected shape.
+        Handles common mismatches: wrong field names, missing required fields,
+        string values where objects are expected.
+        """
+        if not isinstance(data, dict):
+            return data
+
+        coerced = {}
+        for name, field_info in model.model_fields.items():
+            ann = field_info.annotation
+            origin = getattr(ann, "__origin__", None)
+
+            if name in data:
+                value = data[name]
+            elif name == "entity_type" and "type" in data:
+                value = data["type"]
+            elif not field_info.is_required():
+                continue
+            else:
+                # Provide defaults for missing required string fields
+                coerced[name] = ""
+                continue
+
+            # Handle list of Pydantic submodels
+            if origin is list:
+                args = getattr(ann, "__args__", ())
+                if args and hasattr(args[0], "model_fields") and isinstance(value, list):
+                    sub_model = args[0]
+                    coerced[name] = [
+                        WikiManager._coerce_to_schema(
+                            item if isinstance(item, dict) else {"name": str(item)},
+                            sub_model,
+                        )
+                        for item in value
+                    ]
+                    continue
+
+            # Handle Pydantic submodel (single object)
+            if hasattr(ann, "model_fields") and isinstance(value, dict):
+                coerced[name] = WikiManager._coerce_to_schema(value, ann)
+                continue
+
+            # Handle string where list expected
+            if origin is list and isinstance(value, str):
+                coerced[name] = [value]
+                continue
+
+            coerced[name] = value
+
+        return coerced
+
     def _generate_source_summary(self, doc_name: str, doc_content: str) -> SourceSummary:
         """Use the LLM to generate a structured summary of a source."""
         prompt = (
@@ -400,29 +608,22 @@ class WikiManager:
             f"might contradict common knowledge or previously established facts.\n\n"
             f"Source: {doc_name}\n\n{doc_content[:12000]}"
         )
-        try:
-            result = self._llm.get_response(
-                question=prompt,
-                context="",
-                response_model=SourceSummary,
-            )
+        result = self._structured_llm_call(prompt, SourceSummary)
+        if result is not None:
             return result
-        except Exception as e:
-            logger.error(f"Failed to generate source summary: {e}")
-            # Return a minimal fallback summary
-            return SourceSummary(
-                title=doc_name,
-                summary="(Summary generation failed)",
-                key_takeaways=[],
-                entities=[],
-                concepts=[],
-                contradictions=[],
-                questions_raised=[],
-            )
+        logger.error("All attempts to generate source summary failed, using fallback")
+        return SourceSummary(
+            title=doc_name,
+            summary="(Summary generation failed)",
+            key_takeaways=[],
+            entities=[],
+            concepts=[],
+            contradictions=[],
+            questions_raised=[],
+        )
 
     def _generate_update_plan(self, doc_name: str, summary: SourceSummary) -> WikiUpdatePlan:
         """Use the LLM to plan which wiki pages need updates."""
-        # Read existing index to give the LLM context
         index_content = self._read_page(self.index_path)
 
         prompt = (
@@ -434,21 +635,16 @@ class WikiManager:
             f"Concepts: {[c.name for c in summary.concepts]}\n\n"
             f"Existing Wiki Index:\n{index_content[:4000]}"
         )
-        try:
-            result = self._llm.get_response(
-                question=prompt,
-                context="",
-                response_model=WikiUpdatePlan,
-            )
+        result = self._structured_llm_call(prompt, WikiUpdatePlan)
+        if result is not None:
             return result
-        except Exception as e:
-            logger.error(f"Failed to generate update plan: {e}")
-            return WikiUpdatePlan(
-                source_title=doc_name,
-                pages_to_update=[],
-                pages_to_link=[],
-                synthesis_notes="",
-            )
+        logger.error("All attempts to generate update plan failed, using fallback")
+        return WikiUpdatePlan(
+            source_title=doc_name,
+            pages_to_update=[],
+            pages_to_link=[],
+            synthesis_notes="",
+        )
 
     def _build_source_page(
         self, doc_name: str, summary: SourceSummary, source_type: str
@@ -653,16 +849,11 @@ class WikiManager:
             f"Question: {question}\n\n"
             f"Wiki Context:\n{context[:20000]}"
         )
-        try:
-            result = self._llm.get_response(
-                question=prompt,
-                context="",
-                response_model=WikiQueryAnswer,
-            )
+        result = self._structured_llm_call(prompt, WikiQueryAnswer)
+        if result is not None:
             return result
-        except Exception as e:
-            logger.error(f"Failed to generate wiki query answer: {e}")
-            return WikiQueryAnswer(
+        logger.error("All attempts to generate wiki answer failed, using fallback")
+        return WikiQueryAnswer(
                 answer="(Answer generation failed)",
                 sources_used=[],
                 confidence="low",
@@ -749,16 +940,11 @@ class WikiManager:
             f"and identify contradictions, stale claims, missing concept pages, and general improvements.\n\n"
             f"{'\n'.join(summaries)[:20000]}"
         )
-        try:
-            result = self._llm.get_response(
-                question=prompt,
-                context="",
-                response_model=LintReport,
-            )
+        result = self._structured_llm_call(prompt, LintReport)
+        if result is not None:
             return result
-        except Exception as e:
-            logger.error(f"Failed to generate lint report: {e}")
-            return LintReport()
+        logger.error("All attempts to generate lint report failed, using fallback")
+        return LintReport()
 
     # ────────────────────────── status ──────────────────────────────
 
