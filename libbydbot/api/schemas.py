@@ -224,6 +224,13 @@ class EmbedJobStatus(BaseModel):
     error: str | None = Field(None, description="Error message if failed")
 
 
+class EmbedJobListResponse(BaseModel):
+    jobs: list[EmbedJobStatus] = Field(default_factory=list)
+    processing: int = Field(0, description="Number of active jobs")
+    completed: int = Field(0, description="Number of completed jobs")
+    failed: int = Field(0, description="Number of failed jobs")
+
+
 class WikiStatusResponse(BaseModel):
     collection: str = Field(..., description="Collection name")
     wiki_path: str = Field(..., description="Filesystem path to the wiki")

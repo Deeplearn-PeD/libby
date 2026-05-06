@@ -11,6 +11,7 @@ from loguru import logger
 
 from libbydbot.api.schemas import (
     EmbedJobAccepted,
+    EmbedJobListResponse,
     EmbedJobStatus,
     EmbedTextRequest,
     EmbedTextResponse,
@@ -187,6 +188,36 @@ def get_job_status(job_id: str):
         collection_name=job.get("collection_name", ""),
         chunks_embedded=job.get("chunks_embedded", 0),
         error=job.get("error"),
+    )
+
+
+@router.get("/jobs", response_model=EmbedJobListResponse)
+def list_jobs():
+    """
+    List all embed jobs with their statuses.
+    """
+    with _jobs_lock:
+        jobs = [
+            EmbedJobStatus(
+                job_id=jid,
+                status=j["status"],
+                doc_name=j.get("doc_name", ""),
+                collection_name=j.get("collection_name", ""),
+                chunks_embedded=j.get("chunks_embedded", 0),
+                error=j.get("error"),
+            )
+            for jid, j in _jobs.items()
+        ]
+
+    processing = sum(1 for j in jobs if j.status == "processing")
+    completed = sum(1 for j in jobs if j.status == "completed")
+    failed = sum(1 for j in jobs if j.status == "failed")
+
+    return EmbedJobListResponse(
+        jobs=jobs,
+        processing=processing,
+        completed=completed,
+        failed=failed,
     )
 
 
