@@ -129,6 +129,13 @@ def run():
     parser.add_argument(
         "--reload", action="store_true", help="Enable auto-reload for development"
     )
+    parser.add_argument(
+        "--timeout-keep-alive", type=int, default=7200,
+        help="Timeout for keep-alive connections in seconds (default: 7200)",
+    )
+    parser.add_argument(
+        "--workers", type=int, default=1, help="Number of worker processes",
+    )
     args = parser.parse_args()
 
     uvicorn.run(
@@ -136,6 +143,8 @@ def run():
         host=args.host,
         port=args.port,
         reload=args.reload,
+        timeout_keep_alive=args.timeout_keep_alive,
+        workers=args.workers,
     )
 
 

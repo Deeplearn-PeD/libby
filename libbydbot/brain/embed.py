@@ -1591,6 +1591,313 @@ class DocEmbedder:
 
         return info
 
+    def delete_collection(self, collection_name: str) -> dict:
+        """
+        Delete all documents in a collection.
+
+        :param collection_name: Collection to delete
+        :return: Stats dict with count of deleted documents
+        """
+        stats = {"deleted": 0, "errors": []}
+
+        if self.dburl.startswith("sqlite"):
+            with self.connection as conn:
+                cursor = conn.cursor()
+                try:
+                    cursor.execute(
+                        f"SELECT COUNT(*) FROM {self.table_name} WHERE collection_name = ?",
+                        (collection_name,),
+                    )
+                    count = cursor.fetchone()[0]
+                    cursor.execute(
+                        f"DELETE FROM {self.table_name} WHERE collection_name = ?",
+                        (collection_name,),
+                    )
+                    conn.commit()
+                    stats["deleted"] = count
+                    logger.info(f"Deleted {count} documents from collection '{collection_name}'")
+                except Exception as e:
+                    conn.rollback()
+                    stats["errors"].append(str(e))
+                    logger.error(f"Error deleting collection '{collection_name}': {e}")
+        elif self.dburl.startswith("duckdb"):
+            conn = self.connection
+            try:
+                count = conn.sql(
+                    f"SELECT COUNT(*) FROM {self.table_name} WHERE collection_name = ?",
+                    params=[collection_name],
+                ).fetchone()[0]
+                conn.sql(
+                    f"DELETE FROM {self.table_name} WHERE collection_name = ?",
+                    params=[collection_name],
+                )
+                stats["deleted"] = count
+                logger.info(f"Deleted {count} documents from collection '{collection_name}'")
+            except Exception as e:
+                stats["errors"].append(str(e))
+                logger.error(f"Error deleting collection '{collection_name}': {e}")
+        else:
+            with Session(self.engine) as session:
+                try:
+                    count = session.execute(
+                        select(func.count()).where(
+                            self.embedding.collection_name == collection_name
+                        )
+                    ).scalar()
+                    session.execute(
+                        self.embedding.__table__.delete().where(
+                            self.embedding.collection_name == collection_name
+                        )
+                    )
+                    session.commit()
+                    stats["deleted"] = count
+                    logger.info(f"Deleted {count} documents from collection '{collection_name}'")
+                except Exception as e:
+                    session.rollback()
+                    stats["errors"].append(str(e))
+                    logger.error(f"Error deleting collection '{collection_name}': {e}")
+
+        return stats
+
+    def delete_document(self, doc_name: str, collection_name: str = "") -> dict:
+        """
+        Delete all chunks of a specific document.
+
+        :param doc_name: Document name to delete
+        :param collection_name: Optional collection filter
+        :return: Stats dict with count of deleted chunks
+        """
+        stats = {"deleted": 0, "errors": []}
+
+        if self.dburl.startswith("sqlite"):
+            with self.connection as conn:
+                cursor = conn.cursor()
+                try:
+                    if collection_name:
+                        cursor.execute(
+                            f"SELECT COUNT(*) FROM {self.table_name} WHERE doc_name = ? AND collection_name = ?",
+                            (doc_name, collection_name),
+                        )
+                    else:
+                        cursor.execute(
+                            f"SELECT COUNT(*) FROM {self.table_name} WHERE doc_name = ?",
+                            (doc_name,),
+                        )
+                    count = cursor.fetchone()[0]
+
+                    if collection_name:
+                        cursor.execute(
+                            f"DELETE FROM {self.table_name} WHERE doc_name = ? AND collection_name = ?",
+                            (doc_name, collection_name),
+                        )
+                    else:
+                        cursor.execute(
+                            f"DELETE FROM {self.table_name} WHERE doc_name = ?",
+                            (doc_name,),
+                        )
+                    conn.commit()
+                    stats["deleted"] = count
+                    logger.info(f"Deleted {count} chunks of document '{doc_name}'")
+                except Exception as e:
+                    conn.rollback()
+                    stats["errors"].append(str(e))
+                    logger.error(f"Error deleting document '{doc_name}': {e}")
+        elif self.dburl.startswith("duckdb"):
+            conn = self.connection
+            try:
+                if collection_name:
+                    count = conn.sql(
+                        f"SELECT COUNT(*) FROM {self.table_name} WHERE doc_name = ? AND collection_name = ?",
+                        params=[doc_name, collection_name],
+                    ).fetchone()[0]
+                    conn.sql(
+                        f"DELETE FROM {self.table_name} WHERE doc_name = ? AND collection_name = ?",
+                        params=[doc_name, collection_name],
+                    )
+                else:
+                    count = conn.sql(
+                        f"SELECT COUNT(*) FROM {self.table_name} WHERE doc_name = ?",
+                        params=[doc_name],
+                    ).fetchone()[0]
+                    conn.sql(
+                        f"DELETE FROM {self.table_name} WHERE doc_name = ?",
+                        params=[doc_name],
+                    )
+                stats["deleted"] = count
+                logger.info(f"Deleted {count} chunks of document '{doc_name}'")
+            except Exception as e:
+                stats["errors"].append(str(e))
+                logger.error(f"Error deleting document '{doc_name}': {e}")
+        else:
+            with Session(self.engine) as session:
+                try:
+                    stmt = self.embedding.__table__.delete().where(
+                        self.embedding.doc_name == doc_name
+                    )
+                    if collection_name:
+                        stmt = stmt.where(self.embedding.collection_name == collection_name)
+                    result = session.execute(stmt)
+                    session.commit()
+                    stats["deleted"] = result.rowcount
+                    logger.info(f"Deleted {result.rowcount} chunks of document '{doc_name}'")
+                except Exception as e:
+                    session.rollback()
+                    stats["errors"].append(str(e))
+                    logger.error(f"Error deleting document '{doc_name}': {e}")
+
+        return stats
+
+    def reassign_document(self, doc_name: str, new_collection: str, old_collection: str = "") -> dict:
+        """
+        Move a document from one collection to another.
+
+        :param doc_name: Document name to move
+        :param new_collection: Target collection name
+        :param old_collection: Optional source collection filter
+        :return: Stats dict with count of moved chunks
+        """
+        stats = {"moved": 0, "errors": []}
+
+        if self.dburl.startswith("sqlite"):
+            with self.connection as conn:
+                cursor = conn.cursor()
+                try:
+                    if old_collection:
+                        cursor.execute(
+                            f"SELECT COUNT(*) FROM {self.table_name} WHERE doc_name = ? AND collection_name = ?",
+                            (doc_name, old_collection),
+                        )
+                    else:
+                        cursor.execute(
+                            f"SELECT COUNT(*) FROM {self.table_name} WHERE doc_name = ?",
+                            (doc_name,),
+                        )
+                    count = cursor.fetchone()[0]
+
+                    if old_collection:
+                        cursor.execute(
+                            f"UPDATE {self.table_name} SET collection_name = ? WHERE doc_name = ? AND collection_name = ?",
+                            (new_collection, doc_name, old_collection),
+                        )
+                    else:
+                        cursor.execute(
+                            f"UPDATE {self.table_name} SET collection_name = ? WHERE doc_name = ?",
+                            (new_collection, doc_name),
+                        )
+                    conn.commit()
+                    stats["moved"] = count
+                    logger.info(f"Moved {count} chunks of '{doc_name}' to collection '{new_collection}'")
+                except Exception as e:
+                    conn.rollback()
+                    stats["errors"].append(str(e))
+                    logger.error(f"Error moving document '{doc_name}': {e}")
+        elif self.dburl.startswith("duckdb"):
+            conn = self.connection
+            try:
+                if old_collection:
+                    count = conn.sql(
+                        f"SELECT COUNT(*) FROM {self.table_name} WHERE doc_name = ? AND collection_name = ?",
+                        params=[doc_name, old_collection],
+                    ).fetchone()[0]
+                    conn.sql(
+                        f"UPDATE {self.table_name} SET collection_name = ? WHERE doc_name = ? AND collection_name = ?",
+                        params=[new_collection, doc_name, old_collection],
+                    )
+                else:
+                    count = conn.sql(
+                        f"SELECT COUNT(*) FROM {self.table_name} WHERE doc_name = ?",
+                        params=[doc_name],
+                    ).fetchone()[0]
+                    conn.sql(
+                        f"UPDATE {self.table_name} SET collection_name = ? WHERE doc_name = ?",
+                        params=[new_collection, doc_name],
+                    )
+                stats["moved"] = count
+                logger.info(f"Moved {count} chunks of '{doc_name}' to collection '{new_collection}'")
+            except Exception as e:
+                stats["errors"].append(str(e))
+                logger.error(f"Error moving document '{doc_name}': {e}")
+        else:
+            with Session(self.engine) as session:
+                try:
+                    stmt = (
+                        self.embedding.__table__.update()
+                        .where(self.embedding.doc_name == doc_name)
+                        .values(collection_name=new_collection)
+                    )
+                    if old_collection:
+                        stmt = stmt.where(self.embedding.collection_name == old_collection)
+                    result = session.execute(stmt)
+                    session.commit()
+                    stats["moved"] = result.rowcount
+                    logger.info(f"Moved {result.rowcount} chunks of '{doc_name}' to collection '{new_collection}'")
+                except Exception as e:
+                    session.rollback()
+                    stats["errors"].append(str(e))
+                    logger.error(f"Error moving document '{doc_name}': {e}")
+
+        return stats
+
+    def reassign_collection(self, old_collection: str, new_collection: str) -> dict:
+        """
+        Rename a collection by updating all documents in it.
+
+        :param old_collection: Current collection name
+        :param new_collection: New collection name
+        :return: Stats dict with count of moved documents
+        """
+        stats = {"moved": 0, "errors": []}
+
+        if self.dburl.startswith("sqlite"):
+            with self.connection as conn:
+                cursor = conn.cursor()
+                try:
+                    count = cursor.execute(
+                        f"SELECT COUNT(*) FROM {self.table_name} WHERE collection_name = ?",
+                        (old_collection,),
+                    ).fetchone()[0]
+                    cursor.execute(
+                        f"UPDATE {self.table_name} SET collection_name = ? WHERE collection_name = ?",
+                        (new_collection, old_collection),
+                    )
+                    conn.commit()
+                    stats["moved"] = count
+                    logger.info(f"Renamed collection '{old_collection}' to '{new_collection}' ({count} documents)")
+                except Exception as e:
+                    conn.rollback()
+                    stats["errors"].append(str(e))
+        elif self.dburl.startswith("duckdb"):
+            conn = self.connection
+            try:
+                count = conn.sql(
+                    f"SELECT COUNT(*) FROM {self.table_name} WHERE collection_name = ?",
+                    params=[old_collection],
+                ).fetchone()[0]
+                conn.sql(
+                    f"UPDATE {self.table_name} SET collection_name = ? WHERE collection_name = ?",
+                    params=[new_collection, old_collection],
+                )
+                stats["moved"] = count
+                logger.info(f"Renamed collection '{old_collection}' to '{new_collection}' ({count} documents)")
+            except Exception as e:
+                stats["errors"].append(str(e))
+        else:
+            with Session(self.engine) as session:
+                try:
+                    result = session.execute(
+                        self.embedding.__table__.update()
+                        .where(self.embedding.collection_name == old_collection)
+                        .values(collection_name=new_collection)
+                    )
+                    session.commit()
+                    stats["moved"] = result.rowcount
+                    logger.info(f"Renamed collection '{old_collection}' to '{new_collection}' ({result.rowcount} documents)")
+                except Exception as e:
+                    session.rollback()
+                    stats["errors"].append(str(e))
+
+        return stats
+
     def __del__(self):
         if self._connection:
             try:

@@ -181,6 +181,32 @@ class WikiLintResponse(BaseModel):
     fixes_applied: int = Field(0, description="Number of auto-fixes applied")
 
 
+class DeleteCollectionRequest(BaseModel):
+    collection_name: str = Field(..., description="Collection to delete")
+
+
+class DeleteDocumentRequest(BaseModel):
+    doc_name: str = Field(..., description="Document name to delete")
+    collection_name: str = Field("", description="Optional collection filter")
+
+
+class ReassignDocumentRequest(BaseModel):
+    doc_name: str = Field(..., description="Document name to move")
+    old_collection: str = Field("", description="Source collection (empty for any)")
+    new_collection: str = Field(..., description="Target collection")
+
+
+class ReassignCollectionRequest(BaseModel):
+    old_collection: str = Field(..., description="Current collection name")
+    new_collection: str = Field(..., description="New collection name")
+
+
+class ManageResponse(BaseModel):
+    success: bool = Field(..., description="Whether the operation succeeded")
+    count: int = Field(0, description="Number of affected rows")
+    message: str = Field(..., description="Status message")
+
+
 class WikiStatusResponse(BaseModel):
     collection: str = Field(..., description="Collection name")
     wiki_path: str = Field(..., description="Filesystem path to the wiki")

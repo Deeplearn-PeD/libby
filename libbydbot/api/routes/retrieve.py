@@ -7,8 +7,13 @@ from loguru import logger
 from libbydbot.api.schemas import (
     CollectionInfo,
     CollectionListResponse,
+    DeleteCollectionRequest,
+    DeleteDocumentRequest,
     DocumentInfo,
     DocumentListResponse,
+    ManageResponse,
+    ReassignCollectionRequest,
+    ReassignDocumentRequest,
     RetrieveRequest,
     RetrieveResponse,
     RetrievedDocument,
@@ -109,4 +114,98 @@ def list_collections(embedder: EmbedderDep):
         return CollectionListResponse(collections=collections, total=len(collections))
     except Exception as e:
         logger.error(f"Error listing collections: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/collection", response_model=ManageResponse)
+def delete_collection(request: DeleteCollectionRequest, embedder: EmbedderDep):
+    """
+    Delete all documents in a collection.
+    """
+    try:
+        result = embedder.delete_collection(request.collection_name)
+        if result["errors"]:
+            raise HTTPException(status_code=500, detail="; ".join(result["errors"]))
+        return ManageResponse(
+            success=True,
+            count=result["deleted"],
+            message=f"Deleted {result['deleted']} documents from collection '{request.collection_name}'",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting collection: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/document", response_model=ManageResponse)
+def delete_document(request: DeleteDocumentRequest, embedder: EmbedderDep):
+    """
+    Delete all chunks of a specific document.
+    """
+    try:
+        result = embedder.delete_document(
+            request.doc_name,
+            collection_name=request.collection_name,
+        )
+        if result["errors"]:
+            raise HTTPException(status_code=500, detail="; ".join(result["errors"]))
+        return ManageResponse(
+            success=True,
+            count=result["deleted"],
+            message=f"Deleted {result['deleted']} chunks of document '{request.doc_name}'",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting document: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/reassign/document", response_model=ManageResponse)
+def reassign_document(request: ReassignDocumentRequest, embedder: EmbedderDep):
+    """
+    Move a document from one collection to another.
+    """
+    try:
+        result = embedder.reassign_document(
+            request.doc_name,
+            new_collection=request.new_collection,
+            old_collection=request.old_collection,
+        )
+        if result["errors"]:
+            raise HTTPException(status_code=500, detail="; ".join(result["errors"]))
+        return ManageResponse(
+            success=True,
+            count=result["moved"],
+            message=f"Moved {result['moved']} chunks of '{request.doc_name}' to '{request.new_collection}'",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error reassigning document: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/reassign/collection", response_model=ManageResponse)
+def reassign_collection(request: ReassignCollectionRequest, embedder: EmbedderDep):
+    """
+    Rename a collection (move all documents to a new collection name).
+    """
+    try:
+        result = embedder.reassign_collection(
+            request.old_collection,
+            request.new_collection,
+        )
+        if result["errors"]:
+            raise HTTPException(status_code=500, detail="; ".join(result["errors"]))
+        return ManageResponse(
+            success=True,
+            count=result["moved"],
+            message=f"Moved {result['moved']} documents from '{request.old_collection}' to '{request.new_collection}'",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error reassigning collection: {e}")
         raise HTTPException(status_code=500, detail=str(e))

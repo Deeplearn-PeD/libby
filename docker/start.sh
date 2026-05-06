@@ -24,4 +24,4 @@ curl -s -X POST "$OLLAMA_HOST/api/pull" -d "{\"name\": \"$EMBEDDING_MODEL\"}" > 
 
 echo "Starting Libby API server..."
 cd /app
-exec uv run libby-server --host 0.0.0.0 --port 8000
+exec uv run libby-server --host 0.0.0.0 --port 8000 --timeout-keep-alive 7200
