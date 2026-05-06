@@ -207,6 +207,23 @@ class ManageResponse(BaseModel):
     message: str = Field(..., description="Status message")
 
 
+class EmbedJobAccepted(BaseModel):
+    job_id: str = Field(..., description="Unique job identifier")
+    doc_name: str = Field(..., description="Document name being processed")
+    collection_name: str = Field(..., description="Target collection")
+    status: str = "processing"
+    message: str = "Document accepted for async embedding"
+
+
+class EmbedJobStatus(BaseModel):
+    job_id: str = Field(..., description="Unique job identifier")
+    status: str = Field(..., description="processing, completed, or failed")
+    doc_name: str = Field("", description="Document name")
+    collection_name: str = Field("", description="Target collection")
+    chunks_embedded: int = Field(0, description="Number of chunks embedded")
+    error: str | None = Field(None, description="Error message if failed")
+
+
 class WikiStatusResponse(BaseModel):
     collection: str = Field(..., description="Collection name")
     wiki_path: str = Field(..., description="Filesystem path to the wiki")
