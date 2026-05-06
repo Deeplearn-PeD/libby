@@ -2,6 +2,7 @@ import os
 import shutil
 import tempfile
 import threading
+import time
 import uuid
 from hashlib import sha256
 from typing import Annotated
@@ -78,6 +79,7 @@ def _run_embed_job(
         with _jobs_lock:
             _jobs[job_id]["status"] = "completed"
             _jobs[job_id]["chunks_embedded"] = chunks_embedded
+            _jobs[job_id]["finished_at"] = time.time()
 
         logger.info(f"Job {job_id} completed: {chunks_embedded} chunks embedded")
 
@@ -86,6 +88,7 @@ def _run_embed_job(
         with _jobs_lock:
             _jobs[job_id]["status"] = "failed"
             _jobs[job_id]["error"] = str(e)
+            _jobs[job_id]["finished_at"] = time.time()
 
     finally:
         if temp_dir and os.path.exists(temp_dir):
@@ -151,6 +154,8 @@ async def upload_and_embed(
             "collection_name": collection_name,
             "chunks_embedded": 0,
             "error": None,
+            "created_at": time.time(),
+            "finished_at": None,
         }
 
     thread = threading.Thread(
@@ -188,6 +193,8 @@ def get_job_status(job_id: str):
         collection_name=job.get("collection_name", ""),
         chunks_embedded=job.get("chunks_embedded", 0),
         error=job.get("error"),
+        created_at=job.get("created_at"),
+        finished_at=job.get("finished_at"),
     )
 
 
@@ -195,8 +202,20 @@ def get_job_status(job_id: str):
 def list_jobs():
     """
     List all embed jobs with their statuses.
+
+    Completed and failed jobs older than 5 minutes are automatically pruned.
     """
+    now = time.time()
+    stale_threshold = 300
+
     with _jobs_lock:
+        stale_ids = [
+            jid for jid, j in _jobs.items()
+            if j.get("finished_at") and (now - j["finished_at"]) > stale_threshold
+        ]
+        for jid in stale_ids:
+            del _jobs[jid]
+
         jobs = [
             EmbedJobStatus(
                 job_id=jid,
@@ -205,6 +224,8 @@ def list_jobs():
                 collection_name=j.get("collection_name", ""),
                 chunks_embedded=j.get("chunks_embedded", 0),
                 error=j.get("error"),
+                created_at=j.get("created_at"),
+                finished_at=j.get("finished_at"),
             )
             for jid, j in _jobs.items()
         ]

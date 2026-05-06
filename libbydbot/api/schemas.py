@@ -222,6 +222,8 @@ class EmbedJobStatus(BaseModel):
     collection_name: str = Field("", description="Target collection")
     chunks_embedded: int = Field(0, description="Number of chunks embedded")
     error: str | None = Field(None, description="Error message if failed")
+    created_at: float | None = Field(None, description="Unix timestamp when job was created")
+    finished_at: float | None = Field(None, description="Unix timestamp when job finished")
 
 
 class EmbedJobListResponse(BaseModel):
