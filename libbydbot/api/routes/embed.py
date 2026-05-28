@@ -315,6 +315,9 @@ def reembed_embeddings(request: ReembedRequest, embedder: EmbedderDep):
             collection_name=request.collection_name,
             new_model=request.new_model if request.new_model else None,
             batch_size=request.batch_size,
+            rechunk=request.rechunk,
+            new_chunk_size=request.new_chunk_size,
+            new_chunk_overlap=request.new_chunk_overlap,
         )
 
         return ReembedResponse(
@@ -326,6 +329,11 @@ def reembed_embeddings(request: ReembedRequest, embedder: EmbedderDep):
             errors=stats["errors"],
             backup_table=stats.get("backup_table"),
             message=f"Successfully re-embedded {stats['updated']}/{stats['total']} documents with model '{stats['new_model']}'",
+            total_old_chunks=stats.get("total_old_chunks", 0),
+            total_new_chunks=stats.get("total_new_chunks", 0),
+            old_chunk_size=stats.get("old_chunk_size", 0),
+            new_chunk_size=stats.get("new_chunk_size", 0),
+            shadow_collection=stats.get("shadow_collection", ""),
         )
     except Exception as e:
         logger.error(f"Error re-embedding: {e}")

@@ -96,6 +96,9 @@ class ReembedRequest(BaseModel):
         "", description="New embedding model (empty for settings default)"
     )
     batch_size: int = Field(100, ge=1, le=1000, description="Batch size for processing")
+    rechunk: bool = Field(False, description="Reconstruct source text and re-chunk before embedding")
+    new_chunk_size: int = Field(1500, ge=100, le=8000, description="Chunk size when rechunking")
+    new_chunk_overlap: int = Field(200, ge=0, le=1000, description="Chunk overlap when rechunking")
 
 
 class ReembedResponse(BaseModel):
@@ -111,6 +114,11 @@ class ReembedResponse(BaseModel):
         None, description="Name of backup table (for DuckDB, kept for safety)"
     )
     message: str = Field(..., description="Status message")
+    total_old_chunks: int = Field(0, description="Original chunk count (when rechunking)")
+    total_new_chunks: int = Field(0, description="New chunk count (when rechunking)")
+    old_chunk_size: int = Field(0, description="Previous chunk size (when rechunking)")
+    new_chunk_size: int = Field(0, description="New chunk size (when rechunking)")
+    shadow_collection: str = Field("", description="Name of shadow collection (when rechunking)")
 
 
 class ModelInfoResponse(BaseModel):

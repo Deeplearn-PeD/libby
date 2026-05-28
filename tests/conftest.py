@@ -8,7 +8,7 @@ def mock_embeddings():
     # Mocking Ollama/Gemini embeddings globally
     # Default model is embeddinggemma (768 dims); override in specific test files as needed
     with patch("libbydbot.brain.embed.DocEmbedder._generate_embedding") as mocked:
-        mocked.return_value = np.zeros(768).tolist()
+        mocked.return_value = np.zeros(1024).tolist()
         yield mocked
 
 

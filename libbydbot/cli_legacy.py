@@ -97,9 +97,20 @@ class LibbyInterface(LibbyDBot):
         return response
 
     def reembed(
-        self, collection_name: str = "", new_model: str = "", batch_size: int = 100
+        self,
+        collection_name: str = "",
+        new_model: str = "",
+        batch_size: int = 100,
+        rechunk: bool = False,
+        new_chunk_size: int = 1500,
+        new_chunk_overlap: int = 200,
     ):
-        """Re-embed documents with a new embedding model."""
+        """Re-embed documents with a new embedding model.
+
+        Use --rechunk to reconstruct source documents from existing chunks,
+        re-split with a new chunk size, and write to a shadow collection
+        (original collection stays queryable during migration).
+        """
         print("Checking for database schema updates...")
         self.DE._migrate_add_embedding_model()
 
@@ -113,19 +124,44 @@ class LibbyInterface(LibbyDBot):
         model_to_use = new_model if new_model else None
         print(f"\nRe-embedding with model: {model_to_use or 'default from settings'}")
         print(f"Collection: {collection_name or 'all'}")
-        print(f"Batch size: {batch_size}\n")
+        print(f"Batch size: {batch_size}")
+        if rechunk:
+            print(f"Rechunk: enabled")
+            print(f"New chunk size: {new_chunk_size}")
+            print(f"New chunk overlap: {new_chunk_overlap}")
+        print()
 
         stats = self.DE.reembed(
             collection_name=collection_name,
             new_model=model_to_use,
             batch_size=batch_size,
+            rechunk=rechunk,
+            new_chunk_size=new_chunk_size,
+            new_chunk_overlap=new_chunk_overlap,
         )
 
-        print(f"\nRe-embedding complete!")
-        print(f"  Total documents: {stats['total']}")
-        print(f"  Updated: {stats['updated']}")
-        print(f"  Old model: {stats['old_model']}")
-        print(f"  New model: {stats['new_model']}")
+        if rechunk:
+            print(f"\nRe-chunk + re-embed complete!")
+            print(f"  Old chunks: {stats.get('total_old_chunks', 0)}")
+            print(f"  New chunks: {stats.get('total_new_chunks', 0)}")
+            print(f"  Old model: {stats['old_model']}")
+            print(f"  New model: {stats['new_model']}")
+            print(f"  Old chunk size: {stats.get('old_chunk_size', 'N/A')}")
+            print(f"  New chunk size: {stats.get('new_chunk_size', 'N/A')}")
+            if stats.get("shadow_collection"):
+                print(f"\n  Shadow collection: '{stats['shadow_collection']}'")
+                print("  Original collection is untouched and still queryable.")
+                print("  To swap:")
+                print(f"    1. Verify quality by querying '{stats['shadow_collection']}'")
+                print(f"    2. Rename: use rename_collection to swap names")
+                print(f"    3. Drop old collection when satisfied")
+        else:
+            print(f"\nRe-embedding complete!")
+            print(f"  Total documents: {stats['total']}")
+            print(f"  Updated: {stats['updated']}")
+            print(f"  Old model: {stats['old_model']}")
+            print(f"  New model: {stats['new_model']}")
+
         if stats["errors"]:
             print(f"  Errors: {len(stats['errors'])}")
             for err in stats["errors"][:5]:

@@ -36,6 +36,14 @@ from duckdb import array_type
 dotenv.load_dotenv()
 logger = loguru.logger
 
+MODEL_MAX_CHARS: dict[str, int] = {
+    "mxbai-embed-large": 800,
+    "embeddinggemma": 8000,
+    "gemini-embedding-001": 8000,
+}
+
+DEFAULT_MAX_EMBED_CHARS = 800
+
 
 # engine = create_engine(os.getenv("PGURL"))
 # with Session(engine) as session:
@@ -69,8 +77,8 @@ class DocEmbedder:
         col_name,
         dburl: str = "",
         embedding_model: str | None = None,
-        chunk_size: int = 800,
-        chunk_overlap: int = 100,
+        chunk_size: int = 500,
+        chunk_overlap: int = 80,
     ):
         self.dburl = (
             dburl
@@ -419,6 +427,9 @@ class DocEmbedder:
                 result = session.execute(statement).all()
             return len(result) > 0
 
+    def _max_embed_chars(self) -> int:
+        return MODEL_MAX_CHARS.get(self.embedding_model, DEFAULT_MAX_EMBED_CHARS)
+
     def embed_text(self, doctext: str, docname: str, page_number: int):
         """
         Embed a page of a document.
@@ -427,6 +438,30 @@ class DocEmbedder:
         :param page_number: page number
         :return:
         """
+        limit = self._max_embed_chars()
+        if len(doctext) > limit:
+            logger.warning(
+                f"Text for {docname} page {page_number} is {len(doctext)} chars "
+                f"(>{limit}); auto-splitting into smaller chunks."
+            )
+            from libbydbot.brain.ingest import TextSplitter
+
+            splitter = TextSplitter(chunk_size=self.chunk_size, chunk_overlap=self.chunk_overlap)
+            sub_chunks = splitter.split_text(doctext)
+            for ci, sub in enumerate(sub_chunks):
+                self._embed_single(sub, docname, page_number)
+            return
+        self._embed_single(doctext, docname, page_number)
+
+    def _embed_single(self, doctext: str, docname: str, page_number: int):
+        """Insert a single text chunk into the vector store."""
+        limit = self._max_embed_chars()
+        if len(doctext) > limit:
+            logger.warning(
+                f"Chunk for {docname} page {page_number} is still {len(doctext)} chars "
+                f"after splitting; truncating to {limit}."
+            )
+            doctext = doctext[:limit]
         document_hash = sha256(doctext.encode()).hexdigest()
         if self._check_existing(document_hash):
             logger.info(
@@ -541,25 +576,30 @@ class DocEmbedder:
         :param callback: optional callable(doc_name, chunk_index, total_chunks) for progress reporting
         :return:
         """
-        from libbydbot.brain.ingest import PDFPipeline
+        from libbydbot.brain.ingest import PDFPipeline, ChunkInfo
 
         pipeline = PDFPipeline(
             corpus_path, chunk_size=self.chunk_size, chunk_overlap=self.chunk_overlap
         )
 
-        for text, metadata in pipeline:
+        for chunks_or_dict, metadata in pipeline:
             docname = metadata.get("title", "Unknown")
-            if isinstance(text, list):
-                # Text is already chunked
-                total = len(text)
-                for i, chunk in enumerate(text):
+
+            if isinstance(chunks_or_dict, list) and chunks_or_dict and isinstance(chunks_or_dict[0], ChunkInfo):
+                total = len(chunks_or_dict)
+                for ci, chunk_info in enumerate(chunks_or_dict):
+                    self.embed_text(chunk_info.text, docname, chunk_info.page_number)
+                    if callback:
+                        callback(docname, ci, total)
+            elif isinstance(chunks_or_dict, list):
+                total = len(chunks_or_dict)
+                for i, chunk in enumerate(chunks_or_dict):
                     self.embed_text(chunk, docname, i)
                     if callback:
                         callback(docname, i, total)
             else:
-                # Legacy page-based dict
-                total = len(text)
-                for idx, (page_number, page_text) in enumerate(text.items()):
+                total = len(chunks_or_dict)
+                for idx, (page_number, page_text) in enumerate(chunks_or_dict.items()):
                     self.embed_text(page_text, docname, page_number)
                     if callback:
                         callback(docname, idx, total)
@@ -1025,13 +1065,25 @@ class DocEmbedder:
         collection_name: str = "",
         new_model: str | None = None,
         batch_size: int = 100,
+        rechunk: bool = False,
+        new_chunk_size: int = 1500,
+        new_chunk_overlap: int = 200,
     ) -> dict:
         """
         Re-embed all documents with a new embedding model.
 
+        When *rechunk* is True the existing chunks are first reconstructed
+        into their source documents, then re-split with the new chunk size
+        before being embedded with the new model.  The result is written to
+        a **shadow collection** (``{collection}_v2``) so the original
+        collection remains fully queryable during the process.
+
         :param collection_name: Collection to re-embed (empty = all collections)
         :param new_model: New embedding model (None = use current default from settings)
         :param batch_size: Number of documents to process per batch
+        :param rechunk: Reconstruct source text and re-chunk before embedding
+        :param new_chunk_size: Chunk size to use when rechunking
+        :param new_chunk_overlap: Chunk overlap to use when rechunking
         :return: Stats dict with count of updated documents and any errors
         """
         from libbydbot.settings import Settings
@@ -1063,6 +1115,20 @@ class DocEmbedder:
             "new_model": new_model,
         }
 
+        if rechunk:
+            stats["old_chunk_size"] = self.chunk_size
+            stats["new_chunk_size"] = new_chunk_size
+            stats["new_chunk_overlap"] = new_chunk_overlap
+            stats["total_old_chunks"] = 0
+            stats["total_new_chunks"] = 0
+            stats["shadow_collection"] = ""
+            if self.dburl.startswith("sqlite"):
+                return self._rechunk_sqlite(collection_name, new_chunk_size, new_chunk_overlap, batch_size, stats)
+            elif self.dburl.startswith("duckdb"):
+                return self._rechunk_duckdb(collection_name, new_chunk_size, new_chunk_overlap, batch_size, stats)
+            else:
+                return self._rechunk_postgres(collection_name, new_chunk_size, new_chunk_overlap, batch_size, stats)
+
         if self.dburl.startswith("sqlite"):
             return self._reembed_sqlite(collection_name, batch_size, stats)
         elif self.dburl.startswith("duckdb"):
@@ -1087,12 +1153,12 @@ class DocEmbedder:
             # Get all documents
             if collection_name:
                 cursor.execute(
-                    f"SELECT id, collection_name, doc_name, page_number, doc_hash, document FROM {self.table_name} WHERE collection_name = ?",
+                    f"SELECT rowid, collection_name, doc_name, page_number, doc_hash, document FROM {self.table_name} WHERE collection_name = ?",
                     (collection_name,),
                 )
             else:
                 cursor.execute(
-                    f"SELECT id, collection_name, doc_name, page_number, doc_hash, document FROM {self.table_name}"
+                    f"SELECT rowid, collection_name, doc_name, page_number, doc_hash, document FROM {self.table_name}"
                 )
 
             documents = cursor.fetchall()
@@ -1536,6 +1602,291 @@ class DocEmbedder:
         logger.info(
             f"PostgreSQL re-embedding complete: {stats['updated']}/{stats['total']} documents updated"
         )
+        return stats
+
+    @staticmethod
+    def _reconstruct_documents(rows: list[tuple]) -> dict[tuple[str, str], str]:
+        """
+        Reconstruct full source text from stored chunks.
+
+        :param rows: list of (id, collection_name, doc_name, page_number, doc_hash, document)
+        :return: dict keyed by (collection_name, doc_name) → reconstructed full text
+        """
+        from collections import OrderedDict
+
+        grouped: dict[tuple[str, str], list[tuple[int, int, str]]] = OrderedDict()
+        for row in rows:
+            row_id, col_name, doc_name, page_num, _doc_hash, document = row
+            key = (col_name, doc_name)
+            if key not in grouped:
+                grouped[key] = []
+            grouped[key].append((page_num, row_id, document))
+
+        reconstructed: dict[tuple[str, str], str] = OrderedDict()
+        for key, chunks in grouped.items():
+            chunks.sort(key=lambda c: (c[0], c[1]))
+            parts = [c[2] for c in chunks]
+            reconstructed[key] = "\n".join(parts)
+
+        return reconstructed
+
+    def _rechunk_sqlite(
+        self,
+        collection_name: str,
+        new_chunk_size: int,
+        new_chunk_overlap: int,
+        batch_size: int,
+        stats: dict,
+    ) -> dict:
+        import struct
+        from libbydbot.brain.ingest import TextSplitter
+
+        splitter = TextSplitter(chunk_size=new_chunk_size, chunk_overlap=new_chunk_overlap)
+
+        with self.connection as conn:
+            cursor = conn.cursor()
+
+            if collection_name:
+                cursor.execute(
+                    f"SELECT rowid, collection_name, doc_name, page_number, doc_hash, document FROM {self.table_name} WHERE collection_name = ?",
+                    (collection_name,),
+                )
+            else:
+                cursor.execute(
+                    f"SELECT rowid, collection_name, doc_name, page_number, doc_hash, document FROM {self.table_name}"
+                )
+
+            rows = cursor.fetchall()
+            stats["total_old_chunks"] = len(rows)
+
+            if not rows:
+                logger.info("No documents to re-chunk")
+                return stats
+
+            reconstructed = self._reconstruct_documents(rows)
+
+            shadow_suffix = "_v2"
+            shadow_map: dict[str, str] = {}
+            for (col_name, _doc_name) in reconstructed:
+                if col_name not in shadow_map:
+                    shadow_map[col_name] = col_name + shadow_suffix
+
+            dimension = self._get_embedding_dimension()
+            total_new = 0
+            processed = 0
+
+            for (col_name, doc_name), full_text in reconstructed.items():
+                shadow_col = shadow_map[col_name]
+                chunks = splitter.split_text(full_text)
+
+                for ci, chunk_text in enumerate(chunks):
+                    try:
+                        doc_hash = sha256(chunk_text.encode()).hexdigest()
+                        chunk_text = chunk_text.replace("\x00", "\ufffd")
+                        embedding = self._generate_embedding(chunk_text)
+                        embedding_bytes = struct.pack(f"{len(embedding)}f", *embedding)
+
+                        cursor.execute(
+                            f"""
+                            INSERT INTO {self.table_name} (collection_name, doc_name, page_number, doc_hash, document, embedding_model, embedding)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (shadow_col, doc_name, ci, doc_hash, chunk_text, self.embedding_model, embedding_bytes),
+                        )
+
+                        cursor.execute(
+                            f"INSERT INTO {self.table_name}_fts(rowid, document, doc_hash) VALUES (?, ?, ?)",
+                            (cursor.lastrowid, chunk_text, doc_hash),
+                        )
+
+                        total_new += 1
+                        stats["updated"] += 1
+
+                    except Exception as e:
+                        error_msg = f"Error re-chunking {doc_name} chunk {ci}: {e}"
+                        logger.error(error_msg)
+                        stats["errors"].append(error_msg)
+
+                    processed += 1
+                    if processed % batch_size == 0:
+                        conn.commit()
+                        logger.info(f"Progress: {processed} new chunks written")
+
+                conn.commit()
+
+            stats["total_new_chunks"] = total_new
+            stats["shadow_collection"] = shadow_map.get(collection_name, "")
+            logger.info(
+                f"SQLite re-chunk complete: {stats['total_old_chunks']} old → {total_new} new chunks"
+            )
+
+        return stats
+
+    def _rechunk_duckdb(
+        self,
+        collection_name: str,
+        new_chunk_size: int,
+        new_chunk_overlap: int,
+        batch_size: int,
+        stats: dict,
+    ) -> dict:
+        from libbydbot.brain.ingest import TextSplitter
+
+        splitter = TextSplitter(chunk_size=new_chunk_size, chunk_overlap=new_chunk_overlap)
+        conn = self.connection
+        dimension = self._get_embedding_dimension()
+
+        if collection_name:
+            result = conn.sql(
+                f"SELECT id, collection_name, doc_name, page_number, doc_hash, document FROM {self.table_name} WHERE collection_name = ?",
+                params=[collection_name],
+            ).fetchall()
+        else:
+            result = conn.sql(
+                f"SELECT id, collection_name, doc_name, page_number, doc_hash, document FROM {self.table_name}"
+            ).fetchall()
+
+        rows = result
+        stats["total_old_chunks"] = len(rows)
+
+        if not rows:
+            logger.info("No documents to re-chunk")
+            return stats
+
+        reconstructed = self._reconstruct_documents(rows)
+
+        shadow_suffix = "_v2"
+        shadow_map: dict[str, str] = {}
+        for (col_name, _doc_name) in reconstructed:
+            if col_name not in shadow_map:
+                shadow_map[col_name] = col_name + shadow_suffix
+
+        total_new = 0
+        processed = 0
+
+        for (col_name, doc_name), full_text in reconstructed.items():
+            shadow_col = shadow_map[col_name]
+            chunks = splitter.split_text(full_text)
+
+            for ci, chunk_text in enumerate(chunks):
+                try:
+                    doc_hash = sha256(chunk_text.encode()).hexdigest()
+                    chunk_text = chunk_text.replace("\x00", "\ufffd")
+                    embedding = self._generate_embedding(chunk_text)
+                    embedding_str = "[" + ",".join(str(v) for v in embedding) + "]"
+
+                    conn.sql(
+                        f"""
+                        INSERT INTO {self.table_name} (collection_name, doc_name, page_number, doc_hash, document, embedding_model, embedding)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        params=[shadow_col, doc_name, ci, doc_hash, chunk_text, self.embedding_model, embedding_str],
+                    )
+
+                    total_new += 1
+                    stats["updated"] += 1
+
+                except Exception as e:
+                    error_msg = f"Error re-chunking {doc_name} chunk {ci}: {e}"
+                    logger.error(error_msg)
+                    stats["errors"].append(error_msg)
+
+                processed += 1
+                if processed % batch_size == 0:
+                    logger.info(f"Progress: {processed} new chunks written")
+
+        stats["total_new_chunks"] = total_new
+        stats["shadow_collection"] = shadow_map.get(collection_name, "")
+        logger.info(
+            f"DuckDB re-chunk complete: {stats['total_old_chunks']} old → {total_new} new chunks"
+        )
+
+        return stats
+
+    def _rechunk_postgres(
+        self,
+        collection_name: str,
+        new_chunk_size: int,
+        new_chunk_overlap: int,
+        batch_size: int,
+        stats: dict,
+    ) -> dict:
+        from libbydbot.brain.ingest import TextSplitter
+
+        splitter = TextSplitter(chunk_size=new_chunk_size, chunk_overlap=new_chunk_overlap)
+
+        with Session(self.engine) as session:
+            if collection_name:
+                statement = select(self.embedding).where(
+                    self.embedding.collection_name == collection_name
+                )
+            else:
+                statement = select(self.embedding)
+
+            documents = session.execute(statement).scalars().all()
+            stats["total_old_chunks"] = len(documents)
+
+            if not documents:
+                logger.info("No documents to re-chunk")
+                return stats
+
+            rows = [
+                (d.id, d.collection_name, d.doc_name, d.page_number, d.doc_hash, d.document)
+                for d in documents
+            ]
+            reconstructed = self._reconstruct_documents(rows)
+
+            shadow_suffix = "_v2"
+            shadow_map: dict[str, str] = {}
+            for (col_name, _doc_name) in reconstructed:
+                if col_name not in shadow_map:
+                    shadow_map[col_name] = col_name + shadow_suffix
+
+            total_new = 0
+            processed = 0
+
+            for (col_name, doc_name), full_text in reconstructed.items():
+                shadow_col = shadow_map[col_name]
+                chunks = splitter.split_text(full_text)
+
+                for ci, chunk_text in enumerate(chunks):
+                    try:
+                        doc_hash = sha256(chunk_text.encode()).hexdigest()
+                        chunk_text = chunk_text.replace("\x00", "\ufffd")
+                        embedding = self._generate_embedding(chunk_text)
+
+                        doc_vector = self.embedding(
+                            collection_name=shadow_col,
+                            doc_name=doc_name,
+                            page_number=ci,
+                            doc_hash=doc_hash,
+                            document=chunk_text,
+                            embedding_model=self.embedding_model,
+                            embedding=embedding,
+                        )
+                        session.add(doc_vector)
+
+                        total_new += 1
+                        stats["updated"] += 1
+
+                    except Exception as e:
+                        error_msg = f"Error re-chunking {doc_name} chunk {ci}: {e}"
+                        logger.error(error_msg)
+                        stats["errors"].append(error_msg)
+
+                    processed += 1
+                    if processed % batch_size == 0:
+                        session.commit()
+                        logger.info(f"Progress: {processed} new chunks written")
+
+                session.commit()
+
+            stats["total_new_chunks"] = total_new
+            stats["shadow_collection"] = shadow_map.get(collection_name, "")
+            logger.info(
+                f"PostgreSQL re-chunk complete: {stats['total_old_chunks']} old → {total_new} new chunks"
+            )
+
         return stats
 
     def get_embedding_model_info(self) -> dict:
