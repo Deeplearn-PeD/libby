@@ -5,6 +5,37 @@ All notable changes to Libby D. Bot will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-05-28
+
+### Added
+- Cross-backend migration: migrate embeddings between SQLite, DuckDB, and PostgreSQL without re-embedding
+- `migrate_backend()` method on `DocEmbedder` with batched reading, dimension mismatch detection, dry-run, and resume
+- `list_backends()` method reporting configuration status for all database backends
+- `GET /api/backends` endpoint listing available backends
+- `POST /api/migrate` endpoint for API-driven migration
+- `list_backends` and `migrate_backend` CLI commands in `libby-cli`
+- `BackendInfo`, `BackendsResponse`, `MigrateBackendRequest`, `MigrateBackendResponse` API schemas
+- Target backend settings: `target_postgres_url`, `target_duckdb_path`, `target_sqlite_path` in Settings
+- 29 tests covering migration, backend listing, vector I/O, and edge cases
+- Dynamic version reading from `pyproject.toml` — single source of truth for API version
+
+### Changed
+- `mxbai-embed-large` is now the default embedding model (was `embeddinggemma`)
+- Recursive semantic text splitting with `TextSplitter` (paragraphs → lines → sentences → words)
+- `PDFPipeline` produces `ChunkInfo` objects with real page numbers
+- Model-aware `MAX_EMBED_CHARS` via `MODEL_MAX_CHARS` dict (800 for mxbai, 8000 for gemma/gemini)
+- Three-layer defense against oversized chunks: TextSplitter ceiling → auto-split → truncation
+- `--rechunk` flag on `reembed` command writes to shadow collection (`{name}_v2`)
+
+### Deprecated
+- `scripts/migrate_duckdb_to_postgres.py` — use `libby-cli migrate_backend` or `POST /api/migrate` instead
+
+## [1.0.0] - 2026-05-27
+
+### Added
+- Robust chunking pipeline with recursive text splitting and model-aware safety caps
+- Shadow-collection rechunking for zero-downtime re-embedding
+
 ## [0.9.0] - 2026-03-06
 
 ### Added
@@ -218,6 +249,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Question answering with document context
 - Content generation
 
+[1.1.0]: https://github.com/Deeplearn-PeD/libby/compare/v1.0.0...v1.1.0
+[1.0.0]: https://github.com/Deeplearn-PeD/libby/compare/v0.9.0...v1.0.0
 [0.9.0]: https://github.com/Deeplearn-PeD/libby/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/Deeplearn-PeD/libby/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/Deeplearn-PeD/libby/compare/v0.6.0...v0.7.0

@@ -1,6 +1,7 @@
 import os
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from pathlib import Path
 
 import requests
 import uvicorn
@@ -11,6 +12,20 @@ from loguru import logger
 from libbydbot.api.schemas import HealthResponse
 from libbydbot.api.routes import embed, retrieve, wiki
 from libbydbot.brain.embed import DocEmbedder
+
+
+def _get_version() -> str:
+    try:
+        pyproject = Path(__file__).resolve().parent.parent.parent / "pyproject.toml"
+        for line in pyproject.read_text().splitlines():
+            if line.startswith("version ="):
+                return line.split('"')[1]
+    except Exception:
+        pass
+    return "unknown"
+
+
+VERSION = _get_version()
 
 
 @dataclass
@@ -53,7 +68,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="Libby D. Bot API",
         description="REST API for Libby D. Bot - AI-powered librarian for RAG document embedding and retrieval",
-        version="0.6.0",
+        version=VERSION,
         lifespan=lifespan,
     )
 
@@ -74,7 +89,7 @@ def create_app() -> FastAPI:
         """Health check endpoint."""
         if app_state.embedder is None:
             return HealthResponse(
-                status="unhealthy", database="none", ollama="unknown", version="0.6.0"
+                status="unhealthy", database="none", ollama="unknown", version=VERSION
             )
 
         db_type = (
@@ -100,7 +115,7 @@ def create_app() -> FastAPI:
             status=overall_status,
             database=db_type,
             ollama=ollama_status,
-            version="0.6.0",
+            version=VERSION,
         )
 
     @app.get("/", tags=["root"])
@@ -108,7 +123,7 @@ def create_app() -> FastAPI:
         """Root endpoint with API information."""
         return {
             "name": "Libby D. Bot API",
-            "version": "0.6.0",
+            "version": VERSION,
             "docs": "/docs",
             "health": "/api/health",
         }

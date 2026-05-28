@@ -260,7 +260,7 @@ docker compose up -d
 curl http://localhost:8001/api/health
 
 # Expected response:
-# {"status": "healthy", "database": "postgresql", "version": "0.6.0"}
+# {"status": "healthy", "database": "postgresql", "version": "1.0.0"}
 ```
 
 ---

@@ -64,7 +64,8 @@ class TestAppCreation:
 
         test_app = create_app()
         assert test_app.title == "Libby D. Bot API"
-        assert test_app.version == "0.6.0"
+        from libbydbot.api.main import VERSION
+        assert test_app.version == VERSION
 
     def test_app_routes(self):
         """Test that app has expected routes."""
@@ -141,17 +142,19 @@ class TestSchemaModels:
         """Test HealthResponse model."""
         from libbydbot.api.schemas import HealthResponse
 
+        from libbydbot.api.main import VERSION
+
         response = HealthResponse(
             status="healthy",
             database="duckdb",
             ollama="healthy",
-            version="0.6.0",
+            version=VERSION,
         )
 
         assert response.status == "healthy"
         assert response.database == "duckdb"
         assert response.ollama == "healthy"
-        assert response.version == "0.6.0"
+        assert response.version == VERSION
 
     def test_retrieved_document(self):
         """Test RetrievedDocument model."""
