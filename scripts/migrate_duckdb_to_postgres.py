@@ -1,5 +1,21 @@
 #!/usr/bin/env python3
 """
+DEPRECATED: This standalone migration script is superseded by the built-in
+migrate_backend command in Libby D. Bot. It will be removed in a future release.
+
+Use one of the following instead:
+
+    # CLI
+    uv run libby-cli list_backends
+    uv run libby-cli migrate_backend --target_backend postgresql [--collection_name my_col] [--dry_run] [--resume]
+
+    # API
+    GET  /api/backends
+    POST /api/migrate  {"target_backend": "postgresql", ...}
+
+Original docstring below for reference.
+--
+
 Enhanced Migration script to transfer embeddings from DuckDB to PostgreSQL.
 
 Features:
@@ -25,6 +41,13 @@ Usage:
     # Re-embed when dimension mismatch
     python scripts/migrate_duckdb_to_postgres.py --re-embed --duckdb-path ./embeddings.duckdb --postgres-url postgresql://user:pass@host:port/dbname
 """
+
+import warnings
+warnings.warn(
+    "migrate_duckdb_to_postgres.py is deprecated. Use 'libby-cli migrate_backend' or POST /api/migrate instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 import argparse
 import sys

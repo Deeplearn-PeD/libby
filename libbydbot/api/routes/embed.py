@@ -11,12 +11,15 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from loguru import logger
 
 from libbydbot.api.schemas import (
+    BackendsResponse,
     EmbedJobAccepted,
     EmbedJobListResponse,
     EmbedJobStatus,
     EmbedTextRequest,
     EmbedTextResponse,
     EmbedUploadResponse,
+    MigrateBackendRequest,
+    MigrateBackendResponse,
     ModelInfoResponse,
     ReembedRequest,
     ReembedResponse,
@@ -356,4 +359,46 @@ def get_model_info(embedder: EmbedderDep):
         )
     except Exception as e:
         logger.error(f"Error getting model info: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/backends", response_model=BackendsResponse)
+def list_backends(embedder: EmbedderDep):
+    """List available database backends and their configuration status."""
+    try:
+        backends = embedder.list_backends()
+        current = next(
+            (b["name"] for b in backends if b["is_current"]), "unknown"
+        )
+        return BackendsResponse(backends=backends, current=current)
+    except Exception as e:
+        logger.error(f"Error listing backends: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/migrate", response_model=MigrateBackendResponse)
+def migrate_backend(request: MigrateBackendRequest, embedder: EmbedderDep):
+    """Migrate embeddings to a different database backend."""
+    try:
+        stats = embedder.migrate_backend(
+            target_backend=request.target_backend,
+            collection_name=request.collection_name,
+            batch_size=request.batch_size,
+            dry_run=request.dry_run,
+            resume=request.resume,
+        )
+        return MigrateBackendResponse(
+            success=stats["success"],
+            total=stats["total"],
+            migrated=stats["migrated"],
+            skipped=stats["skipped"],
+            errors=stats["errors"],
+            source_backend=stats["source_backend"],
+            target_backend=stats["target_backend"],
+            source_dimension=stats["source_dimension"],
+            target_dimension=stats["target_dimension"],
+            message="Migration complete" if stats["success"] else "Migration failed",
+        )
+    except Exception as e:
+        logger.error(f"Error migrating backend: {e}")
         raise HTTPException(status_code=500, detail=str(e))

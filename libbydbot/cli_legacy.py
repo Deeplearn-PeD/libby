@@ -274,6 +274,95 @@ class LibbyInterface(LibbyDBot):
             print(f"  Last operation: {status['last_operation']}")
         return status
 
+    def list_backends(self):
+        """List available database backends and their configuration status."""
+        backends = self.DE.list_backends()
+        current = [b for b in backends if b["is_current"]][0]["name"] if any(b["is_current"] for b in backends) else "unknown"
+
+        print("Available Database Backends:")
+        print(f"  Current: {current}\n")
+        for b in backends:
+            marker = " ← current" if b["is_current"] else ""
+            configured = "configured" if b["is_configured"] else "not configured"
+            print(f"  {b['display_name']:12} ({b['name']})  {configured}{marker}")
+            if b["is_configured"] and b["location"]:
+                print(f"  {'':14}{b['location']}")
+        return backends
+
+    def migrate_backend(
+        self,
+        target_backend: str = "",
+        collection_name: str = "",
+        batch_size: int = 1000,
+        dry_run: bool = False,
+        resume: bool = False,
+    ):
+        """Migrate embeddings to a different database backend.
+
+        Target backend must be pre-configured in .env (PGURL, TARGET_DUCKDB_PATH, TARGET_SQLITE_PATH).
+        Use list_backends to see available targets.
+        """
+        if not target_backend:
+            print("Error: --target_backend is required. Choose from: postgresql, duckdb, sqlite")
+            print("Use 'list_backends' to see configured backends.")
+            return
+
+        backends = self.DE.list_backends()
+        current = next((b for b in backends if b["is_current"]), None)
+        target = next((b for b in backends if b["name"] == target_backend), None)
+
+        if not target:
+            print(f"Error: Unknown backend '{target_backend}'. Choose from: postgresql, duckdb, sqlite")
+            return
+
+        if target["is_current"]:
+            print(f"Error: '{target_backend}' is the current backend. Choose a different one.")
+            return
+
+        if not target["is_configured"]:
+            print(f"Error: '{target_backend}' is not configured. Set the appropriate env variable:")
+            if target_backend == "postgresql":
+                print("  Set PGURL in .env or environment")
+            elif target_backend == "duckdb":
+                print("  Set TARGET_DUCKDB_PATH in .env or environment")
+            elif target_backend == "sqlite":
+                print("  Set TARGET_SQLITE_PATH in .env or environment")
+            return
+
+        print(f"Migrating from {current['name']} → {target_backend}")
+        if collection_name:
+            print(f"  Collection: {collection_name}")
+        else:
+            print("  All collections")
+        print(f"  Batch size: {batch_size}")
+        if dry_run:
+            print("  DRY RUN — no changes will be made")
+        if resume:
+            print("  Resume — skipping already-migrated records")
+        print()
+
+        stats = self.DE.migrate_backend(
+            target_backend=target_backend,
+            collection_name=collection_name,
+            batch_size=batch_size,
+            dry_run=dry_run,
+            resume=resume,
+        )
+
+        if stats["success"]:
+            print(f"\nMigration complete!")
+            print(f"  Total: {stats['total']}")
+            print(f"  Migrated: {stats['migrated']}")
+            print(f"  Skipped: {stats['skipped']}")
+            print(f"  Source: {stats['source_backend']} ({stats['source_dimension']}-dim)")
+            print(f"  Target: {stats['target_backend']} ({stats['target_dimension']}-dim)")
+        else:
+            print(f"\nMigration failed:")
+            for err in stats["errors"]:
+                print(f"  - {err}")
+
+        return stats
+
 
 def main(corpus_path="."):
     fire.Fire(LibbyInterface)

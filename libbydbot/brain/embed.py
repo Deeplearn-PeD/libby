@@ -2249,6 +2249,409 @@ class DocEmbedder:
 
         return stats
 
+    @staticmethod
+    def resolve_target_dburl(backend: str) -> str:
+        from libbydbot.settings import Settings
+        settings = Settings()
+        if backend == "postgresql":
+            url = settings.target_postgres_url
+            if not url:
+                raise ValueError("PostgreSQL target not configured. Set PGURL in .env or environment.")
+            return url
+        elif backend == "duckdb":
+            return f"duckdb:///{settings.target_duckdb_path}"
+        elif backend == "sqlite":
+            return f"sqlite:///{settings.target_sqlite_path}"
+        else:
+            raise ValueError(f"Unknown backend: {backend}. Choose from: postgresql, duckdb, sqlite")
+
+    def list_backends(self) -> list[dict]:
+        from libbydbot.settings import Settings
+        settings = Settings()
+
+        current_backend = "unknown"
+        if self.dburl.startswith("sqlite"):
+            current_backend = "sqlite"
+        elif self.dburl.startswith("duckdb"):
+            current_backend = "duckdb"
+        else:
+            current_backend = "postgresql"
+
+        backends = []
+        pg_url = settings.target_postgres_url
+        backends.append({
+            "name": "postgresql",
+            "display_name": "PostgreSQL",
+            "is_current": current_backend == "postgresql",
+            "is_configured": bool(pg_url),
+            "location": self._safe_location(pg_url) if pg_url else "",
+        })
+        backends.append({
+            "name": "duckdb",
+            "display_name": "DuckDB",
+            "is_current": current_backend == "duckdb",
+            "is_configured": True,
+            "location": settings.target_duckdb_path,
+        })
+        backends.append({
+            "name": "sqlite",
+            "display_name": "SQLite",
+            "is_current": current_backend == "sqlite",
+            "is_configured": True,
+            "location": settings.target_sqlite_path,
+        })
+        return backends
+
+    @staticmethod
+    def _safe_location(url: str) -> str:
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+            if parsed.hostname:
+                port = f":{parsed.port}" if parsed.port else ""
+                path = parsed.path.lstrip("/") or ""
+                return f"{parsed.hostname}{port}/{path}"
+            return url
+        except Exception:
+            return ""
+
+    def _detect_source_dimension(self) -> int:
+        if self.dburl.startswith("sqlite"):
+            with self.connection as conn:
+                cursor = conn.cursor()
+                cursor.execute(f"SELECT embedding FROM {self.table_name} LIMIT 1")
+                row = cursor.fetchone()
+                if row is None:
+                    return self._get_embedding_dimension()
+                import struct
+                raw = row[0]
+                return len(raw) // 4
+        elif self.dburl.startswith("duckdb"):
+            conn = self.connection
+            result = conn.sql(f"SELECT embedding FROM {self.table_name} LIMIT 1").fetchone()
+            if result is None:
+                return self._get_embedding_dimension()
+            return len(result[0])
+        else:
+            with Session(self.engine) as session:
+                result = session.execute(
+                    select(self.embedding.embedding).limit(1)
+                ).scalars().first()
+                if result is None:
+                    return self._get_embedding_dimension()
+                return len(result)
+
+    def _read_vectors_batch(self, offset: int, limit: int, collection_name: str) -> list[dict]:
+        if self.dburl.startswith("sqlite"):
+            return self._read_vectors_sqlite(offset, limit, collection_name)
+        elif self.dburl.startswith("duckdb"):
+            return self._read_vectors_duckdb(offset, limit, collection_name)
+        else:
+            return self._read_vectors_postgres(offset, limit, collection_name)
+
+    def _read_vectors_sqlite(self, offset: int, limit: int, collection_name: str) -> list[dict]:
+        import struct
+        with self.connection as conn:
+            cursor = conn.cursor()
+            if collection_name:
+                cursor.execute(
+                    f"SELECT rowid, collection_name, doc_name, page_number, doc_hash, document, embedding_model, embedding FROM {self.table_name} WHERE collection_name = ? ORDER BY rowid LIMIT ? OFFSET ?",
+                    (collection_name, limit, offset),
+                )
+            else:
+                cursor.execute(
+                    f"SELECT rowid, collection_name, doc_name, page_number, doc_hash, document, embedding_model, embedding FROM {self.table_name} ORDER BY rowid LIMIT ? OFFSET ?",
+                    (limit, offset),
+                )
+            rows = cursor.fetchall()
+
+        results = []
+        for row in rows:
+            embedding_bytes = row[7]
+            dim = len(embedding_bytes) // 4
+            embedding = list(struct.unpack(f"{dim}f", embedding_bytes))
+            results.append({
+                "collection_name": row[1],
+                "doc_name": row[2],
+                "page_number": row[3],
+                "doc_hash": row[4],
+                "document": row[5],
+                "embedding_model": row[6] or "unknown",
+                "embedding": embedding,
+            })
+        return results
+
+    def _read_vectors_duckdb(self, offset: int, limit: int, collection_name: str) -> list[dict]:
+        conn = self.connection
+        if collection_name:
+            rows = conn.sql(
+                f"SELECT id, collection_name, doc_name, page_number, doc_hash, document, embedding_model, embedding FROM {self.table_name} WHERE collection_name = ? ORDER BY id LIMIT ? OFFSET ?",
+                params=[collection_name, limit, offset],
+            ).fetchall()
+        else:
+            rows = conn.sql(
+                f"SELECT id, collection_name, doc_name, page_number, doc_hash, document, embedding_model, embedding FROM {self.table_name} ORDER BY id LIMIT ? OFFSET ?",
+                params=[limit, offset],
+            ).fetchall()
+
+        results = []
+        for row in rows:
+            embedding = list(row[7]) if row[7] else []
+            results.append({
+                "collection_name": row[1],
+                "doc_name": row[2],
+                "page_number": row[3],
+                "doc_hash": row[4],
+                "document": row[5],
+                "embedding_model": row[6] or "unknown",
+                "embedding": embedding,
+            })
+        return results
+
+    def _read_vectors_postgres(self, offset: int, limit: int, collection_name: str) -> list[dict]:
+        with Session(self.engine) as session:
+            if collection_name:
+                statement = (
+                    select(self.embedding)
+                    .where(self.embedding.collection_name == collection_name)
+                    .order_by(self.embedding.id)
+                    .offset(offset)
+                    .limit(limit)
+                )
+            else:
+                statement = (
+                    select(self.embedding)
+                    .order_by(self.embedding.id)
+                    .offset(offset)
+                    .limit(limit)
+                )
+            docs = session.execute(statement).scalars().all()
+
+        results = []
+        for doc in docs:
+            results.append({
+                "collection_name": doc.collection_name,
+                "doc_name": doc.doc_name,
+                "page_number": doc.page_number,
+                "doc_hash": doc.doc_hash,
+                "document": doc.document,
+                "embedding_model": doc.embedding_model or "unknown",
+                "embedding": list(doc.embedding) if doc.embedding else [],
+            })
+        return results
+
+    def _insert_existing_vector(self, record: dict) -> None:
+        collection_name = record["collection_name"]
+        doc_name = record["doc_name"]
+        page_number = record["page_number"]
+        doc_hash = record["doc_hash"]
+        document = record["document"].replace("\x00", "\ufffd")
+        embedding_model = record["embedding_model"]
+        embedding = record["embedding"]
+
+        if self.dburl.startswith("sqlite"):
+            import struct
+            embedding_bytes = struct.pack(f"{len(embedding)}f", *embedding)
+            with self.connection as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    f"""
+                    INSERT INTO {self.table_name} (collection_name, doc_name, page_number, doc_hash, document, embedding_model, embedding)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (collection_name, doc_name, page_number, doc_hash, document, embedding_model, embedding_bytes),
+                )
+                cursor.execute(
+                    f"INSERT INTO {self.table_name}_fts(rowid, document, doc_hash) VALUES (?, ?, ?)",
+                    (cursor.lastrowid, document, doc_hash),
+                )
+                conn.commit()
+        elif self.dburl.startswith("duckdb"):
+            embedding_str = "[" + ",".join(str(v) for v in embedding) + "]"
+            conn = self.connection
+            conn.sql(
+                f"""
+                INSERT INTO {self.table_name} (collection_name, doc_name, page_number, doc_hash, document, embedding_model, embedding)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                params=[collection_name, doc_name, page_number, doc_hash, document, embedding_model, embedding_str],
+            )
+        else:
+            with Session(self.engine) as session:
+                doc_vector = self.embedding(
+                    collection_name=collection_name,
+                    doc_name=doc_name,
+                    page_number=page_number,
+                    doc_hash=doc_hash,
+                    document=document,
+                    embedding_model=embedding_model,
+                    embedding=embedding,
+                )
+                session.add(doc_vector)
+                session.commit()
+
+    def _rebuild_fts(self) -> None:
+        if self.dburl.startswith("sqlite"):
+            with self.connection as conn:
+                cursor = conn.cursor()
+                try:
+                    cursor.execute(f"DROP TABLE IF EXISTS {self.table_name}_fts")
+                    cursor.execute(f"""
+                        CREATE VIRTUAL TABLE {self.table_name}_fts USING fts5(
+                            document,
+                            doc_hash UNINDEXED,
+                            content='{self.table_name}',
+                            content_rowid='rowid'
+                        );
+                    """)
+                    cursor.execute(f"""
+                        INSERT INTO {self.table_name}_fts(rowid, document, doc_hash)
+                        SELECT rowid, document, doc_hash FROM {self.table_name}
+                    """)
+                    conn.commit()
+                    logger.info("Rebuilt SQLite FTS index after migration")
+                except Exception as e:
+                    logger.warning(f"Failed to rebuild SQLite FTS: {e}")
+        elif self.dburl.startswith("duckdb"):
+            conn = self.connection
+            try:
+                conn.sql("INSTALL fts;")
+                conn.sql("LOAD fts;")
+                conn.sql(f"PRAGMA create_fts_index('{self.table_name}', 'id', 'document');")
+                logger.info("Rebuilt DuckDB FTS index after migration")
+            except Exception as e:
+                logger.warning(f"Failed to rebuild DuckDB FTS: {e}")
+
+    def _count_source_records(self, collection_name: str) -> int:
+        if self.dburl.startswith("sqlite"):
+            with self.connection as conn:
+                cursor = conn.cursor()
+                if collection_name:
+                    cursor.execute(f"SELECT COUNT(*) FROM {self.table_name} WHERE collection_name = ?", (collection_name,))
+                else:
+                    cursor.execute(f"SELECT COUNT(*) FROM {self.table_name}")
+                return cursor.fetchone()[0]
+        elif self.dburl.startswith("duckdb"):
+            conn = self.connection
+            if collection_name:
+                result = conn.sql(f"SELECT COUNT(*) FROM {self.table_name} WHERE collection_name = ?", params=[collection_name]).fetchone()
+            else:
+                result = conn.sql(f"SELECT COUNT(*) FROM {self.table_name}").fetchone()
+            return result[0]
+        else:
+            with Session(self.engine) as session:
+                if collection_name:
+                    statement = select(func.count()).select_from(self.embedding).where(self.embedding.collection_name == collection_name)
+                else:
+                    statement = select(func.count()).select_from(self.embedding)
+                return session.execute(statement).scalar()
+
+    def migrate_backend(
+        self,
+        target_backend: str,
+        collection_name: str = "",
+        batch_size: int = 1000,
+        dry_run: bool = False,
+        resume: bool = False,
+    ) -> dict:
+        target_dburl = self.resolve_target_dburl(target_backend)
+        source_backend = "postgresql"
+        if self.dburl.startswith("sqlite"):
+            source_backend = "sqlite"
+        elif self.dburl.startswith("duckdb"):
+            source_backend = "duckdb"
+
+        if source_backend == target_backend:
+            return {
+                "success": False,
+                "total": 0,
+                "migrated": 0,
+                "skipped": 0,
+                "errors": [f"Source and target are the same backend ({source_backend})"],
+                "source_backend": source_backend,
+                "target_backend": target_backend,
+                "source_dimension": 0,
+                "target_dimension": 0,
+                "message": "Cannot migrate to the same backend",
+            }
+
+        source_dim = self._detect_source_dimension()
+        total = self._count_source_records(collection_name)
+
+        logger.info(f"Starting migration: {source_backend} → {target_backend} ({total} records)")
+
+        target_embedder = DocEmbedder(
+            col_name="migration_temp",
+            dburl=target_dburl,
+            embedding_model=self.embedding_model,
+        )
+        target_dim = target_embedder._get_embedding_dimension()
+
+        if source_dim != target_dim:
+            return {
+                "success": False,
+                "total": total,
+                "migrated": 0,
+                "skipped": 0,
+                "errors": [f"Dimension mismatch: source has {source_dim}-dim vectors but target expects {target_dim}-dim. Use reembed --rechunk to change models first."],
+                "source_backend": source_backend,
+                "target_backend": target_backend,
+                "source_dimension": source_dim,
+                "target_dimension": target_dim,
+                "message": "Dimension mismatch — cannot migrate without re-embedding",
+            }
+
+        stats = {
+            "success": True,
+            "total": total,
+            "migrated": 0,
+            "skipped": 0,
+            "errors": [],
+            "source_backend": source_backend,
+            "target_backend": target_backend,
+            "source_dimension": source_dim,
+            "target_dimension": target_dim,
+            "message": "",
+        }
+
+        offset = 0
+        processed = 0
+
+        while offset < total:
+            batch = self._read_vectors_batch(offset, batch_size, collection_name)
+            if not batch:
+                break
+
+            for record in batch:
+                if resume and target_embedder._check_existing(record["doc_hash"]):
+                    stats["skipped"] += 1
+                    processed += 1
+                    continue
+
+                if not dry_run:
+                    try:
+                        target_embedder._insert_existing_vector(record)
+                        stats["migrated"] += 1
+                    except Exception as e:
+                        error_msg = f"Error migrating {record['doc_name']} page {record['page_number']}: {e}"
+                        logger.error(error_msg)
+                        stats["errors"].append(error_msg)
+                else:
+                    stats["migrated"] += 1
+
+                processed += 1
+
+            offset += batch_size
+            if processed % batch_size == 0 or processed >= total:
+                logger.info(f"Progress: {processed}/{total} records processed")
+
+        if not dry_run and stats["migrated"] > 0:
+            target_embedder._rebuild_fts()
+
+        stats["message"] = f"{'Would migrate' if dry_run else 'Migrated'} {stats['migrated']} records from {source_backend} to {target_backend}"
+        logger.info(stats["message"])
+        return stats
+
     def __del__(self):
         if self._connection:
             try:

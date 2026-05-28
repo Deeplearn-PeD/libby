@@ -128,6 +128,44 @@ class ModelInfoResponse(BaseModel):
     total_documents: int = Field(..., description="Total number of documents")
 
 
+class BackendInfo(BaseModel):
+    name: str = Field(..., description="Backend identifier: postgresql, duckdb, sqlite")
+    display_name: str = Field(..., description="Human-readable backend name")
+    is_current: bool = Field(..., description="Whether this is the active backend")
+    is_configured: bool = Field(..., description="Whether the backend URL/path is configured")
+    location: str = Field("", description="Safe display location (no credentials)")
+
+
+class BackendsResponse(BaseModel):
+    backends: list[BackendInfo] = Field(..., description="Available database backends")
+    current: str = Field(..., description="Name of the current active backend")
+
+
+class MigrateBackendRequest(BaseModel):
+    target_backend: str = Field(
+        ..., description="Target backend: postgresql, duckdb, or sqlite"
+    )
+    collection_name: str = Field(
+        "", description="Collection to migrate (empty for all)"
+    )
+    batch_size: int = Field(1000, ge=1, le=10000, description="Batch size for processing")
+    dry_run: bool = Field(False, description="Preview without making changes")
+    resume: bool = Field(False, description="Skip already-migrated records")
+
+
+class MigrateBackendResponse(BaseModel):
+    success: bool = Field(..., description="Whether the migration was successful")
+    total: int = Field(..., description="Total records to migrate")
+    migrated: int = Field(..., description="Number of records migrated")
+    skipped: int = Field(..., description="Number of records skipped (resume mode)")
+    errors: list[str] = Field(default_factory=list, description="List of errors encountered")
+    source_backend: str = Field(..., description="Source backend name")
+    target_backend: str = Field(..., description="Target backend name")
+    source_dimension: int = Field(..., description="Source embedding dimension")
+    target_dimension: int = Field(..., description="Target embedding dimension")
+    message: str = Field(..., description="Status message")
+
+
 # ── Wiki schemas ──
 
 

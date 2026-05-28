@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field, PostgresDsn
@@ -48,6 +49,21 @@ class Settings(BaseSettings):
     embed_db_url: str = Field(
         default_factory=lambda: f"sqlite:///{Path.home() / '.libby' / 'data' / 'embeddings.db'}",
         description="Database URL for embeddings",
+    )
+
+    target_postgres_url: str = Field(
+        default_factory=lambda: os.getenv("PGURL", ""),
+        description="Pre-configured PostgreSQL target URL for migration",
+    )
+
+    target_duckdb_path: str = Field(
+        default_factory=lambda: str(Path.home() / ".libby" / "data" / "embeddings.duckdb"),
+        description="Pre-configured DuckDB target path for migration",
+    )
+
+    target_sqlite_path: str = Field(
+        default_factory=lambda: str(Path.home() / ".libby" / "data" / "embeddings.db"),
+        description="Pre-configured SQLite target path for migration",
     )
 
     @property
