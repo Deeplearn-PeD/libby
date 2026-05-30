@@ -152,6 +152,7 @@ class DocEmbedder:
                     raise
 
                 self.embedding = Embedding
+                self.table_name = Embedding.__tablename__
 
         self.collection_name = col_name
 
@@ -186,7 +187,7 @@ class DocEmbedder:
 
         Returns ``None`` when the table is empty or the column is absent.
         """
-        table = self.table_name
+        table = getattr(self, "table_name", None)
         if not table:
             return None
         try:
