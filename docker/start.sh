@@ -16,11 +16,13 @@ for i in {1..30}; do
     sleep 1
 done
 
-# Pull the embedding model if specified
+# Pull embedding models
 EMBEDDING_MODEL=${EMBEDDING_MODEL:-mxbai-embed-large}
-echo "Ensuring embedding model is available: $EMBEDDING_MODEL"
-curl -s -X POST "$OLLAMA_HOST/api/pull" -d "{\"name\": \"$EMBEDDING_MODEL\"}" > /dev/null 2>&1 || \
-    echo "Warning: Could not pull embedding model. It may already exist or Ollama is unavailable."
+for model in "$EMBEDDING_MODEL" embeddinggemma; do
+    echo "Ensuring embedding model is available: $model"
+    curl -s -X POST "$OLLAMA_HOST/api/pull" -d "{\"name\": \"$model\"}" > /dev/null 2>&1 || \
+        echo "Warning: Could not pull embedding model '$model'. It may already exist or Ollama is unavailable."
+done
 
 echo "Starting Libby API server..."
 cd /app
