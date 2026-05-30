@@ -1745,7 +1745,7 @@ class DocEmbedder:
 
                 for ci, chunk_text in enumerate(chunks):
                     try:
-                        doc_hash = sha256(chunk_text.encode()).hexdigest()
+                        doc_hash = sha256(f"{doc_name}:{ci}:{chunk_text}".encode()).hexdigest()
                         chunk_text = chunk_text.replace("\x00", "\ufffd")
                         embedding = self._generate_embedding(chunk_text)
                         embedding_bytes = struct.pack(f"{len(embedding)}f", *embedding)
@@ -1834,7 +1834,7 @@ class DocEmbedder:
 
             for ci, chunk_text in enumerate(chunks):
                 try:
-                    doc_hash = sha256(chunk_text.encode()).hexdigest()
+                    doc_hash = sha256(f"{doc_name}:{ci}:{chunk_text}".encode()).hexdigest()
                     chunk_text = chunk_text.replace("\x00", "\ufffd")
                     embedding = self._generate_embedding(chunk_text)
                     embedding_str = "[" + ",".join(str(v) for v in embedding) + "]"
@@ -1915,7 +1915,7 @@ class DocEmbedder:
 
                 for ci, chunk_text in enumerate(chunks):
                     try:
-                        doc_hash = sha256(chunk_text.encode()).hexdigest()
+                        doc_hash = sha256(f"{doc_name}:{ci}:{chunk_text}".encode()).hexdigest()
                         chunk_text = chunk_text.replace("\x00", "\ufffd")
                         embedding = self._generate_embedding(chunk_text)
 
@@ -1929,10 +1929,14 @@ class DocEmbedder:
                             embedding=embedding,
                         )
                         session.add(doc_vector)
+                        session.flush()
 
                         total_new += 1
                         stats["updated"] += 1
 
+                    except IntegrityError:
+                        session.rollback()
+                        logger.warning(f"Skipping duplicate chunk {doc_name} chunk {ci}")
                     except Exception as e:
                         error_msg = f"Error re-chunking {doc_name} chunk {ci}: {e}"
                         logger.error(error_msg)
