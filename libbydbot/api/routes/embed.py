@@ -18,6 +18,7 @@ from libbydbot.api.schemas import (
     EmbedTextRequest,
     EmbedTextResponse,
     EmbedUploadResponse,
+    EmbeddingModelsResponse,
     MigrateBackendRequest,
     MigrateBackendResponse,
     ModelInfoResponse,
@@ -374,6 +375,24 @@ def list_backends(embedder: EmbedderDep):
     except Exception as e:
         logger.error(f"Error listing backends: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/models", response_model=EmbeddingModelsResponse)
+def list_embedding_models():
+    """List available embedding models and their configuration."""
+    from libbydbot.settings import Settings
+
+    settings = Settings()
+    models = [
+        {
+            "name": name,
+            "code": details["code"],
+            "is_default": details.get("is_default", False),
+        }
+        for name, details in settings.embedding_models.items()
+    ]
+    default_code = settings.default_embedding_model
+    return EmbeddingModelsResponse(models=models, default=default_code)
 
 
 @router.post("/migrate", response_model=MigrateBackendResponse)

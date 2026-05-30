@@ -279,6 +279,17 @@ class EmbedJobListResponse(BaseModel):
     failed: int = Field(0, description="Number of failed jobs")
 
 
+class EmbeddingModelInfo(BaseModel):
+    name: str = Field(..., description="Display name of the embedding model")
+    code: str = Field(..., description="Model identifier used for embedding")
+    is_default: bool = Field(False, description="Whether this is the default model")
+
+
+class EmbeddingModelsResponse(BaseModel):
+    models: list[EmbeddingModelInfo] = Field(..., description="Available embedding models")
+    default: str = Field(..., description="Default embedding model code")
+
+
 class WikiStatusResponse(BaseModel):
     collection: str = Field(..., description="Collection name")
     wiki_path: str = Field(..., description="Filesystem path to the wiki")
