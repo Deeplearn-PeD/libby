@@ -2265,6 +2265,294 @@ class DocEmbedder:
         else:
             raise ValueError(f"Unknown backend: {backend}. Choose from: postgresql, duckdb, sqlite")
 
+    def rollback_embedding(self, dry_run: bool = False) -> dict:
+        """
+        Rollback to the backup table created by a previous re-embed operation.
+
+        Only supported for DuckDB, where the backup table (``{table}_backup_reembed``)
+        is preserved after a dimension-changing re-embed.  SQLite drops its backup
+        after re-embed, and PostgreSQL does in-place updates — neither supports
+        rollback.
+
+        :param dry_run: If True, report what would be done without making changes.
+        :return: Dict with rollback status and statistics.
+        """
+        backup_table = f"{self.table_name}_backup_reembed"
+        backend = (
+            "duckdb" if self.dburl.startswith("duckdb")
+            else "sqlite" if self.dburl.startswith("sqlite")
+            else "postgresql"
+        )
+
+        result = {
+            "success": False,
+            "backend": backend,
+            "backup_table": backup_table,
+            "current_model": self.embedding_model,
+            "backup_model": "",
+            "backup_count": 0,
+            "current_count": 0,
+            "restored_count": 0,
+            "dry_run": dry_run,
+            "message": "",
+        }
+
+        # --- Only DuckDB currently preserves backup tables ---
+        if backend != "duckdb":
+            if backend == "sqlite":
+                result["message"] = (
+                    "SQLite does not preserve backup tables after re-embed. "
+                    "Rollback is not available."
+                )
+            else:
+                result["message"] = (
+                    "PostgreSQL re-embeds in-place without creating a backup table. "
+                    "Rollback is not available."
+                )
+            return result
+
+        conn = self.connection
+
+        # Check backup table exists
+        try:
+            backup_exists = conn.sql(
+                "SELECT COUNT(*) FROM information_schema.tables "
+                f"WHERE table_name = '{backup_table}'"
+            ).fetchone()[0] > 0
+        except Exception:
+            backup_exists = False
+
+        if not backup_exists:
+            result["message"] = (
+                f"Backup table '{backup_table}' does not exist. "
+                "No rollback backup is available."
+            )
+            return result
+
+        # Count rows
+        try:
+            result["current_count"] = conn.sql(
+                f"SELECT COUNT(*) FROM {self.table_name}"
+            ).fetchone()[0]
+        except Exception:
+            result["current_count"] = 0
+
+        try:
+            result["backup_count"] = conn.sql(
+                f"SELECT COUNT(*) FROM {backup_table}"
+            ).fetchone()[0]
+        except Exception as e:
+            result["message"] = f"Error reading backup table: {e}"
+            return result
+
+        if result["backup_count"] == 0:
+            result["message"] = (
+                f"Backup table '{backup_table}' exists but is empty. "
+                "Refusing to rollback."
+            )
+            return result
+
+        # Detect the embedding model stored in the backup
+        try:
+            row = conn.sql(
+                f"SELECT embedding_model FROM {backup_table} LIMIT 1"
+            ).fetchone()
+            if row:
+                result["backup_model"] = row[0] or "unknown"
+        except Exception:
+            result["backup_model"] = "unknown"
+
+        result["message"] = (
+            f"Backup table '{backup_table}' found with "
+            f"{result['backup_count']} records (current: {result['current_count']})."
+        )
+
+        if dry_run:
+            result["success"] = True
+            return result
+
+        # --- Perform the rollback ---
+        logger.info(
+            f"Rolling back: swapping {backup_table} -> {self.table_name} "
+            f"({result['backup_count']} records)"
+        )
+
+        try:
+            # Drop HNSW index on current main table
+            try:
+                conn.sql(f"DROP INDEX IF EXISTS {self.table_name}_index;")
+            except Exception:
+                pass
+
+            # Drop FTS-related tables for main table
+            for tbl in [
+                f"fts_main_{self.table_name}",
+                f"fts_data_{self.table_name}",
+                f"fts_stats_{self.table_name}",
+                f"fts_segments_{self.table_name}",
+                f"fts_lists_{self.table_name}",
+            ]:
+                try:
+                    conn.sql(f"DROP TABLE IF EXISTS {tbl};")
+                except Exception:
+                    pass
+
+            # Drop current main table
+            conn.sql(f"DROP TABLE IF EXISTS {self.table_name}")
+            logger.info(f"Dropped current table {self.table_name}")
+
+            # Rename backup to main
+            conn.sql(f"ALTER TABLE {backup_table} RENAME TO {self.table_name}")
+            logger.info(f"Renamed {backup_table} to {self.table_name}")
+
+            # Recreate FTS index
+            try:
+                conn.sql("INSTALL fts;")
+                conn.sql("LOAD fts;")
+                conn.sql(
+                    f"PRAGMA create_fts_index('{self.table_name}', 'id', 'document');"
+                )
+                logger.info("Created FTS index on restored table")
+            except Exception as e:
+                logger.warning(f"Could not create FTS index: {e}")
+
+            # Recreate HNSW index
+            try:
+                conn.sql("SET hnsw_enable_experimental_persistence = true;")
+                conn.sql(f"""
+                    CREATE INDEX {self.table_name}_index
+                    ON {self.table_name} USING HNSW(embedding)
+                    WITH (metric='cosine');
+                """)
+                logger.info("Created HNSW index on restored table")
+            except Exception as e:
+                logger.warning(
+                    f"Could not create HNSW index (OK for disk-based DBs): {e}"
+                )
+
+            # Update the embedder's model to match the backup
+            if result["backup_model"] and result["backup_model"] != "unknown":
+                self.embedding_model = result["backup_model"]
+                logger.info(
+                    f"Restored embedding model to '{result['backup_model']}'"
+                )
+
+            result["restored_count"] = conn.sql(
+                f"SELECT COUNT(*) FROM {self.table_name}"
+            ).fetchone()[0]
+            result["success"] = True
+            result["message"] = (
+                f"Rollback complete. Restored {result['restored_count']} records "
+                f"from backup. Embedding model set to '{result['backup_model']}'."
+            )
+
+        except Exception as e:
+            logger.error(f"Rollback failed: {e}")
+            result["message"] = f"Rollback failed: {e}"
+
+        return result
+
+    def list_backup_tables(self) -> list[dict]:
+        """
+        Discover backup embedding tables in the database.
+
+        Queries the database catalog for tables matching known backup
+        naming patterns (``%_backup%``) and returns metadata about each.
+        """
+        backups = []
+
+        if self.dburl.startswith("duckdb"):
+            conn = self.connection
+            rows = conn.sql(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = 'main' "
+                "AND table_name LIKE '%\\_backup%' ESCAPE '\\'"
+            ).fetchall()
+            for (tbl,) in rows:
+                if tbl == self.table_name:
+                    continue
+                count = conn.sql(
+                    f"SELECT COUNT(*) FROM {tbl}"
+                ).fetchone()[0]
+                model = ""
+                try:
+                    row = conn.sql(
+                        f"SELECT embedding_model FROM {tbl} LIMIT 1"
+                    ).fetchone()
+                    if row:
+                        model = row[0] or ""
+                except Exception:
+                    pass
+                backups.append({
+                    "table_name": tbl,
+                    "row_count": count,
+                    "embedding_model": model,
+                })
+
+        elif self.dburl.startswith("sqlite"):
+            conn = self.connection
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'table' AND name LIKE '%_backup%'"
+            )
+            for (tbl,) in cursor.fetchall():
+                if tbl == self.table_name:
+                    continue
+                cursor.execute(f"SELECT COUNT(*) FROM \"{tbl}\"")
+                count = cursor.fetchone()[0]
+                model = ""
+                try:
+                    cursor.execute(
+                        f"SELECT embedding_model FROM \"{tbl}\" LIMIT 1"
+                    )
+                    row = cursor.fetchone()
+                    if row:
+                        model = row[0] or ""
+                except Exception:
+                    pass
+                backups.append({
+                    "table_name": tbl,
+                    "row_count": count,
+                    "embedding_model": model,
+                })
+
+        else:
+            # PostgreSQL
+            engine = self.engine
+            with engine.connect() as conn:
+                result = conn.execute(
+                    text(
+                        "SELECT table_name FROM information_schema.tables "
+                        "WHERE table_schema = 'public' "
+                        "AND table_name LIKE '%\\_backup%'"
+                    )
+                )
+                for (tbl,) in result:
+                    if tbl == self.table_name:
+                        continue
+                    count = conn.execute(
+                        text(f"SELECT COUNT(*) FROM \"{tbl}\"")
+                    ).scalar() or 0
+                    model = ""
+                    try:
+                        row = conn.execute(
+                            text(
+                                f"SELECT embedding_model FROM \"{tbl}\" LIMIT 1"
+                            )
+                        ).fetchone()
+                        if row:
+                            model = row[0] or ""
+                    except Exception:
+                        pass
+                    backups.append({
+                        "table_name": tbl,
+                        "row_count": count,
+                        "embedding_model": model,
+                    })
+
+        return backups
+
     def list_backends(self) -> list[dict]:
         from libbydbot.settings import Settings
         settings = Settings()

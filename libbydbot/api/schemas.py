@@ -290,6 +290,35 @@ class EmbeddingModelsResponse(BaseModel):
     default: str = Field(..., description="Default embedding model code")
 
 
+class RollbackResponse(BaseModel):
+    success: bool = Field(..., description="Whether the rollback succeeded")
+    message: str = Field(..., description="Status message")
+    backend: str = Field(..., description="Database backend")
+    backup_table: str | None = Field(None, description="Name of the backup table used")
+    current_model: str = Field("", description="Current embedding model before rollback")
+    backup_model: str = Field("", description="Embedding model stored in backup")
+    backup_count: int = Field(0, description="Number of records in backup table")
+    current_count: int = Field(0, description="Number of records in current table")
+    restored_count: int = Field(0, description="Number of records restored")
+    dry_run: bool = Field(False, description="Whether this was a dry run")
+
+
+class BackupTableInfo(BaseModel):
+    table_name: str = Field(..., description="Name of the backup table")
+    row_count: int = Field(..., description="Number of records in the table")
+    embedding_model: str = Field("", description="Embedding model used in the table")
+    size_bytes: int | None = Field(None, description="Estimated table size in bytes")
+    created_at: str | None = Field(None, description="Approximate creation time")
+
+
+class BackupTablesResponse(BaseModel):
+    backups: list[BackupTableInfo] = Field(..., description="Available backup tables")
+    current_table: str = Field(..., description="Name of the active embedding table")
+    current_count: int = Field(0, description="Number of records in the active table")
+    current_model: str = Field("", description="Active embedding model")
+    total_backups: int = Field(0, description="Total number of backup tables found")
+
+
 class WikiStatusResponse(BaseModel):
     collection: str = Field(..., description="Collection name")
     wiki_path: str = Field(..., description="Filesystem path to the wiki")

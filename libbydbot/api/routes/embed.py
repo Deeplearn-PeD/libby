@@ -12,6 +12,7 @@ from loguru import logger
 
 from libbydbot.api.schemas import (
     BackendsResponse,
+    BackupTablesResponse,
     EmbedJobAccepted,
     EmbedJobListResponse,
     EmbedJobStatus,
@@ -24,6 +25,7 @@ from libbydbot.api.schemas import (
     ModelInfoResponse,
     ReembedRequest,
     ReembedResponse,
+    RollbackResponse,
 )
 from libbydbot.brain.embed import DocEmbedder
 
@@ -393,6 +395,65 @@ def list_embedding_models():
     ]
     default_code = settings.default_embedding_model
     return EmbeddingModelsResponse(models=models, default=default_code)
+
+
+@router.get("/backups", response_model=BackupTablesResponse)
+def list_backup_tables(embedder: EmbedderDep):
+    """List all backup embedding tables found in the database."""
+    try:
+        backups_raw = embedder.list_backup_tables()
+        current_count = 0
+        try:
+            if embedder.dburl.startswith(("duckdb", "sqlite")):
+                current_count = embedder.connection.execute(
+                    f"SELECT COUNT(*) FROM {embedder.table_name}"
+                ).fetchone()[0]
+            else:
+                from sqlalchemy import text as sa_text
+                with embedder.engine.connect() as conn:
+                    current_count = conn.execute(
+                        sa_text(f"SELECT COUNT(*) FROM {embedder.table_name}")
+                    ).scalar() or 0
+        except Exception:
+            pass
+        return BackupTablesResponse(
+            backups=backups_raw,
+            current_table=embedder.table_name,
+            current_count=current_count,
+            current_model=embedder.embedding_model,
+            total_backups=len(backups_raw),
+        )
+    except Exception as e:
+        logger.error(f"Error listing backup tables: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/rollback", response_model=RollbackResponse)
+def rollback_embedding(embedder: EmbedderDep, dry_run: bool = False):
+    """
+    Rollback to the backup table created by a previous re-embed operation.
+
+    Only supported for DuckDB, where the backup table is preserved. Use
+    ``dry_run=true`` to preview without making changes.
+    """
+    try:
+        result = embedder.rollback_embedding(dry_run=dry_run)
+
+        return RollbackResponse(
+            success=result["success"],
+            message=result["message"],
+            backend=result["backend"],
+            backup_table=result.get("backup_table"),
+            current_model=result.get("current_model", ""),
+            backup_model=result.get("backup_model", ""),
+            backup_count=result.get("backup_count", 0),
+            current_count=result.get("current_count", 0),
+            restored_count=result.get("restored_count", 0),
+            dry_run=result.get("dry_run", dry_run),
+        )
+    except Exception as e:
+        logger.error(f"Error during rollback: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/migrate", response_model=MigrateBackendResponse)
