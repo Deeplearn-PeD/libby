@@ -175,6 +175,69 @@ class DocEmbedder:
         else:
             logger.info("Embedding tables already exist, skipping creation")
 
+        # Detect the actual embedding model from the database — this overrides
+        # any env-var / hardcoded default with the model that was actually
+        # used when the existing embeddings were created.
+        self._apply_embedding_model_from_db()
+
+    def _detect_embedding_model_from_db(self) -> str | None:
+        """
+        Query the database for the most common ``embedding_model`` value.
+
+        Returns ``None`` when the table is empty or the column is absent.
+        """
+        table = self.table_name
+        if not table:
+            return None
+        try:
+            if self.dburl.startswith("sqlite"):
+                cur = self.connection.cursor()
+                cur.execute(
+                    f"SELECT embedding_model, COUNT(*) AS cnt FROM \"{table}\" "
+                    "WHERE embedding_model IS NOT NULL AND embedding_model != '' "
+                    "GROUP BY embedding_model ORDER BY cnt DESC LIMIT 1"
+                )
+                row = cur.fetchone()
+                return row[0] if row else None
+
+            elif self.dburl.startswith("duckdb"):
+                row = self.connection.sql(
+                    f"SELECT embedding_model, COUNT(*) AS cnt FROM {table} "
+                    "WHERE embedding_model IS NOT NULL AND embedding_model != '' "
+                    "GROUP BY embedding_model ORDER BY cnt DESC LIMIT 1"
+                ).fetchone()
+                return row[0] if row else None
+
+            else:
+                with Session(self.engine) as session:
+                    row = session.execute(
+                        text(
+                            f"SELECT embedding_model, COUNT(*) AS cnt FROM {table} "
+                            "WHERE embedding_model IS NOT NULL AND embedding_model != '' "
+                            "GROUP BY embedding_model ORDER BY cnt DESC LIMIT 1"
+                        )
+                    ).fetchone()
+                    return row[0] if row else None
+        except Exception:
+            return None
+
+    def _apply_embedding_model_from_db(self):
+        """Override ``self.embedding_model`` with the model stored in the database."""
+        detected = self._detect_embedding_model_from_db()
+        if detected and detected != self.embedding_model:
+            logger.info(
+                f"Detected embedding model '{detected}' from database "
+                f"(was '{self.embedding_model}') — applying detected model."
+            )
+            self.embedding_model = detected
+            # Reconfigure client for the detected model
+            if "gemini" in detected.lower():
+                self.client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+            else:
+                self.client = ollama.Client(
+                    host=os.getenv("OLLAMA_HOST", "http://localhost:11434")
+                )
+
     def _init_duckdb(self):
         """
         Initialize DuckDB: install vss extension, create table if not exists,
