@@ -26,8 +26,8 @@ class Settings(BaseSettings):
     }
 
     embedding_models: Dict[str, Dict[str, Any]] = {
-        "GemmaEmbedding": {"code": "embeddinggemma"},
-        "Mxbai": {"code": "mxbai-embed-large", "is_default": True},
+        "GemmaEmbedding": {"code": "embeddinggemma", "is_default": True},
+        "Mxbai": {"code": "mxbai-embed-large"},
         "Gemini": {"code": "gemini-embedding-001"},
     }
 
