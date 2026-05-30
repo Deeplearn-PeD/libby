@@ -425,13 +425,23 @@ class DocEmbedder:
         """Detect the actual embedding dimension of the existing table column."""
         try:
             if self.dburl.startswith("sqlite"):
+                import re
                 cur = self.connection.cursor()
                 cur.execute(f"PRAGMA table_info({self.table_name})")
                 for col in cur.fetchall():
                     if col[1] == "embedding":
-                        import re
                         m = re.search(r"float\[(\d+)\]", col[2].lower())
-                        return int(m.group(1)) if m else None
+                        if m:
+                            return int(m.group(1))
+                # vec0 virtual tables store types in the CREATE statement
+                row = cur.execute(
+                    f"SELECT sql FROM sqlite_master WHERE type='table' AND name='{self.table_name}'"
+                ).fetchone()
+                if row:
+                    m = re.search(r"float\[(\d+)\]", row[0].lower())
+                    if m:
+                        return int(m.group(1))
+                return None
             elif self.dburl.startswith("duckdb"):
                 row = self.connection.sql(
                     f"SELECT data_type FROM information_schema.columns "
@@ -457,21 +467,98 @@ class DocEmbedder:
             pass
         return None
 
-    def _validate_reembed_dimension(self):
-        """Raise ``ValueError`` if the new model's dimension doesn't match the table."""
+    def _target_table_for_dimension(self, new_dim: int | None = None) -> str:
+        """
+        Return the table name to use for a given embedding dimension.
+
+        If the dimension matches the existing table, returns ``self.table_name``.
+        Otherwise creates (or reuses) a dimension-specific table
+        ``{table_name}_{dim}`` and returns that name.
+        """
+        if new_dim is None:
+            new_dim = self._get_embedding_dimension()
         table_dim = self._get_table_embedding_dimension()
-        if table_dim is None:
-            return
-        new_dim = self._get_embedding_dimension()
-        if new_dim != table_dim:
-            raise ValueError(
-                f"Model '{self.embedding_model}' produces {new_dim}-dimension embeddings, "
-                f"but the database table '{self.table_name}' has a {table_dim}-dimension "
-                f"column. Re-embedding into the same table with a different dimension "
-                f"is not supported for this backend. "
-                f"Use a model with {table_dim} dimensions (e.g. 'mxbai-embed-large' "
-                f"for 1024) or migrate to a new database."
+        if table_dim is not None and new_dim == table_dim:
+            return self.table_name
+
+        target = f"{self.table_name}_{new_dim}"
+        logger.info(f"Dimension mismatch: table has {table_dim}, model produces {new_dim}. Using table '{target}'")
+
+        # Create the dimension-specific table if it doesn't exist
+        if self.dburl.startswith("sqlite"):
+            self._create_sqlite_table_for_dim(target, new_dim)
+        elif self.dburl.startswith("duckdb"):
+            self._create_duckdb_table_for_dim(target, new_dim)
+        else:
+            self._create_postgres_table_for_dim(target, new_dim)
+        return target
+
+    def _create_postgres_table_for_dim(self, table_name: str, dimension: int):
+        """Create a PostgreSQL embedding table with a specific vector dimension."""
+        with self.engine.connect() as conn:
+            conn.execute(text(f"""
+                CREATE TABLE IF NOT EXISTS {table_name} (
+                    id SERIAL PRIMARY KEY,
+                    collection_name TEXT,
+                    doc_name TEXT,
+                    page_number INTEGER,
+                    doc_hash TEXT UNIQUE,
+                    document TEXT,
+                    embedding_model TEXT DEFAULT 'unknown',
+                    embedding VECTOR({dimension})
+                )
+            """))
+            conn.commit()
+        logger.info(f"Created PostgreSQL table '{table_name}' with VECTOR({dimension})")
+
+    def _create_sqlite_table_for_dim(self, table_name: str, dimension: int):
+        """Create a SQLite embedding table (vec0) with a specific dimension."""
+        conn = self.connection
+        cursor = conn.cursor()
+        cursor.execute(f"""
+            CREATE VIRTUAL TABLE IF NOT EXISTS {table_name} USING vec0(
+                collection_name TEXT,
+                doc_name TEXT,
+                page_number INTEGER,
+                doc_hash TEXT,
+                document TEXT,
+                embedding_model TEXT,
+                embedding float[{dimension}]
             )
+        """)
+        cursor.execute(f"""
+            CREATE VIRTUAL TABLE IF NOT EXISTS {table_name}_fts USING fts5(
+                document,
+                doc_hash UNINDEXED,
+                content='{table_name}',
+                content_rowid='rowid'
+            )
+        """)
+        conn.commit()
+        logger.info(f"Created SQLite table '{table_name}' with float[{dimension}]")
+
+    def _create_duckdb_table_for_dim(self, table_name: str, dimension: int):
+        """Create a DuckDB embedding table with a specific dimension."""
+        conn = self.connection
+        conn.sql(f"DROP TABLE IF EXISTS {table_name}")
+        conn.sql(f"CREATE SEQUENCE IF NOT EXISTS {table_name}_seq;")
+        conn.sql(f"""
+            CREATE TABLE {table_name} (
+                id INTEGER PRIMARY KEY DEFAULT nextval('{table_name}_seq'),
+                collection_name TEXT,
+                doc_name TEXT,
+                page_number INTEGER,
+                doc_hash TEXT UNIQUE,
+                document TEXT,
+                embedding_model TEXT DEFAULT 'embeddinggemma',
+                embedding FLOAT[{dimension}]
+            )
+        """)
+        conn.sql("INSTALL fts;")
+        conn.sql("LOAD fts;")
+        conn.sql(f"PRAGMA create_fts_index('{table_name}', 'id', 'document');")
+        conn.sql(f"CREATE INDEX IF NOT EXISTS {table_name}_index ON {table_name} USING HNSW(embedding) WITH (metric='cosine');")
+        logger.info(f"Created DuckDB table '{table_name}' with FLOAT[{dimension}]")
 
     def _generate_embedding(self, text: str):
         """
@@ -1671,50 +1758,92 @@ class DocEmbedder:
     ) -> dict:
         """
         Re-embed documents in PostgreSQL.
+
+        If the new model's embedding dimension differs from the existing table
+        column, a new dimension-specific table is created, data is migrated,
+        and the tables are swapped (old → backup, new → active).
         """
-        self._validate_reembed_dimension()
+        new_dim = self._get_embedding_dimension()
+        target_table = self._target_table_for_dimension(new_dim)
+        dimension_changed = target_table != self.table_name
+        source_table = self.table_name
+
         with Session(self.engine) as session:
             # Get all documents
-            if collection_name:
-                statement = select(self.embedding).where(
-                    self.embedding.collection_name == collection_name
-                )
+            if dimension_changed:
+                rows = session.execute(
+                    text(
+                        f"SELECT collection_name, doc_name, page_number, doc_hash, document "
+                        f"FROM {source_table}"
+                        + (f" WHERE collection_name = :col" if collection_name else "")
+                    ),
+                    {"col": collection_name} if collection_name else {},
+                ).fetchall()
             else:
-                statement = select(self.embedding)
+                stmt = select(self.embedding)
+                if collection_name:
+                    stmt = stmt.where(self.embedding.collection_name == collection_name)
+                rows = [
+                    (d.collection_name, d.doc_name, d.page_number, d.doc_hash, d.document)
+                    for d in session.execute(stmt).scalars().all()
+                ]
 
-            documents = session.execute(statement).scalars().all()
-            stats["total"] = len(documents)
-
-            if len(documents) == 0:
+            stats["total"] = len(rows)
+            if not rows:
                 logger.info("No documents to re-embed")
                 return stats
 
-            # Process documents
-            for i, doc in enumerate(documents):
+            for i, (col_name, doc_name, page_num, doc_hash, document) in enumerate(rows):
                 try:
-                    # Generate new embedding
-                    embedding = self._generate_embedding(doc.document)
+                    embedding = self._generate_embedding(document)
 
-                    # Update the record
-                    doc.embedding = embedding
-                    doc.embedding_model = self.embedding_model
+                    if not dimension_changed:
+                        session.execute(
+                            text(f"""
+                                UPDATE {source_table}
+                                SET embedding = :embedding, embedding_model = :model
+                                WHERE doc_hash = :hash
+                            """),
+                            {"embedding": embedding, "model": self.embedding_model, "hash": doc_hash},
+                        )
+                    else:
+                        session.execute(
+                            text(f"""
+                                INSERT INTO {target_table}
+                                (collection_name, doc_name, page_number, doc_hash, document, embedding_model, embedding)
+                                VALUES (:col, :doc, :page, :hash, :text, :model, :embedding)
+                            """),
+                            {
+                                "col": col_name, "doc": doc_name, "page": page_num,
+                                "hash": doc_hash, "text": document,
+                                "model": self.embedding_model, "embedding": embedding,
+                            },
+                        )
 
                     stats["updated"] += 1
-
-                    # Progress reporting and commit in batches
-                    if (i + 1) % batch_size == 0 or (i + 1) == len(documents):
+                    if (i + 1) % batch_size == 0 or (i + 1) == len(rows):
                         session.commit()
-                        logger.info(
-                            f"Progress: {i + 1}/{len(documents)} documents re-embedded"
-                        )
+                        logger.info(f"Progress: {i + 1}/{len(rows)} documents re-embedded")
 
                 except Exception as e:
                     session.rollback()
-                    error_msg = (
-                        f"Error re-embedding {doc.doc_name} page {doc.page_number}: {e}"
-                    )
+                    error_msg = f"Error re-embedding {doc_name} page {page_num}: {e}"
                     logger.error(error_msg)
                     stats["errors"].append(error_msg)
+
+            session.commit()
+
+        if dimension_changed:
+            # Swap tables outside the session to avoid stale model references
+            with Session(self.engine) as swap_session:
+                backup_table = f"{source_table}_backup_reembed"
+                swap_session.execute(text(f"DROP TABLE IF EXISTS {backup_table}"))
+                swap_session.execute(text(f"ALTER TABLE {source_table} RENAME TO {backup_table}"))
+                swap_session.execute(text(f"ALTER TABLE {target_table} RENAME TO {source_table}"))
+                swap_session.commit()
+            self.table_name = source_table
+            stats["backup_table"] = backup_table
+            logger.info(f"Swapped tables: {source_table} ← {target_table}, backed up as {backup_table}")
 
         logger.info(
             f"PostgreSQL re-embedding complete: {stats['updated']}/{stats['total']} documents updated"
@@ -1756,9 +1885,11 @@ class DocEmbedder:
         stats: dict,
     ) -> dict:
         import struct
-        self._validate_reembed_dimension()
         from libbydbot.brain.ingest import TextSplitter
 
+        new_dim = self._get_embedding_dimension()
+        target_table = self._target_table_for_dimension(new_dim)
+        target_fts = f"{target_table}_fts"
         splitter = TextSplitter(chunk_size=new_chunk_size, chunk_overlap=new_chunk_overlap)
 
         with self.connection as conn:
@@ -1789,7 +1920,6 @@ class DocEmbedder:
                 if col_name not in shadow_map:
                     shadow_map[col_name] = col_name + shadow_suffix
 
-            dimension = self._get_embedding_dimension()
             total_new = 0
             processed = 0
 
@@ -1806,14 +1936,14 @@ class DocEmbedder:
 
                         cursor.execute(
                             f"""
-                            INSERT INTO {self.table_name} (collection_name, doc_name, page_number, doc_hash, document, embedding_model, embedding)
+                            INSERT INTO {target_table} (collection_name, doc_name, page_number, doc_hash, document, embedding_model, embedding)
                             VALUES (?, ?, ?, ?, ?, ?, ?)
                             """,
                             (shadow_col, doc_name, ci, doc_hash, chunk_text, self.embedding_model, embedding_bytes),
                         )
 
                         cursor.execute(
-                            f"INSERT INTO {self.table_name}_fts(rowid, document, doc_hash) VALUES (?, ?, ?)",
+                            f"INSERT INTO {target_fts}(rowid, document, doc_hash) VALUES (?, ?, ?)",
                             (cursor.lastrowid, chunk_text, doc_hash),
                         )
 
@@ -1834,8 +1964,11 @@ class DocEmbedder:
 
             stats["total_new_chunks"] = total_new
             stats["shadow_collection"] = shadow_map.get(collection_name, "")
+            if target_table != self.table_name:
+                stats["shadow_table"] = target_table
             logger.info(
                 f"SQLite re-chunk complete: {stats['total_old_chunks']} old → {total_new} new chunks"
+                + (f" (into table '{target_table}')" if target_table != self.table_name else "")
             )
 
         return stats
@@ -1848,12 +1981,12 @@ class DocEmbedder:
         batch_size: int,
         stats: dict,
     ) -> dict:
-        self._validate_reembed_dimension()
         from libbydbot.brain.ingest import TextSplitter
 
+        new_dim = self._get_embedding_dimension()
+        target_table = self._target_table_for_dimension(new_dim)
         splitter = TextSplitter(chunk_size=new_chunk_size, chunk_overlap=new_chunk_overlap)
         conn = self.connection
-        dimension = self._get_embedding_dimension()
 
         if collection_name:
             result = conn.sql(
@@ -1896,7 +2029,7 @@ class DocEmbedder:
 
                     conn.sql(
                         f"""
-                        INSERT INTO {self.table_name} (collection_name, doc_name, page_number, doc_hash, document, embedding_model, embedding)
+                        INSERT INTO {target_table} (collection_name, doc_name, page_number, doc_hash, document, embedding_model, embedding)
                         VALUES (?, ?, ?, ?, ?, ?, ?)
                         """,
                         params=[shadow_col, doc_name, ci, doc_hash, chunk_text, self.embedding_model, embedding_str],
@@ -1916,6 +2049,8 @@ class DocEmbedder:
 
         stats["total_new_chunks"] = total_new
         stats["shadow_collection"] = shadow_map.get(collection_name, "")
+        if target_table != self.table_name:
+            stats["shadow_table"] = target_table
         logger.info(
             f"DuckDB re-chunk complete: {stats['total_old_chunks']} old → {total_new} new chunks"
         )
@@ -1930,20 +2065,22 @@ class DocEmbedder:
         batch_size: int,
         stats: dict,
     ) -> dict:
-        self._validate_reembed_dimension()
         from libbydbot.brain.ingest import TextSplitter
 
+        new_dim = self._get_embedding_dimension()
+        target_table = self._target_table_for_dimension(new_dim)
         splitter = TextSplitter(chunk_size=new_chunk_size, chunk_overlap=new_chunk_overlap)
 
         with Session(self.engine) as session:
+            # Fetch source documents
             if collection_name:
-                statement = select(self.embedding).where(
+                stmt = select(self.embedding).where(
                     self.embedding.collection_name == collection_name
                 )
             else:
-                statement = select(self.embedding)
+                stmt = select(self.embedding)
 
-            documents = session.execute(statement).scalars().all()
+            documents = session.execute(stmt).scalars().all()
             stats["total_old_chunks"] = len(documents)
 
             if not documents:
@@ -1975,17 +2112,18 @@ class DocEmbedder:
                         chunk_text = chunk_text.replace("\x00", "\ufffd")
                         embedding = self._generate_embedding(chunk_text)
 
-                        doc_vector = self.embedding(
-                            collection_name=shadow_col,
-                            doc_name=doc_name,
-                            page_number=ci,
-                            doc_hash=doc_hash,
-                            document=chunk_text,
-                            embedding_model=self.embedding_model,
-                            embedding=embedding,
+                        session.execute(
+                            text(f"""
+                                INSERT INTO {target_table}
+                                (collection_name, doc_name, page_number, doc_hash, document, embedding_model, embedding)
+                                VALUES (:col, :doc, :page, :hash, :text, :model, :embedding)
+                            """),
+                            {
+                                "col": shadow_col, "doc": doc_name, "page": ci,
+                                "hash": doc_hash, "text": chunk_text,
+                                "model": self.embedding_model, "embedding": embedding,
+                            },
                         )
-                        session.add(doc_vector)
-                        session.flush()
 
                         total_new += 1
                         stats["updated"] += 1
@@ -2007,8 +2145,11 @@ class DocEmbedder:
 
             stats["total_new_chunks"] = total_new
             stats["shadow_collection"] = shadow_map.get(collection_name, "")
+            if target_table != self.table_name:
+                stats["shadow_table"] = target_table
             logger.info(
                 f"PostgreSQL re-chunk complete: {stats['total_old_chunks']} old → {total_new} new chunks"
+                + (f" (into table '{target_table}')" if target_table != self.table_name else "")
             )
 
         return stats
