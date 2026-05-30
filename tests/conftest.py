@@ -5,11 +5,10 @@ import numpy as np
 
 @pytest.fixture(autouse=True)
 def mock_embeddings():
-    # Mocking Ollama/Gemini embeddings globally
-    # Default model is embeddinggemma (768 dims); override in specific test files as needed
     with patch("libbydbot.brain.embed.DocEmbedder._generate_embedding") as mocked:
-        mocked.return_value = np.zeros(1024).tolist()
-        yield mocked
+        with patch("libbydbot.brain.embed.DocEmbedder._get_embedding_dimension", return_value=1024):
+            mocked.return_value = np.zeros(1024).tolist()
+            yield mocked
 
 
 @pytest.fixture(autouse=True, scope="session")

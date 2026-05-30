@@ -421,6 +421,58 @@ class DocEmbedder:
         else:  # mxbai-embed-large and other Ollama models
             return 1024
 
+    def _get_table_embedding_dimension(self) -> int | None:
+        """Detect the actual embedding dimension of the existing table column."""
+        try:
+            if self.dburl.startswith("sqlite"):
+                cur = self.connection.cursor()
+                cur.execute(f"PRAGMA table_info({self.table_name})")
+                for col in cur.fetchall():
+                    if col[1] == "embedding":
+                        import re
+                        m = re.search(r"float\[(\d+)\]", col[2].lower())
+                        return int(m.group(1)) if m else None
+            elif self.dburl.startswith("duckdb"):
+                row = self.connection.sql(
+                    f"SELECT data_type FROM information_schema.columns "
+                    f"WHERE table_name = '{self.table_name}' AND column_name = 'embedding'"
+                ).fetchone()
+                if row:
+                    import re
+                    m = re.search(r"FLOAT\[(\d+)\]", row[0])
+                    return int(m.group(1)) if m else None
+            else:
+                with self.engine.connect() as conn:
+                    row = conn.execute(
+                        text(
+                            "SELECT data_type FROM information_schema.columns "
+                            "WHERE table_name = 'embedding' AND column_name = 'embedding'"
+                        )
+                    ).fetchone()
+                    if row:
+                        import re
+                        m = re.search(r"vector\((\d+)\)", row[0].lower())
+                        return int(m.group(1)) if m else None
+        except Exception:
+            pass
+        return None
+
+    def _validate_reembed_dimension(self):
+        """Raise ``ValueError`` if the new model's dimension doesn't match the table."""
+        table_dim = self._get_table_embedding_dimension()
+        if table_dim is None:
+            return
+        new_dim = self._get_embedding_dimension()
+        if new_dim != table_dim:
+            raise ValueError(
+                f"Model '{self.embedding_model}' produces {new_dim}-dimension embeddings, "
+                f"but the database table '{self.table_name}' has a {table_dim}-dimension "
+                f"column. Re-embedding into the same table with a different dimension "
+                f"is not supported for this backend. "
+                f"Use a model with {table_dim} dimensions (e.g. 'mxbai-embed-large' "
+                f"for 1024) or migrate to a new database."
+            )
+
     def _generate_embedding(self, text: str):
         """
         Generate embedding using the specified model
@@ -1620,6 +1672,7 @@ class DocEmbedder:
         """
         Re-embed documents in PostgreSQL.
         """
+        self._validate_reembed_dimension()
         with Session(self.engine) as session:
             # Get all documents
             if collection_name:
@@ -1703,6 +1756,7 @@ class DocEmbedder:
         stats: dict,
     ) -> dict:
         import struct
+        self._validate_reembed_dimension()
         from libbydbot.brain.ingest import TextSplitter
 
         splitter = TextSplitter(chunk_size=new_chunk_size, chunk_overlap=new_chunk_overlap)
@@ -1794,6 +1848,7 @@ class DocEmbedder:
         batch_size: int,
         stats: dict,
     ) -> dict:
+        self._validate_reembed_dimension()
         from libbydbot.brain.ingest import TextSplitter
 
         splitter = TextSplitter(chunk_size=new_chunk_size, chunk_overlap=new_chunk_overlap)
@@ -1875,6 +1930,7 @@ class DocEmbedder:
         batch_size: int,
         stats: dict,
     ) -> dict:
+        self._validate_reembed_dimension()
         from libbydbot.brain.ingest import TextSplitter
 
         splitter = TextSplitter(chunk_size=new_chunk_size, chunk_overlap=new_chunk_overlap)
