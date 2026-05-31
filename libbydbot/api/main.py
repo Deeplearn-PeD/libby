@@ -52,6 +52,13 @@ async def lifespan(app: FastAPI):
 
     app_state.embedder = embedder
 
+    try:
+        migration_result = embedder.migrate_compound_unique()
+        for change in migration_result.get("changes", []):
+            logger.info(f"Schema migration: {change}")
+    except Exception as e:
+        logger.warning(f"Schema migration check failed (non-fatal): {e}")
+
     logger.info("DocEmbedder initialized successfully")
 
     yield
