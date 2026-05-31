@@ -554,6 +554,7 @@ def verify_embeddings(request: VerifyRequest, embedder: EmbedderDep):
             collection_name=request.collection_name,
             dry_run=request.dry_run,
             checks=request.checks,
+            auto_finalize=request.auto_finalize,
         )
         return VerifyResponse(
             collection=result["collection"],
@@ -562,6 +563,7 @@ def verify_embeddings(request: VerifyRequest, embedder: EmbedderDep):
             checks=result["checks"],
             summary=result["summary"],
             errors=result.get("errors", []),
+            finalized=result.get("finalized", []),
         )
     except Exception as e:
         logger.error(f"Error verifying embeddings: {e}")

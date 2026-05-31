@@ -3086,6 +3086,7 @@ class DocEmbedder:
         collection_name: str = "",
         dry_run: bool = True,
         checks: list[str] | None = None,
+        auto_finalize: bool = False,
     ) -> dict:
         """
         Verify embedding data integrity and optionally fix issues.
@@ -3093,6 +3094,7 @@ class DocEmbedder:
         :param collection_name: Collection to verify (empty = all)
         :param dry_run: Preview only, do not apply fixes
         :param checks: Specific checks to run (None = all)
+        :param auto_finalize: If True, finalize any orphaned shadow collections found
         :return: Verification report
         """
         ALL_CHECKS = [
@@ -3118,6 +3120,7 @@ class DocEmbedder:
             "checks": [],
             "summary": {"errors": 0, "warnings": 0, "info": 0, "fixes_applied": 0},
             "errors": [],
+            "finalized": [],
         }
 
         col_filter_sql = f"WHERE collection_name = '{collection_name}'" if collection_name else ""
@@ -3142,7 +3145,48 @@ class DocEmbedder:
                 result["errors"].append(f"{check_name}: {e}")
                 logger.error(f"Verify check '{check_name}' failed: {e}")
 
+        if auto_finalize and not dry_run:
+            result["finalized"] = self._finalize_orphaned_shadows()
+
         return result
+
+    def _finalize_orphaned_shadows(self) -> list[dict]:
+        """Find and finalize all orphaned shadow collections across all tables."""
+        finalized = []
+        tables = self._get_all_embedding_tables()
+
+        for tbl in tables:
+            if "_backup" in tbl or tbl.endswith("_fts"):
+                continue
+            try:
+                rows = self._verify_query(tbl,
+                    f"SELECT DISTINCT collection_name FROM {tbl} WHERE collection_name LIKE '%_v2'"
+                )
+                shadows = [r[0] for r in rows]
+            except Exception:
+                continue
+
+            for shadow in shadows:
+                original = shadow[:-3]
+                shadow_table = tbl if tbl != self.table_name else None
+                logger.info(f"Auto-finalizing shadow '{shadow}' -> '{original}' in table '{tbl}'")
+                try:
+                    stats = self.finalize_rechunk(
+                        collection_name=original,
+                        shadow_collection=shadow,
+                        shadow_table=shadow_table,
+                    )
+                    finalized.append(stats)
+                except Exception as e:
+                    logger.error(f"Failed to finalize '{shadow}': {e}")
+                    finalized.append({
+                        "success": False,
+                        "collection": original,
+                        "shadow_collection": shadow,
+                        "errors": [str(e)],
+                    })
+
+        return finalized
 
     def _verify_query(self, tbl: str, sql: str) -> list[tuple]:
         if self.dburl.startswith("sqlite"):
