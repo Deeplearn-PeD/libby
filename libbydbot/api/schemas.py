@@ -119,6 +119,7 @@ class ReembedResponse(BaseModel):
     old_chunk_size: int = Field(0, description="Previous chunk size (when rechunking)")
     new_chunk_size: int = Field(0, description="New chunk size (when rechunking)")
     shadow_collection: str = Field("", description="Name of shadow collection (when rechunking)")
+    shadow_table: str = Field("", description="Dimension-specific table used for shadow (when rechunking)")
 
 
 class ModelInfoResponse(BaseModel):
@@ -327,3 +328,54 @@ class WikiStatusResponse(BaseModel):
     orphan_pages: int = Field(..., description="Number of orphan pages")
     broken_links: int = Field(..., description="Number of broken links")
     last_operation: str = Field("", description="Most recent log entry")
+
+
+class FinalizeRequest(BaseModel):
+    collection_name: str = Field(..., description="Original collection name to finalize")
+    shadow_collection: str = Field(..., description="Shadow collection name (e.g. 'my_docs_v2')")
+    shadow_table: str | None = Field(None, description="Dimension-specific table if rechunk used one")
+
+
+class FinalizeResponse(BaseModel):
+    success: bool = Field(..., description="Whether the finalize succeeded")
+    collection: str = Field(..., description="Original collection name")
+    original_count: int = Field(0, description="Number of rows in original collection")
+    shadow_count: int = Field(0, description="Number of rows in shadow collection")
+    deleted_original: int = Field(0, description="Rows deleted from original collection")
+    renamed: int = Field(0, description="Rows renamed from shadow to original")
+    table_swapped: bool = Field(False, description="Whether a dimension table swap occurred")
+    errors: list[str] = Field(default_factory=list, description="Errors encountered")
+    message: str = Field("", description="Status message")
+
+
+class SchemaMigrationResponse(BaseModel):
+    backend: str = Field(..., description="Database backend type")
+    changes: list[str] = Field(default_factory=list, description="Description of changes made")
+
+
+class VerifyRequest(BaseModel):
+    collection_name: str = Field("", description="Collection to verify (empty for all)")
+    dry_run: bool = Field(True, description="Preview only, do not fix")
+    checks: list[str] | None = Field(
+        None,
+        description="Specific checks to run (default: all). Options: duplicate_hashes, hash_integrity, "
+                    "missing_models, mixed_models, dimension_consistency, partial_documents, "
+                    "orphaned_shadows, orphaned_tables, stale_backups, empty_embeddings, duplicate_doc_pages",
+    )
+
+
+class VerifyCheckResult(BaseModel):
+    name: str = Field(..., description="Check name")
+    severity: str = Field(..., description="error, warning, or info")
+    count: int = Field(0, description="Number of issues found")
+    details: list[str] = Field(default_factory=list, description="First N examples")
+    fix_applied: int | None = Field(None, description="Number of fixes applied (None if dry_run)")
+
+
+class VerifyResponse(BaseModel):
+    collection: str = Field(..., description="Collection verified")
+    dry_run: bool = Field(True, description="Whether this was a dry run")
+    table: str = Field(..., description="Table checked")
+    checks: list[VerifyCheckResult] = Field(default_factory=list, description="Check results")
+    summary: dict[str, int] = Field(default_factory=dict, description="Summary counts")
+    errors: list[str] = Field(default_factory=list, description="Errors during verification")

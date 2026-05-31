@@ -27,6 +27,7 @@ from sqlalchemy import (
     Table,
     insert,
     func,
+    UniqueConstraint,
 )
 from sqlalchemy.exc import IntegrityError, NoSuchModuleError
 from sqlalchemy.orm import DeclarativeBase, Session
@@ -56,16 +57,16 @@ class Base(DeclarativeBase):
 
 
 class Embedding(Base):
-    # To use with Postgresql.
     __tablename__ = "embedding"
-    __table_args__ = {"extend_existing": True}
-    # id_seq = Sequence("id_seq", metadata=Base.metadata)
+    __table_args__ = (
+        UniqueConstraint("collection_name", "doc_hash", name="uq_collection_doc_hash"),
+        {"extend_existing": True},
+    )
     id = Column(Integer, autoincrement=True, primary_key=True)
-    # id = Column(Integer, id_seq, server_default=id_seq.next_value(), primary_key=True)
     collection_name = Column(String)
     doc_name = Column(String)
     page_number = Column(Integer)
-    doc_hash = Column(String, unique=True)
+    doc_hash = Column(String)
     document = Column(String)
     embedding_model = Column(String, default="embeddinggemma")
     embedding = Column(Vector(1024))
@@ -271,10 +272,11 @@ class DocEmbedder:
                 collection_name TEXT,
                 doc_name TEXT,
                 page_number INTEGER,
-                doc_hash TEXT UNIQUE,
+                doc_hash TEXT,
                 document TEXT,
                 embedding_model TEXT DEFAULT 'embeddinggemma',
-                embedding FLOAT[{dimension}]
+                embedding FLOAT[{dimension}],
+                UNIQUE (collection_name, doc_hash)
             );
             """
             conn.sql(create_sql)
@@ -493,6 +495,139 @@ class DocEmbedder:
             self._create_postgres_table_for_dim(target, new_dim)
         return target
 
+    def _get_all_embedding_tables(self) -> list[str]:
+        """Discover all embedding-related tables (main + dimension-specific + backups)."""
+        tables = []
+        try:
+            if self.dburl.startswith("sqlite"):
+                cur = self.connection.cursor()
+                rows = cur.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'embedding%'"
+                ).fetchall()
+                tables = [r[0] for r in rows if not r[0].endswith("_fts")]
+            elif self.dburl.startswith("duckdb"):
+                rows = self.connection.sql(
+                    "SELECT table_name FROM information_schema.tables WHERE table_name LIKE 'embedding%'"
+                ).fetchall()
+                tables = [r[0] for r in rows]
+            else:
+                with self.engine.connect() as conn:
+                    rows = conn.execute(text(
+                        "SELECT tablename FROM pg_tables WHERE tablename LIKE 'embedding%'"
+                    )).fetchall()
+                    tables = [r[0] for r in rows]
+        except Exception as e:
+            logger.warning(f"Error discovering tables: {e}")
+        return tables
+
+    def _active_table(self) -> str:
+        """Return the table that should be used for queries/retrieval.
+
+        If a dimension-specific table exists and has data for the current model,
+        return it.  Otherwise return ``self.table_name``.
+        """
+        model_dim = self._get_embedding_dimension()
+        table_dim = self._get_table_embedding_dimension()
+        if table_dim is not None and model_dim == table_dim:
+            return self.table_name
+        candidate = f"{self.table_name}_{model_dim}"
+        try:
+            count = 0
+            if self.dburl.startswith("sqlite"):
+                cur = self.connection.cursor()
+                try:
+                    row = cur.execute(f"SELECT COUNT(*) FROM {candidate}").fetchone()
+                    count = row[0] if row else 0
+                except Exception:
+                    return self.table_name
+            elif self.dburl.startswith("duckdb"):
+                try:
+                    row = self.connection.sql(f"SELECT COUNT(*) FROM {candidate}").fetchone()
+                    count = row[0] if row else 0
+                except Exception:
+                    return self.table_name
+            else:
+                with self.engine.connect() as conn:
+                    try:
+                        count = conn.execute(text(f"SELECT COUNT(*) FROM {candidate}")).scalar() or 0
+                    except Exception:
+                        return self.table_name
+            if count > 0:
+                return candidate
+        except Exception:
+            pass
+        return self.table_name
+
+    def _safe_swap_tables(self, source: str, target: str, backup: str, min_ratio: float = 0.9) -> dict:
+        """Atomically swap *source* table aside to *backup* and promote *target* to *source*.
+
+        For PostgreSQL the DDL is transactional.  For SQLite and DuckDB
+        the rename steps are inherently sequential but we add a row-count
+        safety gate: the target must contain at least *min_ratio* of the
+        source row count or the swap is refused.
+
+        Returns a dict with keys ``swapped``, ``source_count``,
+        ``target_count``, ``backup_table``.
+        """
+        result = {"swapped": False, "source_count": 0, "target_count": 0, "backup_table": backup}
+
+        def _count(table: str) -> int:
+            if self.dburl.startswith("sqlite"):
+                cur = self.connection.cursor()
+                try:
+                    return cur.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                except Exception:
+                    return 0
+            elif self.dburl.startswith("duckdb"):
+                try:
+                    return self.connection.sql(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                except Exception:
+                    return 0
+            else:
+                with self.engine.connect() as conn:
+                    try:
+                        return conn.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar() or 0
+                    except Exception:
+                        return 0
+
+        source_count = _count(source)
+        target_count = _count(target)
+        result["source_count"] = source_count
+        result["target_count"] = target_count
+
+        if source_count > 0 and target_count < source_count * min_ratio:
+            logger.error(
+                f"Refusing swap: target '{target}' has {target_count} rows "
+                f"but source '{source}' has {source_count} (< {min_ratio*100:.0f}% threshold)"
+            )
+            return result
+
+        if self.dburl.startswith("postgres") and not self.dburl.startswith("duckdb"):
+            with self.engine.connect() as conn:
+                with conn.begin():
+                    conn.execute(text(f"LOCK TABLE {source} IN EXCLUSIVE MODE"))
+                    conn.execute(text(f"LOCK TABLE {target} IN EXCLUSIVE MODE"))
+                    conn.execute(text(f"DROP TABLE IF EXISTS {backup}"))
+                    conn.execute(text(f"ALTER TABLE {source} RENAME TO {backup}"))
+                    conn.execute(text(f"ALTER TABLE {target} RENAME TO {source}"))
+                conn.commit()
+        else:
+            if self.dburl.startswith("sqlite"):
+                cur = self.connection.cursor()
+                cur.execute(f"DROP TABLE IF EXISTS {backup}")
+                cur.execute(f"ALTER TABLE {source} RENAME TO {backup}")
+                cur.execute(f"ALTER TABLE {target} RENAME TO {source}")
+                self.connection.commit()
+            else:
+                conn = self.connection
+                conn.sql(f"DROP TABLE IF EXISTS {backup}")
+                conn.sql(f"ALTER TABLE {source} RENAME TO {backup}")
+                conn.sql(f"ALTER TABLE {target} RENAME TO {source}")
+
+        result["swapped"] = True
+        logger.info(f"Safe swap complete: {source} ← {target}, backup → {backup}")
+        return result
+
     def _create_postgres_table_for_dim(self, table_name: str, dimension: int):
         """Create a PostgreSQL embedding table with a specific vector dimension."""
         with self.engine.connect() as conn:
@@ -502,10 +637,11 @@ class DocEmbedder:
                     collection_name TEXT,
                     doc_name TEXT,
                     page_number INTEGER,
-                    doc_hash TEXT UNIQUE,
+                    doc_hash TEXT,
                     document TEXT,
                     embedding_model TEXT DEFAULT 'unknown',
-                    embedding VECTOR({dimension})
+                    embedding VECTOR({dimension}),
+                    UNIQUE (collection_name, doc_hash)
                 )
             """))
             conn.commit()
@@ -540,18 +676,18 @@ class DocEmbedder:
     def _create_duckdb_table_for_dim(self, table_name: str, dimension: int):
         """Create a DuckDB embedding table with a specific dimension."""
         conn = self.connection
-        conn.sql(f"DROP TABLE IF EXISTS {table_name}")
         conn.sql(f"CREATE SEQUENCE IF NOT EXISTS {table_name}_seq;")
         conn.sql(f"""
-            CREATE TABLE {table_name} (
+            CREATE TABLE IF NOT EXISTS {table_name} (
                 id INTEGER PRIMARY KEY DEFAULT nextval('{table_name}_seq'),
                 collection_name TEXT,
                 doc_name TEXT,
                 page_number INTEGER,
-                doc_hash TEXT UNIQUE,
+                doc_hash TEXT,
                 document TEXT,
                 embedding_model TEXT DEFAULT 'embeddinggemma',
-                embedding FLOAT[{dimension}]
+                embedding FLOAT[{dimension}],
+                UNIQUE (collection_name, doc_hash)
             )
         """)
         conn.sql("INSTALL fts;")
@@ -603,32 +739,33 @@ class DocEmbedder:
 
     def _check_existing(self, hash: str):
         """
-        Check if a document with this hash already exists in the database
+        Check if a document with this hash already exists in the current collection.
         :param hash: SHA256 hash of the document
         :return:
         """
         if self.dburl.startswith("sqlite"):
+            target = self._target_table_for_dimension()
             with self.connection as conn:
                 cursor = conn.cursor()
-                if self._should_create_tables():
-                    self._create_sqlite_table(cursor)
-                q = f"SELECT doc_hash FROM {self.table_name} WHERE doc_hash=?"
-                result = cursor.execute(q, (hash,)).fetchone()
+                q = f"SELECT doc_hash FROM {target} WHERE collection_name=? AND doc_hash=?"
+                result = cursor.execute(q, (self.collection_name, hash)).fetchone()
             return result is not None
         elif self.dburl.startswith("duckdb"):
+            target = self._target_table_for_dimension()
             conn = self.connection
             result = conn.sql(
-                f"SELECT id FROM {self.table_name} WHERE doc_hash = ?", params=[hash]
+                f"SELECT id FROM {target} WHERE collection_name = ? AND doc_hash = ?",
+                params=[self.collection_name, hash],
             ).fetchall()
             return len(result) > 0
         else:
-            # PostgreSQL
+            target = self._target_table_for_dimension()
             with Session(self.engine) as session:
-                statement = select(self.embedding).where(
-                    self.embedding.doc_hash == hash
-                )
-                result = session.execute(statement).all()
-            return len(result) > 0
+                result = session.execute(
+                    text(f"SELECT 1 FROM {target} WHERE collection_name = :col AND doc_hash = :hash"),
+                    {"col": self.collection_name, "hash": hash},
+                ).fetchone()
+            return result is not None
 
     def _max_embed_chars(self) -> int:
         return MODEL_MAX_CHARS.get(self.embedding_model, DEFAULT_MAX_EMBED_CHARS)
@@ -818,9 +955,9 @@ class DocEmbedder:
         :return: all documents as a string
         """
         query_embedding = self._generate_embedding(query)
+        tbl = self._active_table()
 
         if self.dburl.startswith("sqlite"):
-            # Use native SQLite operations
             import struct
 
             query_embedding_bytes = struct.pack(
@@ -829,25 +966,22 @@ class DocEmbedder:
             with self.connection as conn:
                 cursor = conn.cursor()
 
-                # Vector Search
                 if collection:
                     vector_results = cursor.execute(
-                        f"SELECT doc_hash, document, distance FROM {self.table_name} WHERE collection_name = ? AND embedding MATCH ? ORDER BY distance LIMIT ?",
+                        f"SELECT doc_hash, document, distance FROM {tbl} WHERE collection_name = ? AND embedding MATCH ? ORDER BY distance LIMIT ?",
                         (collection, query_embedding_bytes, num_docs * 2),
                     ).fetchall()
                 else:
                     vector_results = cursor.execute(
-                        f"SELECT doc_hash, document, distance FROM {self.table_name} WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
+                        f"SELECT doc_hash, document, distance FROM {tbl} WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
                         (query_embedding_bytes, num_docs * 2),
                     ).fetchall()
 
-                # Keyword Search (FTS5)
                 fts_results = cursor.execute(
-                    f"SELECT doc_hash, document, rank FROM {self.table_name}_fts WHERE document MATCH ? ORDER BY rank LIMIT ?",
+                    f"SELECT doc_hash, document, rank FROM {tbl}_fts WHERE document MATCH ? ORDER BY rank LIMIT ?",
                     (query, num_docs * 2),
                 ).fetchall()
 
-                # Hybrid Search combining results using RRF (Reciprocal Rank Fusion)
                 k = 60
                 scores = {}
                 docs = {}
@@ -860,33 +994,29 @@ class DocEmbedder:
                     scores[d_hash] = scores.get(d_hash, 0) + 1.0 / (k + rank + 1)
                     docs[d_hash] = doc
 
-                # Sort by score and take top num_docs
                 sorted_ids = sorted(
                     scores.keys(), key=lambda x: scores[x], reverse=True
                 )[:num_docs]
                 pages = [docs[d_hash] for d_hash in sorted_ids]
         elif self.dburl.startswith("duckdb"):
-            # Use direct SQL for DuckDB
             dimension = self._get_embedding_dimension()
             embedding_str = "[" + ",".join(str(v) for v in query_embedding) + "]"
             conn = self.connection
 
-            # Vector Search
             vector_results = conn.sql(f"""
                 SELECT id, document, array_cosine_similarity(embedding, {embedding_str}::FLOAT[{dimension}]) as similarity
-                FROM {self.table_name}
+                FROM {tbl}
                 {f"WHERE collection_name = '{collection}'" if collection else ""}
                 ORDER BY similarity DESC
                 LIMIT {num_docs * 2}
             """).fetchall()
 
-            # Keyword Search (FTS)
             try:
                 conn.sql("LOAD fts;")
                 fts_results = conn.sql(
                     f"""
-                    SELECT id, document, fts_main_{self.table_name}.match_bm25(id, ?) as score
-                    FROM {self.table_name}
+                    SELECT id, document, fts_main_{tbl}.match_bm25(id, ?) as score
+                    FROM {tbl}
                     WHERE score IS NOT NULL
                     ORDER BY score DESC
                     LIMIT {num_docs * 2}
@@ -897,7 +1027,6 @@ class DocEmbedder:
                 logger.warning(f"FTS search failed: {e}")
                 fts_results = []
 
-            # Hybrid Search merging
             k = 60
             scores = {}
             docs = {}
@@ -915,23 +1044,19 @@ class DocEmbedder:
             ]
             pages = [docs[d_id] for d_id in sorted_ids]
         else:
-            # PostgreSQL
             dimension = self._get_embedding_dimension()
             with Session(self.engine) as session:
-                if collection:
-                    statement = (
-                        select(self.embedding.document)
-                        .where(self.embedding.collection_name == collection)
-                        .order_by(self.embedding.embedding.l2_distance(query_embedding))
-                        .limit(num_docs)
-                    )
-                else:
-                    statement = (
-                        select(self.embedding.document)
-                        .order_by(self.embedding.embedding.l2_distance(query_embedding))
-                        .limit(num_docs)
-                    )
-                pages = session.scalars(statement)
+                col_filter = f"WHERE collection_name = :col" if collection else ""
+                rows = session.execute(
+                    text(f"""
+                        SELECT document FROM {tbl}
+                        {col_filter}
+                        ORDER BY embedding <=> :query_embedding::vector({dimension})
+                        LIMIT :limit
+                    """),
+                    {"col": collection, "query_embedding": str(query_embedding), "limit": num_docs},
+                ).fetchall()
+                pages = [r[0] for r in rows]
 
         data = "\n".join(pages)
         return data
@@ -947,6 +1072,7 @@ class DocEmbedder:
         :return: list of dicts with doc_name, page_number, content, and score
         """
         query_embedding = self._generate_embedding(query)
+        tbl = self._active_table()
         results = []
 
         if self.dburl.startswith("sqlite"):
@@ -958,30 +1084,27 @@ class DocEmbedder:
             with self.connection as conn:
                 cursor = conn.cursor()
 
-                # Vector Search with metadata
                 if collection:
                     vector_results = cursor.execute(
-                        f"SELECT doc_hash, doc_name, page_number, document, distance FROM {self.table_name} WHERE collection_name = ? AND embedding MATCH ? ORDER BY distance LIMIT ?",
+                        f"SELECT doc_hash, doc_name, page_number, document, distance FROM {tbl} WHERE collection_name = ? AND embedding MATCH ? ORDER BY distance LIMIT ?",
                         (collection, query_embedding_bytes, num_docs * 2),
                     ).fetchall()
                 else:
                     vector_results = cursor.execute(
-                        f"SELECT doc_hash, doc_name, page_number, document, distance FROM {self.table_name} WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
+                        f"SELECT doc_hash, doc_name, page_number, document, distance FROM {tbl} WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
                         (query_embedding_bytes, num_docs * 2),
                     ).fetchall()
 
-                # Keyword Search (FTS5) with join to get metadata
                 fts_results = cursor.execute(
                     f"""
                     SELECT f.doc_hash, t.doc_name, t.page_number, f.document, f.rank
-                    FROM {self.table_name}_fts f
-                    JOIN {self.table_name} t ON f.doc_hash = t.doc_hash
+                    FROM {tbl}_fts f
+                    JOIN {tbl} t ON f.doc_hash = t.doc_hash
                     WHERE f.document MATCH ? ORDER BY f.rank LIMIT ?
                     """,
                     (query, num_docs * 2),
                 ).fetchall()
 
-                # Hybrid Search combining results using RRF (Reciprocal Rank Fusion)
                 k = 60
                 scores = {}
                 docs = {}
@@ -1024,22 +1147,20 @@ class DocEmbedder:
             embedding_str = "[" + ",".join(str(v) for v in query_embedding) + "]"
             conn = self.connection
 
-            # Vector Search with metadata
             vector_results = conn.sql(f"""
                 SELECT id, doc_name, page_number, document, array_cosine_similarity(embedding, {embedding_str}::FLOAT[{dimension}]) as similarity
-                FROM {self.table_name}
+                FROM {tbl}
                 {f"WHERE collection_name = '{collection}'" if collection else ""}
                 ORDER BY similarity DESC
                 LIMIT {num_docs * 2}
             """).fetchall()
 
-            # Keyword Search (FTS) with metadata
             try:
                 conn.sql("LOAD fts;")
                 fts_results = conn.sql(
                     f"""
-                    SELECT id, doc_name, page_number, document, fts_main_{self.table_name}.match_bm25(id, ?) as score
-                    FROM {self.table_name}
+                    SELECT id, doc_name, page_number, document, fts_main_{tbl}.match_bm25(id, ?) as score
+                    FROM {tbl}
                     WHERE score IS NOT NULL
                     ORDER BY score DESC
                     LIMIT {num_docs * 2}
@@ -1050,7 +1171,6 @@ class DocEmbedder:
                 logger.warning(f"FTS search failed: {e}")
                 fts_results = []
 
-            # Hybrid Search merging
             k = 60
             scores = {}
             docs = {}
@@ -1086,38 +1206,26 @@ class DocEmbedder:
                     }
                 )
         else:
-            # PostgreSQL
+            dimension = self._get_embedding_dimension()
             with Session(self.engine) as session:
-                if collection:
-                    statement = (
-                        select(
-                            self.embedding.doc_name,
-                            self.embedding.page_number,
-                            self.embedding.document,
-                        )
-                        .where(self.embedding.collection_name == collection)
-                        .order_by(self.embedding.embedding.l2_distance(query_embedding))
-                        .limit(num_docs)
-                    )
-                else:
-                    statement = (
-                        select(
-                            self.embedding.doc_name,
-                            self.embedding.page_number,
-                            self.embedding.document,
-                        )
-                        .order_by(self.embedding.embedding.l2_distance(query_embedding))
-                        .limit(num_docs)
-                    )
-                rows = session.execute(statement).fetchall()
+                col_filter = "WHERE collection_name = :col" if collection else ""
+                rows = session.execute(
+                    text(f"""
+                        SELECT doc_name, page_number, document
+                        FROM {tbl}
+                        {col_filter}
+                        ORDER BY embedding <=> :query_embedding::vector({dimension})
+                        LIMIT :limit
+                    """),
+                    {"col": collection, "query_embedding": str(query_embedding), "limit": num_docs},
+                ).fetchall()
                 for rank, (doc_name, page_num, doc) in enumerate(rows):
                     results.append(
                         {
                             "doc_name": doc_name,
                             "page_number": page_num,
                             "content": doc,
-                            "score": 1.0
-                            / (rank + 1),  # Simple inverse rank for PostgreSQL
+                            "score": 1.0 / (rank + 1),
                         }
                     )
 
@@ -1128,27 +1236,25 @@ class DocEmbedder:
         Get a list of all embedded documents.
         :return: List of tuples (doc_name, collection_name) for all embedded documents
         """
+        tbl = self._active_table()
         if self.dburl.startswith("sqlite"):
             with self.connection as conn:
                 cursor = conn.cursor()
-                self._create_sqlite_table(cursor)
                 result = cursor.execute(
-                    f"SELECT DISTINCT doc_name, collection_name FROM {self.table_name}"
+                    f"SELECT DISTINCT doc_name, collection_name FROM {tbl}"
                 ).fetchall()
             return [(row[0], row[1]) for row in result]
         elif self.dburl.startswith("duckdb"):
             conn = self.connection
             result = conn.sql(
-                f"SELECT DISTINCT doc_name, collection_name FROM {self.table_name}"
+                f"SELECT DISTINCT doc_name, collection_name FROM {tbl}"
             ).fetchall()
             return [(row[0], row[1]) for row in result]
         else:
-            # PostgreSQL
             with Session(self.engine) as session:
-                statement = select(
-                    self.embedding.doc_name, self.embedding.collection_name
-                ).distinct()
-                result = session.execute(statement).fetchall()
+                result = session.execute(
+                    text(f"SELECT DISTINCT doc_name, collection_name FROM {tbl}")
+                ).fetchall()
                 return [(row[0], row[1]) for row in result]
 
     def _migrate_add_embedding_model(self):
@@ -1264,6 +1370,64 @@ class DocEmbedder:
             )
             session.commit()
             logger.info("PostgreSQL migration completed successfully")
+
+    def migrate_compound_unique(self) -> dict:
+        """
+        Migrate existing tables from UNIQUE(doc_hash) to
+        UNIQUE(collection_name, doc_hash).
+
+        This is a no-op for SQLite (vec0 has no SQL-level constraints)
+        and for dimension-specific tables already created with the new
+        constraint.
+
+        Returns a dict describing what was done.
+        """
+        result = {"backend": "sqlite" if self.dburl.startswith("sqlite") else "duckdb" if self.dburl.startswith("duckdb") else "postgresql", "changes": []}
+
+        if self.dburl.startswith("sqlite"):
+            result["changes"].append("Skipped: SQLite vec0 tables have no SQL constraints; dedup is application-level")
+            return result
+
+        tables = self._get_all_embedding_tables()
+
+        if self.dburl.startswith("duckdb"):
+            for tbl in tables:
+                try:
+                    constraints = self.connection.sql(
+                        f"SELECT constraint_type, constraint_name FROM duckdb_constraints() WHERE table_name = '{tbl}'"
+                    ).fetchall()
+                    has_compound = any("collection_name" in str(c) and "doc_hash" in str(c) for c in constraints)
+                    if has_compound:
+                        result["changes"].append(f"{tbl}: already has compound unique constraint")
+                        continue
+                    self.connection.sql(f"ALTER TABLE {tbl} DROP CONSTRAINT IF EXISTS {tbl}_doc_hash_key")
+                    self.connection.sql(f"ALTER TABLE {tbl} ADD CONSTRAINT {tbl}_uq_col_hash UNIQUE (collection_name, doc_hash)")
+                    result["changes"].append(f"{tbl}: migrated to UNIQUE(collection_name, doc_hash)")
+                except Exception as e:
+                    result["changes"].append(f"{tbl}: error: {e}")
+        else:
+            for tbl in tables:
+                try:
+                    with self.engine.connect() as conn:
+                        rows = conn.execute(text(
+                            f"SELECT conname FROM pg_constraint c JOIN pg_class t ON c.conrelid = t.oid "
+                            f"WHERE t.relname = '{tbl}' AND c.contype = 'u'"
+                        )).fetchall()
+                        has_compound = any("collection" in r[0].lower() for r in rows)
+                        if has_compound:
+                            result["changes"].append(f"{tbl}: already has compound unique constraint")
+                            continue
+                        for row in rows:
+                            conn.execute(text(f'ALTER TABLE {tbl} DROP CONSTRAINT IF EXISTS "{row[0]}"'))
+                        conn.execute(text(
+                            f"ALTER TABLE {tbl} ADD CONSTRAINT uq_{tbl}_col_hash UNIQUE (collection_name, doc_hash)"
+                        ))
+                        conn.commit()
+                        result["changes"].append(f"{tbl}: migrated to UNIQUE(collection_name, doc_hash)")
+                except Exception as e:
+                    result["changes"].append(f"{tbl}: error: {e}")
+
+        return result
 
     def reembed(
         self,
@@ -1458,9 +1622,20 @@ class DocEmbedder:
                     logger.error(error_msg)
                     stats["errors"].append(error_msg)
 
-            # Drop backup tables
-            cursor.execute(f"DROP TABLE {backup_table}")
-            cursor.execute(f"DROP TABLE {fts_backup}")
+            # Safety check before dropping backup
+            new_count = cursor.execute(f"SELECT COUNT(*) FROM {self.table_name}").fetchone()[0]
+            if stats["total"] > 0 and new_count < stats["total"] * 0.9:
+                logger.error(
+                    f"SQLite re-embed incomplete: {new_count}/{stats['total']} rows. "
+                    f"Keeping backup table '{backup_table}'"
+                )
+                stats["errors"].append(
+                    f"Re-embed incomplete ({new_count}/{stats['total']}); backup preserved as '{backup_table}'"
+                )
+                stats["backup_table"] = backup_table
+            else:
+                cursor.execute(f"DROP TABLE {backup_table}")
+                cursor.execute(f"DROP TABLE {fts_backup}")
             conn.commit()
 
         logger.info(
@@ -1701,14 +1876,12 @@ class DocEmbedder:
             logger.info(f"FTS cleanup skipped: {e}")
 
         # Now swap the tables: main -> backup, temp -> main
-        conn.sql(f"DROP TABLE IF EXISTS {backup_table}")
-        conn.sql(f"ALTER TABLE {self.table_name} RENAME TO {backup_table}")
-        logger.info(f"Renamed {self.table_name} to {backup_table} (backup)")
-
-        conn.sql(f"ALTER TABLE {temp_table} RENAME TO {self.table_name}")
-        conn.sql(f"DROP SEQUENCE IF EXISTS {self.table_name}_seq")
-        conn.sql(f"ALTER SEQUENCE {temp_table}_seq RENAME TO {self.table_name}_seq")
-        logger.info(f"Renamed {temp_table} to {self.table_name}")
+        swap_result = self._safe_swap_tables(self.table_name, temp_table, backup_table)
+        if not swap_result["swapped"]:
+            logger.error("Swap refused — keeping original table, dropping temp")
+            conn.sql(f"DROP TABLE IF EXISTS {temp_table}")
+            stats["errors"].append("Swap refused: insufficient rows in target")
+            return stats
 
         # Recreate FTS index on new main table
         try:
@@ -1836,20 +2009,145 @@ class DocEmbedder:
             session.commit()
 
         if dimension_changed:
-            # Swap tables outside the session to avoid stale model references
-            with Session(self.engine) as swap_session:
-                backup_table = f"{source_table}_backup_reembed"
-                swap_session.execute(text(f"DROP TABLE IF EXISTS {backup_table}"))
-                swap_session.execute(text(f"ALTER TABLE {source_table} RENAME TO {backup_table}"))
-                swap_session.execute(text(f"ALTER TABLE {target_table} RENAME TO {source_table}"))
-                swap_session.commit()
-            self.table_name = source_table
-            stats["backup_table"] = backup_table
-            logger.info(f"Swapped tables: {source_table} ← {target_table}, backed up as {backup_table}")
+            backup_table = f"{source_table}_backup_reembed"
+            swap_result = self._safe_swap_tables(source_table, target_table, backup_table)
+            if swap_result["swapped"]:
+                self.table_name = source_table
+                stats["backup_table"] = backup_table
+            else:
+                stats["errors"].append(
+                    f"Swap refused: target had {swap_result['target_count']} rows vs source {swap_result['source_count']}"
+                )
 
         logger.info(
             f"PostgreSQL re-embedding complete: {stats['updated']}/{stats['total']} documents updated"
         )
+        return stats
+
+    def finalize_rechunk(
+        self,
+        collection_name: str,
+        shadow_collection: str,
+        shadow_table: str | None = None,
+    ) -> dict:
+        """
+        Finalize a rechunk operation by cutover from the shadow collection.
+
+        Steps:
+        1. Count rows in shadow vs original to ensure completeness.
+        2. Delete the original collection from the active table.
+        3. Rename the shadow collection to the original name.
+        4. If *shadow_table* is a dimension-specific table, swap it to
+           become the active table.
+
+        :param collection_name: Original collection name (e.g. ``"my_docs"``)
+        :param shadow_collection: Shadow collection name (e.g. ``"my_docs_v2"``)
+        :param shadow_table: Dimension-specific table if rechunk used one
+        :return: Stats dict
+        """
+        stats = {
+            "success": False,
+            "collection": collection_name,
+            "shadow_collection": shadow_collection,
+            "shadow_table": shadow_table,
+            "original_count": 0,
+            "shadow_count": 0,
+            "deleted_original": 0,
+            "renamed": 0,
+            "table_swapped": False,
+            "errors": [],
+        }
+
+        active = self.table_name
+        target = shadow_table or active
+
+        def _col_count(table: str, col: str) -> int:
+            if self.dburl.startswith("sqlite"):
+                cur = self.connection.cursor()
+                try:
+                    return cur.execute(f"SELECT COUNT(*) FROM {table} WHERE collection_name = ?", (col,)).fetchone()[0]
+                except Exception:
+                    return 0
+            elif self.dburl.startswith("duckdb"):
+                try:
+                    return self.connection.sql(f"SELECT COUNT(*) FROM {table} WHERE collection_name = ?", params=[col]).fetchone()[0]
+                except Exception:
+                    return 0
+            else:
+                with self.engine.connect() as conn:
+                    try:
+                        return conn.execute(text(f"SELECT COUNT(*) FROM {table} WHERE collection_name = :col"), {"col": col}).scalar() or 0
+                    except Exception:
+                        return 0
+
+        stats["original_count"] = _col_count(active, collection_name)
+        stats["shadow_count"] = _col_count(target, shadow_collection)
+
+        if stats["shadow_count"] == 0:
+            stats["errors"].append("Shadow collection has no rows — nothing to finalize")
+            return stats
+
+        if stats["original_count"] > 0 and stats["shadow_count"] < stats["original_count"] * 0.9:
+            stats["errors"].append(
+                f"Shadow has {stats['shadow_count']} rows vs original {stats['original_count']} (< 90%). "
+                f"Refusing to finalize."
+            )
+            return stats
+
+        try:
+            if self.dburl.startswith("sqlite"):
+                cur = self.connection.cursor()
+                cur.execute(f"DELETE FROM {active} WHERE collection_name = ?", (collection_name,))
+                stats["deleted_original"] = cur.rowcount
+                cur.execute(
+                    f"UPDATE {target} SET collection_name = ? WHERE collection_name = ?",
+                    (collection_name, shadow_collection),
+                )
+                stats["renamed"] = cur.rowcount
+                self.connection.commit()
+            elif self.dburl.startswith("duckdb"):
+                conn = self.connection
+                conn.sql(f"DELETE FROM {active} WHERE collection_name = ?", params=[collection_name])
+                stats["deleted_original"] = stats["original_count"]
+                conn.sql(
+                    f"UPDATE {target} SET collection_name = ? WHERE collection_name = ?",
+                    params=[collection_name, shadow_collection],
+                )
+                stats["renamed"] = stats["shadow_count"]
+            else:
+                with self.engine.connect() as conn:
+                    with conn.begin():
+                        result = conn.execute(
+                            text(f"DELETE FROM {active} WHERE collection_name = :col"),
+                            {"col": collection_name},
+                        )
+                        stats["deleted_original"] = result.rowcount
+                        result = conn.execute(
+                            text(f"UPDATE {target} SET collection_name = :new WHERE collection_name = :old"),
+                            {"new": collection_name, "old": shadow_collection},
+                        )
+                        stats["renamed"] = result.rowcount
+                    conn.commit()
+
+            if shadow_table and shadow_table != active:
+                backup = f"{active}_backup_reembed"
+                swap_result = self._safe_swap_tables(active, shadow_table, backup)
+                stats["table_swapped"] = swap_result["swapped"]
+                if swap_result["swapped"]:
+                    self.table_name = active
+                else:
+                    stats["errors"].append(
+                        f"Collection renamed but table swap refused: {swap_result['target_count']} vs {swap_result['source_count']}"
+                    )
+
+            stats["success"] = True
+            logger.info(
+                f"Finalized rechunk: {collection_name} ({stats['renamed']} rows from shadow)"
+            )
+        except Exception as e:
+            stats["errors"].append(str(e))
+            logger.error(f"Error finalizing rechunk: {e}")
+
         return stats
 
     @staticmethod
@@ -2536,10 +2834,9 @@ class DocEmbedder:
         """
         Rollback to the backup table created by a previous re-embed operation.
 
-        Only supported for DuckDB, where the backup table (``{table}_backup_reembed``)
-        is preserved after a dimension-changing re-embed.  SQLite drops its backup
-        after re-embed, and PostgreSQL does in-place updates — neither supports
-        rollback.
+        Supported for DuckDB and PostgreSQL (where backup tables are preserved
+        after dimension-changing re-embeds).  SQLite drops its backup after
+        successful re-embed and does not support rollback.
 
         :param dry_run: If True, report what would be done without making changes.
         :return: Dict with rollback status and statistics.
@@ -2564,23 +2861,23 @@ class DocEmbedder:
             "message": "",
         }
 
-        # --- Only DuckDB currently preserves backup tables ---
-        if backend != "duckdb":
-            if backend == "sqlite":
-                result["message"] = (
-                    "SQLite does not preserve backup tables after re-embed. "
-                    "Rollback is not available."
-                )
-            else:
-                result["message"] = (
-                    "PostgreSQL re-embeds in-place without creating a backup table. "
-                    "Rollback is not available."
-                )
+        if backend == "sqlite":
+            result["message"] = (
+                "SQLite does not preserve backup tables after re-embed. "
+                "Rollback is not available."
+            )
             return result
 
+        if backend == "postgresql":
+            return self._rollback_postgres(result, dry_run)
+
+        # --- DuckDB rollback ---
+        return self._rollback_duckdb(result, dry_run)
+
+    def _rollback_duckdb(self, result: dict, dry_run: bool) -> dict:
+        backup_table = result["backup_table"]
         conn = self.connection
 
-        # Check backup table exists
         try:
             backup_exists = conn.sql(
                 "SELECT COUNT(*) FROM information_schema.tables "
@@ -2596,7 +2893,6 @@ class DocEmbedder:
             )
             return result
 
-        # Count rows
         try:
             result["current_count"] = conn.sql(
                 f"SELECT COUNT(*) FROM {self.table_name}"
@@ -2619,7 +2915,6 @@ class DocEmbedder:
             )
             return result
 
-        # Detect the embedding model stored in the backup
         try:
             row = conn.sql(
                 f"SELECT embedding_model FROM {backup_table} LIMIT 1"
@@ -2638,20 +2933,17 @@ class DocEmbedder:
             result["success"] = True
             return result
 
-        # --- Perform the rollback ---
         logger.info(
             f"Rolling back: swapping {backup_table} -> {self.table_name} "
             f"({result['backup_count']} records)"
         )
 
         try:
-            # Drop HNSW index on current main table
             try:
                 conn.sql(f"DROP INDEX IF EXISTS {self.table_name}_index;")
             except Exception:
                 pass
 
-            # Drop FTS-related tables for main table
             for tbl in [
                 f"fts_main_{self.table_name}",
                 f"fts_data_{self.table_name}",
@@ -2664,45 +2956,15 @@ class DocEmbedder:
                 except Exception:
                     pass
 
-            # Drop current main table
-            conn.sql(f"DROP TABLE IF EXISTS {self.table_name}")
-            logger.info(f"Dropped current table {self.table_name}")
+            swap_result = self._safe_swap_tables(self.table_name, backup_table, f"{self.table_name}_rollback_temp")
+            if not swap_result["swapped"]:
+                result["message"] = "Rollback swap failed"
+                return result
 
-            # Rename backup to main
-            conn.sql(f"ALTER TABLE {backup_table} RENAME TO {self.table_name}")
-            logger.info(f"Renamed {backup_table} to {self.table_name}")
-
-            # Recreate FTS index
-            try:
-                conn.sql("INSTALL fts;")
-                conn.sql("LOAD fts;")
-                conn.sql(
-                    f"PRAGMA create_fts_index('{self.table_name}', 'id', 'document');"
-                )
-                logger.info("Created FTS index on restored table")
-            except Exception as e:
-                logger.warning(f"Could not create FTS index: {e}")
-
-            # Recreate HNSW index
-            try:
-                conn.sql("SET hnsw_enable_experimental_persistence = true;")
-                conn.sql(f"""
-                    CREATE INDEX {self.table_name}_index
-                    ON {self.table_name} USING HNSW(embedding)
-                    WITH (metric='cosine');
-                """)
-                logger.info("Created HNSW index on restored table")
-            except Exception as e:
-                logger.warning(
-                    f"Could not create HNSW index (OK for disk-based DBs): {e}"
-                )
-
-            # Update the embedder's model to match the backup
             if result["backup_model"] and result["backup_model"] != "unknown":
                 self.embedding_model = result["backup_model"]
-                logger.info(
-                    f"Restored embedding model to '{result['backup_model']}'"
-                )
+                self._reconfigure_client()
+                logger.info(f"Restored embedding model to '{result['backup_model']}'")
 
             result["restored_count"] = conn.sql(
                 f"SELECT COUNT(*) FROM {self.table_name}"
@@ -2718,6 +2980,429 @@ class DocEmbedder:
             result["message"] = f"Rollback failed: {e}"
 
         return result
+
+    def _rollback_postgres(self, result: dict, dry_run: bool) -> dict:
+        backup_table = result["backup_table"]
+
+        with self.engine.connect() as conn:
+            backup_exists = conn.execute(text(
+                f"SELECT COUNT(*) FROM pg_tables WHERE tablename = '{backup_table}'"
+            )).scalar() > 0
+
+        if not backup_exists:
+            result["message"] = (
+                f"Backup table '{backup_table}' does not exist. "
+                "No rollback backup is available. "
+                "(Backups only exist after dimension-changing re-embeds.)"
+            )
+            return result
+
+        with self.engine.connect() as conn:
+            try:
+                result["current_count"] = conn.execute(
+                    text(f"SELECT COUNT(*) FROM {self.table_name}")
+                ).scalar() or 0
+            except Exception:
+                result["current_count"] = 0
+
+            try:
+                result["backup_count"] = conn.execute(
+                    text(f"SELECT COUNT(*) FROM {backup_table}")
+                ).scalar() or 0
+            except Exception as e:
+                result["message"] = f"Error reading backup table: {e}"
+                return result
+
+        if result["backup_count"] == 0:
+            result["message"] = (
+                f"Backup table '{backup_table}' exists but is empty. "
+                "Refusing to rollback."
+            )
+            return result
+
+        with self.engine.connect() as conn:
+            try:
+                row = conn.execute(
+                    text(f"SELECT embedding_model FROM {backup_table} LIMIT 1")
+                ).fetchone()
+                if row:
+                    result["backup_model"] = row[0] or "unknown"
+            except Exception:
+                result["backup_model"] = "unknown"
+
+        result["message"] = (
+            f"Backup table '{backup_table}' found with "
+            f"{result['backup_count']} records (current: {result['current_count']})."
+        )
+
+        if dry_run:
+            result["success"] = True
+            return result
+
+        logger.info(
+            f"Rolling back PostgreSQL: swapping {backup_table} -> {self.table_name}"
+        )
+
+        try:
+            temp_drop = f"{self.table_name}_rollback_temp"
+            swap_result = self._safe_swap_tables(self.table_name, backup_table, temp_drop)
+            if not swap_result["swapped"]:
+                result["message"] = "Rollback swap failed"
+                return result
+
+            if result["backup_model"] and result["backup_model"] != "unknown":
+                self.embedding_model = result["backup_model"]
+                self._reconfigure_client()
+                logger.info(f"Restored embedding model to '{result['backup_model']}'")
+
+            with self.engine.connect() as conn:
+                result["restored_count"] = conn.execute(
+                    text(f"SELECT COUNT(*) FROM {self.table_name}")
+                ).scalar() or 0
+
+            result["success"] = True
+            result["message"] = (
+                f"Rollback complete. Restored {result['restored_count']} records "
+                f"from backup. Embedding model set to '{result['backup_model']}'."
+            )
+
+        except Exception as e:
+            logger.error(f"PostgreSQL rollback failed: {e}")
+            result["message"] = f"Rollback failed: {e}"
+
+        return result
+
+    def _reconfigure_client(self):
+        """Reconfigure the LLM client for the current embedding_model."""
+        if "gemini" in self.embedding_model.lower():
+            self.client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+        else:
+            self.client = ollama.Client(
+                host=os.getenv("OLLAMA_HOST", "http://localhost:11434")
+            )
+
+    def verify_and_fix(
+        self,
+        collection_name: str = "",
+        dry_run: bool = True,
+        checks: list[str] | None = None,
+    ) -> dict:
+        """
+        Verify embedding data integrity and optionally fix issues.
+
+        :param collection_name: Collection to verify (empty = all)
+        :param dry_run: Preview only, do not apply fixes
+        :param checks: Specific checks to run (None = all)
+        :return: Verification report
+        """
+        ALL_CHECKS = [
+            "duplicate_hashes",
+            "hash_integrity",
+            "missing_models",
+            "mixed_models",
+            "dimension_consistency",
+            "partial_documents",
+            "orphaned_shadows",
+            "orphaned_tables",
+            "stale_backups",
+            "empty_embeddings",
+            "duplicate_doc_pages",
+        ]
+        active_checks = checks if checks else ALL_CHECKS
+        tbl = self._active_table()
+
+        result = {
+            "collection": collection_name or "(all)",
+            "dry_run": dry_run,
+            "table": tbl,
+            "checks": [],
+            "summary": {"errors": 0, "warnings": 0, "info": 0, "fixes_applied": 0},
+            "errors": [],
+        }
+
+        col_filter_sql = f"WHERE collection_name = '{collection_name}'" if collection_name else ""
+
+        for check_name in active_checks:
+            handler = getattr(self, f"_verify_{check_name}", None)
+            if handler is None:
+                continue
+            try:
+                check_result = handler(tbl, col_filter_sql, dry_run, collection_name)
+                result["checks"].append(check_result)
+                sev = check_result.get("severity", "warning")
+                if sev == "error":
+                    result["summary"]["errors"] += 1
+                elif sev == "warning":
+                    result["summary"]["warnings"] += 1
+                else:
+                    result["summary"]["info"] += 1
+                if check_result.get("fix_applied"):
+                    result["summary"]["fixes_applied"] += check_result["fix_applied"]
+            except Exception as e:
+                result["errors"].append(f"{check_name}: {e}")
+                logger.error(f"Verify check '{check_name}' failed: {e}")
+
+        return result
+
+    def _verify_query(self, tbl: str, sql: str) -> list[tuple]:
+        if self.dburl.startswith("sqlite"):
+            cur = self.connection.cursor()
+            return cur.execute(sql).fetchall()
+        elif self.dburl.startswith("duckdb"):
+            return self.connection.sql(sql).fetchall()
+        else:
+            with self.engine.connect() as conn:
+                return conn.execute(text(sql)).fetchall()
+
+    def _verify_execute(self, tbl: str, sql: str):
+        if self.dburl.startswith("sqlite"):
+            cur = self.connection.cursor()
+            cur.execute(sql)
+            self.connection.commit()
+        elif self.dburl.startswith("duckdb"):
+            self.connection.sql(sql)
+        else:
+            with self.engine.connect() as conn:
+                conn.execute(text(sql))
+                conn.commit()
+
+    def _verify_duplicate_hashes(self, tbl: str, col_filter: str, dry_run: bool, collection_name: str) -> dict:
+        check = {"name": "duplicate_hashes", "severity": "error", "count": 0, "details": [], "fix_applied": None}
+        rows = self._verify_query(tbl,
+            f"SELECT collection_name, doc_hash, COUNT(*) as cnt FROM {tbl} "
+            f"{col_filter or 'WHERE 1=1'} "
+            f"{'AND' if col_filter else 'WHERE'} doc_hash IS NOT NULL "
+            f"GROUP BY collection_name, doc_hash HAVING COUNT(*) > 1"
+        )
+        check["count"] = len(rows)
+        check["details"] = [f"{r[0]}/{r[1]} (x{r[2]})" for r in rows[:10]]
+
+        if not dry_run and rows:
+            total_deleted = 0
+            for col, doc_hash, cnt in rows:
+                if self.dburl.startswith("sqlite"):
+                    cur = self.connection.cursor()
+                    cur.execute(
+                        f"DELETE FROM {tbl} WHERE rowid NOT IN "
+                        f"(SELECT MIN(rowid) FROM {tbl} WHERE collection_name=? AND doc_hash=? LIMIT 1)",
+                        (col, doc_hash),
+                    )
+                    total_deleted += cur.rowcount
+                    self.connection.commit()
+                elif self.dburl.startswith("duckdb"):
+                    self.connection.sql(
+                        f"DELETE FROM {tbl} WHERE id NOT IN "
+                        f"(SELECT MIN(id) FROM {tbl} WHERE collection_name='{col}' AND doc_hash='{doc_hash}')"
+                    )
+                else:
+                    with self.engine.connect() as conn:
+                        r = conn.execute(text(
+                            f"DELETE FROM {tbl} WHERE id NOT IN "
+                            f"(SELECT MIN(id) FROM {tbl} WHERE collection_name=:col AND doc_hash=:hash)"
+                        ), {"col": col, "hash": doc_hash})
+                        total_deleted += r.rowcount
+                        conn.commit()
+            check["fix_applied"] = total_deleted
+
+        if check["count"] == 0:
+            check["severity"] = "info"
+        return check
+
+    def _verify_hash_integrity(self, tbl: str, col_filter: str, dry_run: bool, collection_name: str) -> dict:
+        check = {"name": "hash_integrity", "severity": "error", "count": 0, "details": [], "fix_applied": None}
+        rows = self._verify_query(tbl, f"SELECT id, doc_hash, document FROM {tbl} {col_filter} LIMIT 500")
+        bad = []
+        for row in rows:
+            rid, stored_hash, document = row[0], row[1], row[2]
+            if document is None:
+                continue
+            expected = sha256(document.encode()).hexdigest()
+            if stored_hash != expected:
+                bad.append((rid, stored_hash, expected, document[:50] if document else ""))
+        check["count"] = len(bad)
+        check["details"] = [f"id={b[0]}: stored={b[1][:12]}... expected={b[2][:12]}..." for b in bad[:10]]
+
+        if not dry_run and bad:
+            for rid, _, expected, _ in bad:
+                self._verify_execute(tbl, f"UPDATE {tbl} SET doc_hash = '{expected}' WHERE id = {rid}")
+            check["fix_applied"] = len(bad)
+
+        if check["count"] == 0:
+            check["severity"] = "info"
+        return check
+
+    def _verify_missing_models(self, tbl: str, col_filter: str, dry_run: bool, collection_name: str) -> dict:
+        check = {"name": "missing_models", "severity": "warning", "count": 0, "details": [], "fix_applied": None}
+        rows = self._verify_query(tbl,
+            f"SELECT COUNT(*) FROM {tbl} {col_filter} "
+            f"{'AND' if col_filter else 'WHERE'} (embedding_model IS NULL OR embedding_model = '' OR embedding_model = 'unknown')"
+        )
+        check["count"] = rows[0][0] if rows else 0
+
+        if not dry_run and check["count"] > 0:
+            self._verify_execute(tbl,
+                f"UPDATE {tbl} SET embedding_model = '{self.embedding_model}' "
+                f"WHERE embedding_model IS NULL OR embedding_model = '' OR embedding_model = 'unknown'"
+            )
+            check["fix_applied"] = check["count"]
+
+        if check["count"] > 0:
+            check["details"] = [f"{check['count']} rows with missing/unknown embedding_model"]
+        else:
+            check["severity"] = "info"
+        return check
+
+    def _verify_mixed_models(self, tbl: str, col_filter: str, dry_run: bool, collection_name: str) -> dict:
+        check = {"name": "mixed_models", "severity": "warning", "count": 0, "details": [], "fix_applied": None}
+        rows = self._verify_query(tbl,
+            f"SELECT collection_name, embedding_model, COUNT(*) as cnt FROM {tbl} "
+            f"{col_filter or 'WHERE 1=1'} "
+            f"{'AND' if col_filter else 'WHERE'} embedding_model IS NOT NULL "
+            f"GROUP BY collection_name, embedding_model"
+        )
+        collections = {}
+        for col, model, cnt in rows:
+            collections.setdefault(col, []).append((model, cnt))
+
+        mixed = {col: models for col, models in collections.items() if len(models) > 1}
+        check["count"] = len(mixed)
+        check["details"] = [
+            f"{col}: {', '.join(f'{m} ({c})' for m, c in models)}"
+            for col, models in list(mixed.items())[:10]
+        ]
+        if check["count"] == 0:
+            check["severity"] = "info"
+        return check
+
+    def _verify_dimension_consistency(self, tbl: str, col_filter: str, dry_run: bool, collection_name: str) -> dict:
+        check = {"name": "dimension_consistency", "severity": "error", "count": 0, "details": [], "fix_applied": None}
+        expected_dim = self._get_embedding_dimension()
+        table_dim = self._get_table_embedding_dimension()
+        if table_dim is None:
+            check["details"] = ["Could not detect table dimension"]
+            check["severity"] = "info"
+            return check
+        if table_dim == expected_dim:
+            check["severity"] = "info"
+            return check
+        check["count"] = 1
+        check["details"] = [f"Table dimension ({table_dim}) != model dimension ({expected_dim})"]
+        return check
+
+    def _verify_partial_documents(self, tbl: str, col_filter: str, dry_run: bool, collection_name: str) -> dict:
+        check = {"name": "partial_documents", "severity": "warning", "count": 0, "details": [], "fix_applied": None}
+        rows = self._verify_query(tbl,
+            f"SELECT collection_name, doc_name, MIN(page_number) as min_p, MAX(page_number) as max_p, COUNT(*) as cnt "
+            f"FROM {tbl} {col_filter} "
+            f"GROUP BY collection_name, doc_name"
+        )
+        partial = []
+        for col, doc, min_p, max_p, cnt in rows:
+            expected_pages = max_p - min_p + 1
+            if cnt < expected_pages:
+                partial.append((col, doc, cnt, expected_pages))
+        check["count"] = len(partial)
+        check["details"] = [f"{col}/{doc}: {cnt}/{exp} pages" for col, doc, cnt, exp in partial[:10]]
+        if check["count"] == 0:
+            check["severity"] = "info"
+        return check
+
+    def _verify_orphaned_shadows(self, tbl: str, col_filter: str, dry_run: bool, collection_name: str) -> dict:
+        check = {"name": "orphaned_shadows", "severity": "warning", "count": 0, "details": [], "fix_applied": None}
+        rows = self._verify_query(tbl,
+            f"SELECT DISTINCT collection_name FROM {tbl} WHERE collection_name LIKE '%_v2'"
+        )
+        shadows = [r[0] for r in rows]
+        check["count"] = len(shadows)
+        check["details"] = shadows[:10]
+        if check["count"] == 0:
+            check["severity"] = "info"
+        return check
+
+    def _verify_orphaned_tables(self, tbl: str, col_filter: str, dry_run: bool, collection_name: str) -> dict:
+        check = {"name": "orphaned_tables", "severity": "info", "count": 0, "details": [], "fix_applied": None}
+        tables = self._get_all_embedding_tables()
+        active = self.table_name
+        dim_specific = [t for t in tables if t != active and "_backup" not in t and not t.endswith("_fts")]
+        check["count"] = len(dim_specific)
+        for t in dim_specific:
+            try:
+                cnt = self._verify_query(t, f"SELECT COUNT(*) FROM {t}")[0][0]
+                check["details"].append(f"{t}: {cnt} rows")
+            except Exception:
+                check["details"].append(f"{t}: (error reading)")
+        if check["count"] == 0:
+            check["severity"] = "info"
+        return check
+
+    def _verify_stale_backups(self, tbl: str, col_filter: str, dry_run: bool, collection_name: str) -> dict:
+        check = {"name": "stale_backups", "severity": "info", "count": 0, "details": [], "fix_applied": None}
+        tables = self._get_all_embedding_tables()
+        backups = [t for t in tables if "_backup" in t]
+        check["count"] = len(backups)
+        for t in backups:
+            try:
+                cnt = self._verify_query(t, f"SELECT COUNT(*) FROM {t}")[0][0]
+                check["details"].append(f"{t}: {cnt} rows")
+            except Exception:
+                check["details"].append(f"{t}: (error reading)")
+        return check
+
+    def _verify_empty_embeddings(self, tbl: str, col_filter: str, dry_run: bool, collection_name: str) -> dict:
+        check = {"name": "empty_embeddings", "severity": "error", "count": 0, "details": [], "fix_applied": None}
+        if self.dburl.startswith("sqlite"):
+            rows = self._verify_query(tbl, f"SELECT COUNT(*) FROM {tbl} {col_filter} WHERE document IS NULL OR document = ''")
+        elif self.dburl.startswith("duckdb"):
+            rows = self._verify_query(tbl, f"SELECT COUNT(*) FROM {tbl} {col_filter} {'AND' if col_filter else 'WHERE'} (document IS NULL OR document = '')")
+        else:
+            rows = self._verify_query(tbl, f"SELECT COUNT(*) FROM {tbl} {col_filter} {'AND' if col_filter else 'WHERE'} (document IS NULL OR document = '')")
+        check["count"] = rows[0][0] if rows else 0
+        if check["count"] > 0:
+            check["details"] = [f"{check['count']} rows with empty document text"]
+        else:
+            check["severity"] = "info"
+        return check
+
+    def _verify_duplicate_doc_pages(self, tbl: str, col_filter: str, dry_run: bool, collection_name: str) -> dict:
+        check = {"name": "duplicate_doc_pages", "severity": "warning", "count": 0, "details": [], "fix_applied": None}
+        rows = self._verify_query(tbl,
+            f"SELECT collection_name, doc_name, page_number, COUNT(*) as cnt FROM {tbl} "
+            f"{col_filter or 'WHERE 1=1'} "
+            f"GROUP BY collection_name, doc_name, page_number HAVING COUNT(*) > 1"
+        )
+        check["count"] = len(rows)
+        check["details"] = [f"{r[0]}/{r[1]} page {r[2]} (x{r[3]})" for r in rows[:10]]
+
+        if not dry_run and rows:
+            total_deleted = 0
+            for col, doc, page, cnt in rows:
+                if self.dburl.startswith("sqlite"):
+                    cur = self.connection.cursor()
+                    cur.execute(
+                        f"DELETE FROM {tbl} WHERE rowid NOT IN "
+                        f"(SELECT MIN(rowid) FROM {tbl} WHERE collection_name=? AND doc_name=? AND page_number=?)",
+                        (col, doc, page),
+                    )
+                    total_deleted += cur.rowcount
+                    self.connection.commit()
+                elif self.dburl.startswith("duckdb"):
+                    self.connection.sql(
+                        f"DELETE FROM {tbl} WHERE id NOT IN "
+                        f"(SELECT MIN(id) FROM {tbl} WHERE collection_name='{col}' AND doc_name='{doc}' AND page_number={page})"
+                    )
+                else:
+                    with self.engine.connect() as conn:
+                        r = conn.execute(text(
+                            f"DELETE FROM {tbl} WHERE id NOT IN "
+                            f"(SELECT MIN(id) FROM {tbl} WHERE collection_name=:col AND doc_name=:doc AND page_number=:page)"
+                        ), {"col": col, "doc": doc, "page": page})
+                        total_deleted += r.rowcount
+                        conn.commit()
+            check["fix_applied"] = total_deleted
+
+        if check["count"] == 0:
+            check["severity"] = "info"
+        return check
 
     def list_backup_tables(self) -> list[dict]:
         """
@@ -3178,10 +3863,12 @@ class DocEmbedder:
                 break
 
             for record in batch:
-                if resume and target_embedder._check_existing(record["doc_hash"]):
-                    stats["skipped"] += 1
-                    processed += 1
-                    continue
+                if resume:
+                    target_embedder.collection_name = record["collection_name"]
+                    if target_embedder._check_existing(record["doc_hash"]):
+                        stats["skipped"] += 1
+                        processed += 1
+                        continue
 
                 if not dry_run:
                     try:

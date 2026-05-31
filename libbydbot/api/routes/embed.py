@@ -20,12 +20,17 @@ from libbydbot.api.schemas import (
     EmbedTextResponse,
     EmbedUploadResponse,
     EmbeddingModelsResponse,
+    FinalizeRequest,
+    FinalizeResponse,
     MigrateBackendRequest,
     MigrateBackendResponse,
     ModelInfoResponse,
     ReembedRequest,
     ReembedResponse,
     RollbackResponse,
+    SchemaMigrationResponse,
+    VerifyRequest,
+    VerifyResponse,
 )
 from libbydbot.brain.embed import DocEmbedder
 
@@ -340,6 +345,7 @@ def reembed_embeddings(request: ReembedRequest, embedder: EmbedderDep):
             old_chunk_size=stats.get("old_chunk_size", 0),
             new_chunk_size=stats.get("new_chunk_size", 0),
             shadow_collection=stats.get("shadow_collection", ""),
+            shadow_table=stats.get("shadow_table", ""),
         )
     except Exception as e:
         logger.error(f"Error re-embedding: {e}")
@@ -481,4 +487,82 @@ def migrate_backend(request: MigrateBackendRequest, embedder: EmbedderDep):
         )
     except Exception as e:
         logger.error(f"Error migrating backend: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/finalize", response_model=FinalizeResponse)
+def finalize_rechunk(request: FinalizeRequest, embedder: EmbedderDep):
+    """
+    Finalize a rechunk operation: cutover from shadow collection to production.
+
+    After a ``reembed`` with ``rechunk=true``, the new data lives in a shadow
+    collection (``{name}_v2``).  This endpoint swaps it into place.
+    """
+    try:
+        stats = embedder.finalize_rechunk(
+            collection_name=request.collection_name,
+            shadow_collection=request.shadow_collection,
+            shadow_table=request.shadow_table,
+        )
+        return FinalizeResponse(
+            success=stats["success"],
+            collection=stats["collection"],
+            original_count=stats["original_count"],
+            shadow_count=stats["shadow_count"],
+            deleted_original=stats["deleted_original"],
+            renamed=stats["renamed"],
+            table_swapped=stats["table_swapped"],
+            errors=stats["errors"],
+            message="Finalized successfully" if stats["success"] else f"Finalize failed: {'; '.join(stats['errors'])}",
+        )
+    except Exception as e:
+        logger.error(f"Error finalizing rechunk: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/migrate-schema", response_model=SchemaMigrationResponse)
+def migrate_schema(embedder: EmbedderDep):
+    """
+    Migrate embedding tables to use compound UNIQUE(collection_name, doc_hash)
+    instead of global UNIQUE(doc_hash).
+
+    This allows the same text to appear in multiple collections.
+    """
+    try:
+        result = embedder.migrate_compound_unique()
+        return SchemaMigrationResponse(
+            backend=result["backend"],
+            changes=result["changes"],
+        )
+    except Exception as e:
+        logger.error(f"Error migrating schema: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/verify", response_model=VerifyResponse)
+def verify_embeddings(request: VerifyRequest, embedder: EmbedderDep):
+    """
+    Verify embedding data integrity and optionally fix issues.
+
+    Checks include: duplicate hashes, hash integrity, missing models,
+    mixed models, dimension consistency, partial documents, orphaned
+    shadow collections, orphaned tables, stale backups, empty embeddings,
+    and duplicate doc+page combinations.
+    """
+    try:
+        result = embedder.verify_and_fix(
+            collection_name=request.collection_name,
+            dry_run=request.dry_run,
+            checks=request.checks,
+        )
+        return VerifyResponse(
+            collection=result["collection"],
+            dry_run=result["dry_run"],
+            table=result["table"],
+            checks=result["checks"],
+            summary=result["summary"],
+            errors=result.get("errors", []),
+        )
+    except Exception as e:
+        logger.error(f"Error verifying embeddings: {e}")
         raise HTTPException(status_code=500, detail=str(e))
