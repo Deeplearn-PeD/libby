@@ -1045,16 +1045,17 @@ class DocEmbedder:
             pages = [docs[d_id] for d_id in sorted_ids]
         else:
             dimension = self._get_embedding_dimension()
+            vec_literal = "'[" + ",".join(str(v) for v in query_embedding) + "]'"
             with Session(self.engine) as session:
-                col_filter = f"WHERE collection_name = :col" if collection else ""
+                col_filter = "WHERE collection_name = :col" if collection else ""
                 rows = session.execute(
                     text(f"""
                         SELECT document FROM {tbl}
                         {col_filter}
-                        ORDER BY embedding <=> :query_embedding::vector({dimension})
+                        ORDER BY embedding <=> {vec_literal}::vector({dimension})
                         LIMIT :limit
                     """),
-                    {"col": collection, "query_embedding": str(query_embedding), "limit": num_docs},
+                    {"col": collection, "limit": num_docs},
                 ).fetchall()
                 pages = [r[0] for r in rows]
 
@@ -1207,6 +1208,7 @@ class DocEmbedder:
                 )
         else:
             dimension = self._get_embedding_dimension()
+            vec_literal = "'[" + ",".join(str(v) for v in query_embedding) + "]'"
             with Session(self.engine) as session:
                 col_filter = "WHERE collection_name = :col" if collection else ""
                 rows = session.execute(
@@ -1214,10 +1216,10 @@ class DocEmbedder:
                         SELECT doc_name, page_number, document
                         FROM {tbl}
                         {col_filter}
-                        ORDER BY embedding <=> :query_embedding::vector({dimension})
+                        ORDER BY embedding <=> {vec_literal}::vector({dimension})
                         LIMIT :limit
                     """),
-                    {"col": collection, "query_embedding": str(query_embedding), "limit": num_docs},
+                    {"col": collection, "limit": num_docs},
                 ).fetchall()
                 for rank, (doc_name, page_num, doc) in enumerate(rows):
                     results.append(
