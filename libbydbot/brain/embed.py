@@ -3214,7 +3214,7 @@ class DocEmbedder:
         check = {"name": "duplicate_hashes", "severity": "error", "count": 0, "details": [], "fix_applied": None}
         rows = self._verify_query(tbl,
             f"SELECT collection_name, doc_hash, COUNT(*) as cnt FROM {tbl} "
-            f"{col_filter or 'WHERE 1=1'} "
+            f"{col_filter or ''} "
             f"{'AND' if col_filter else 'WHERE'} doc_hash IS NOT NULL "
             f"GROUP BY collection_name, doc_hash HAVING COUNT(*) > 1"
         )
@@ -3300,7 +3300,7 @@ class DocEmbedder:
         check = {"name": "mixed_models", "severity": "warning", "count": 0, "details": [], "fix_applied": None}
         rows = self._verify_query(tbl,
             f"SELECT collection_name, embedding_model, COUNT(*) as cnt FROM {tbl} "
-            f"{col_filter or 'WHERE 1=1'} "
+            f"{col_filter or ''} "
             f"{'AND' if col_filter else 'WHERE'} embedding_model IS NOT NULL "
             f"GROUP BY collection_name, embedding_model"
         )
@@ -3411,7 +3411,7 @@ class DocEmbedder:
         check = {"name": "duplicate_doc_pages", "severity": "warning", "count": 0, "details": [], "fix_applied": None}
         rows = self._verify_query(tbl,
             f"SELECT collection_name, doc_name, page_number, COUNT(*) as cnt FROM {tbl} "
-            f"{col_filter or 'WHERE 1=1'} "
+            f"{col_filter or ''} "
             f"GROUP BY collection_name, doc_name, page_number HAVING COUNT(*) > 1"
         )
         check["count"] = len(rows)
