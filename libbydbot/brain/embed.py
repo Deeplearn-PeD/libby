@@ -675,22 +675,21 @@ class DocEmbedder:
         embedding = self._generate_embedding(doctext)
 
         if self.dburl.startswith("sqlite"):
-            # Use native SQLite operations
             import struct
 
+            target = self._target_table_for_dimension()
+            target_fts = f"{target}_fts"
             embedding_bytes = struct.pack(f"{len(embedding)}f", *embedding)
 
             with self.connection as conn:
                 cursor = conn.cursor()
-                if self._should_create_tables():
-                    self._create_sqlite_table(cursor)
                 try:
                     logger.info(
-                        f"Inserting into {self.table_name}: {docname} page {page_number}"
+                        f"Inserting into {target}: {docname} page {page_number}"
                     )
                     cursor.execute(
                         f"""
-                        INSERT INTO {self.table_name} (collection_name, doc_name, page_number, doc_hash, document, embedding_model, embedding)
+                        INSERT INTO {target} (collection_name, doc_name, page_number, doc_hash, document, embedding_model, embedding)
                         VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                         (
@@ -704,9 +703,8 @@ class DocEmbedder:
                         ),
                     )
 
-                    # Update FTS table
                     cursor.execute(
-                        f"INSERT INTO {self.table_name}_fts(rowid, document, doc_hash) VALUES (?, ?, ?)",
+                        f"INSERT INTO {target_fts}(rowid, document, doc_hash) VALUES (?, ?, ?)",
                         (cursor.lastrowid, doctext, document_hash),
                     )
 
@@ -720,16 +718,13 @@ class DocEmbedder:
                         f"Error: {e} generated when attempting to embed the following text: \n{doctext}"
                     )
         elif self.dburl.startswith("duckdb"):
-            # Use direct SQL for DuckDB
-            dimension = self._get_embedding_dimension()
-            # Convert embedding list to a string representation for DuckDB array literal
+            target = self._target_table_for_dimension()
             embedding_str = "[" + ",".join(str(v) for v in embedding) + "]"
             conn = self.connection
             try:
-                # Use conn.sql() for direct DuckDB SQL execution
                 conn.sql(
                     f"""
-                    INSERT INTO {self.table_name} (doc_hash, doc_name, collection_name, page_number, document, embedding_model, embedding)
+                    INSERT INTO {target} (doc_hash, doc_name, collection_name, page_number, document, embedding_model, embedding)
                     VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                     params=[
@@ -748,18 +743,25 @@ class DocEmbedder:
                 )
         else:
             # PostgreSQL
+            target = self._target_table_for_dimension()
             with Session(self.engine) as session:
-                doc_vector = self.embedding(
-                    doc_hash=document_hash,
-                    doc_name=docname,
-                    collection_name=self.collection_name,
-                    page_number=page_number,
-                    document=doctext,
-                    embedding_model=self.embedding_model,
-                    embedding=embedding,
-                )
                 try:
-                    session.add(doc_vector)
+                    session.execute(
+                        text(f"""
+                            INSERT INTO {target}
+                            (doc_hash, doc_name, collection_name, page_number, document, embedding_model, embedding)
+                            VALUES (:hash, :name, :col, :page, :doc, :model, :embedding)
+                        """),
+                        {
+                            "hash": document_hash,
+                            "name": docname,
+                            "col": self.collection_name,
+                            "page": page_number,
+                            "doc": doctext,
+                            "model": self.embedding_model,
+                            "embedding": embedding,
+                        },
+                    )
                     session.commit()
                 except IntegrityError as e:
                     session.rollback()
