@@ -3111,6 +3111,7 @@ class DocEmbedder:
             "stale_backups",
             "empty_embeddings",
             "duplicate_doc_pages",
+            "duplicate_content",
         ]
         active_checks = checks if checks else ALL_CHECKS
         tbl = self._active_table()
@@ -3212,44 +3213,106 @@ class DocEmbedder:
                 conn.execute(text(sql))
                 conn.commit()
 
+    def _delete_duplicates_keep_one(self, tbl: str, col: str, value: str, column: str) -> int:
+        """Delete duplicate rows keeping the one with the lowest id. Returns count deleted."""
+        if self.dburl.startswith("sqlite"):
+            cur = self.connection.cursor()
+            cur.execute(
+                f"DELETE FROM {tbl} WHERE rowid NOT IN "
+                f"(SELECT MIN(rowid) FROM {tbl} WHERE collection_name=? AND {column}=?)",
+                (col, value),
+            )
+            deleted = cur.rowcount
+            self.connection.commit()
+            return deleted
+        elif self.dburl.startswith("duckdb"):
+            before = self._verify_query(tbl, f"SELECT COUNT(*) FROM {tbl} WHERE collection_name='{col}' AND {column}='{value}'")[0][0]
+            self.connection.sql(
+                f"DELETE FROM {tbl} WHERE id NOT IN "
+                f"(SELECT MIN(id) FROM {tbl} WHERE collection_name='{col}' AND {column}='{value}')"
+            )
+            after = self._verify_query(tbl, f"SELECT COUNT(*) FROM {tbl} WHERE collection_name='{col}' AND {column}='{value}'")[0][0]
+            return before - after
+        else:
+            with self.engine.connect() as conn:
+                result = conn.execute(text(
+                    f"DELETE FROM {tbl} WHERE id NOT IN "
+                    f"(SELECT MIN(id) FROM {tbl} WHERE collection_name=:col AND {column}=:val)"
+                ), {"col": col, "val": value})
+                deleted = result.rowcount
+                conn.commit()
+                return deleted
+
+    def _delete_duplicates_keep_one_composite(self, tbl: str, col: str, doc: str, page: int) -> int:
+        """Delete duplicate (collection, doc_name, page_number) rows keeping lowest id."""
+        if self.dburl.startswith("sqlite"):
+            cur = self.connection.cursor()
+            cur.execute(
+                f"DELETE FROM {tbl} WHERE rowid NOT IN "
+                f"(SELECT MIN(rowid) FROM {tbl} WHERE collection_name=? AND doc_name=? AND page_number=?)",
+                (col, doc, page),
+            )
+            deleted = cur.rowcount
+            self.connection.commit()
+            return deleted
+        elif self.dburl.startswith("duckdb"):
+            before = self._verify_query(tbl,
+                f"SELECT COUNT(*) FROM {tbl} WHERE collection_name='{col}' AND doc_name='{doc}' AND page_number={page}"
+            )[0][0]
+            self.connection.sql(
+                f"DELETE FROM {tbl} WHERE id NOT IN "
+                f"(SELECT MIN(id) FROM {tbl} WHERE collection_name='{col}' AND doc_name='{doc}' AND page_number={page})"
+            )
+            after = self._verify_query(tbl,
+                f"SELECT COUNT(*) FROM {tbl} WHERE collection_name='{col}' AND doc_name='{doc}' AND page_number={page}"
+            )[0][0]
+            return before - after
+        else:
+            with self.engine.connect() as conn:
+                result = conn.execute(text(
+                    f"DELETE FROM {tbl} WHERE id NOT IN "
+                    f"(SELECT MIN(id) FROM {tbl} WHERE collection_name=:col AND doc_name=:doc AND page_number=:page)"
+                ), {"col": col, "doc": doc, "page": page})
+                deleted = result.rowcount
+                conn.commit()
+                return deleted
+
     def _verify_duplicate_hashes(self, tbl: str, col_filter: str, dry_run: bool, collection_name: str) -> dict:
         check = {"name": "duplicate_hashes", "severity": "error", "count": 0, "details": [], "fix_applied": None}
-        rows = self._verify_query(tbl,
-            f"SELECT collection_name, doc_hash, COUNT(*) as cnt FROM {tbl} "
-            f"{col_filter or ''} "
-            f"{'AND' if col_filter else 'WHERE'} doc_hash IS NOT NULL "
-            f"GROUP BY collection_name, doc_hash HAVING COUNT(*) > 1"
-        )
-        check["count"] = len(rows)
-        check["details"] = [f"{r[0]}/{r[1]} (x{r[2]})" for r in rows[:10]]
 
-        if not dry_run and rows:
-            total_deleted = 0
-            for col, doc_hash, cnt in rows:
-                if self.dburl.startswith("sqlite"):
-                    cur = self.connection.cursor()
-                    cur.execute(
-                        f"DELETE FROM {tbl} WHERE rowid NOT IN "
-                        f"(SELECT MIN(rowid) FROM {tbl} WHERE collection_name=? AND doc_hash=? LIMIT 1)",
-                        (col, doc_hash),
-                    )
-                    total_deleted += cur.rowcount
-                    self.connection.commit()
-                elif self.dburl.startswith("duckdb"):
-                    self.connection.sql(
-                        f"DELETE FROM {tbl} WHERE id NOT IN "
-                        f"(SELECT MIN(id) FROM {tbl} WHERE collection_name='{col}' AND doc_hash='{doc_hash}')"
-                    )
-                else:
-                    with self.engine.connect() as conn:
-                        r = conn.execute(text(
-                            f"DELETE FROM {tbl} WHERE id NOT IN "
-                            f"(SELECT MIN(id) FROM {tbl} WHERE collection_name=:col AND doc_hash=:hash)"
-                        ), {"col": col, "hash": doc_hash})
-                        total_deleted += r.rowcount
-                        conn.commit()
+        tables_to_check = self._get_all_embedding_tables()
+        tables_to_check = [t for t in tables_to_check if "_backup" not in t and not t.endswith("_fts")]
+
+        total_groups = 0
+        total_deleted = 0
+        all_details = []
+
+        for scan_tbl in tables_to_check:
+            try:
+                rows = self._verify_query(scan_tbl,
+                    f"SELECT collection_name, doc_hash, COUNT(*) as cnt FROM {scan_tbl} "
+                    f"{col_filter or ''} "
+                    f"{'AND' if col_filter else 'WHERE'} doc_hash IS NOT NULL "
+                    f"GROUP BY collection_name, doc_hash HAVING COUNT(*) > 1"
+                )
+            except Exception:
+                continue
+
+            if not rows:
+                continue
+
+            total_groups += len(rows)
+            all_details.extend([f"[{scan_tbl}] {r[0]}/{r[1][:16]}... (x{r[2]})" for r in rows[:5]])
+
+            if not dry_run:
+                for col, doc_hash, cnt in rows:
+                    deleted = self._delete_duplicates_keep_one(scan_tbl, col, doc_hash, "doc_hash")
+                    total_deleted += deleted
+
+        check["count"] = total_groups
+        check["details"] = all_details[:10]
+        if not dry_run and total_deleted > 0:
             check["fix_applied"] = total_deleted
-
         if check["count"] == 0:
             check["severity"] = "info"
         return check
@@ -3411,41 +3474,122 @@ class DocEmbedder:
 
     def _verify_duplicate_doc_pages(self, tbl: str, col_filter: str, dry_run: bool, collection_name: str) -> dict:
         check = {"name": "duplicate_doc_pages", "severity": "warning", "count": 0, "details": [], "fix_applied": None}
-        rows = self._verify_query(tbl,
-            f"SELECT collection_name, doc_name, page_number, COUNT(*) as cnt FROM {tbl} "
-            f"{col_filter or ''} "
-            f"GROUP BY collection_name, doc_name, page_number HAVING COUNT(*) > 1"
-        )
-        check["count"] = len(rows)
-        check["details"] = [f"{r[0]}/{r[1]} page {r[2]} (x{r[3]})" for r in rows[:10]]
 
-        if not dry_run and rows:
-            total_deleted = 0
-            for col, doc, page, cnt in rows:
-                if self.dburl.startswith("sqlite"):
-                    cur = self.connection.cursor()
-                    cur.execute(
-                        f"DELETE FROM {tbl} WHERE rowid NOT IN "
-                        f"(SELECT MIN(rowid) FROM {tbl} WHERE collection_name=? AND doc_name=? AND page_number=?)",
-                        (col, doc, page),
+        tables_to_check = self._get_all_embedding_tables()
+        tables_to_check = [t for t in tables_to_check if "_backup" not in t and not t.endswith("_fts")]
+
+        total_groups = 0
+        total_deleted = 0
+        all_details = []
+
+        for scan_tbl in tables_to_check:
+            try:
+                rows = self._verify_query(scan_tbl,
+                    f"SELECT collection_name, doc_name, page_number, COUNT(*) as cnt FROM {scan_tbl} "
+                    f"{col_filter or ''} "
+                    f"GROUP BY collection_name, doc_name, page_number HAVING COUNT(*) > 1"
+                )
+            except Exception:
+                continue
+
+            if not rows:
+                continue
+
+            total_groups += len(rows)
+            all_details.extend([f"[{scan_tbl}] {r[0]}/{r[1]} page {r[2]} (x{r[3]})" for r in rows[:5]])
+
+            if not dry_run:
+                for col, doc, page, cnt in rows:
+                    deleted = self._delete_duplicates_keep_one_composite(
+                        scan_tbl, col, doc, page
                     )
-                    total_deleted += cur.rowcount
-                    self.connection.commit()
-                elif self.dburl.startswith("duckdb"):
-                    self.connection.sql(
-                        f"DELETE FROM {tbl} WHERE id NOT IN "
-                        f"(SELECT MIN(id) FROM {tbl} WHERE collection_name='{col}' AND doc_name='{doc}' AND page_number={page})"
-                    )
-                else:
-                    with self.engine.connect() as conn:
-                        r = conn.execute(text(
-                            f"DELETE FROM {tbl} WHERE id NOT IN "
-                            f"(SELECT MIN(id) FROM {tbl} WHERE collection_name=:col AND doc_name=:doc AND page_number=:page)"
-                        ), {"col": col, "doc": doc, "page": page})
-                        total_deleted += r.rowcount
-                        conn.commit()
+                    total_deleted += deleted
+
+        check["count"] = total_groups
+        check["details"] = all_details[:10]
+        if not dry_run and total_deleted > 0:
             check["fix_applied"] = total_deleted
+        if check["count"] == 0:
+            check["severity"] = "info"
+        return check
 
+    def _verify_duplicate_content(self, tbl: str, col_filter: str, dry_run: bool, collection_name: str) -> dict:
+        check = {"name": "duplicate_content", "severity": "warning", "count": 0, "details": [], "fix_applied": None}
+
+        tables_to_check = self._get_all_embedding_tables()
+        tables_to_check = [t for t in tables_to_check if "_backup" not in t and not t.endswith("_fts")]
+
+        total_groups = 0
+        total_deleted = 0
+        all_details = []
+
+        for scan_tbl in tables_to_check:
+            try:
+                rows = self._verify_query(scan_tbl,
+                    f"SELECT collection_name, doc_name, page_number, document, COUNT(*) as cnt FROM {scan_tbl} "
+                    f"{col_filter or ''} "
+                    f"{'AND' if col_filter else 'WHERE'} document IS NOT NULL "
+                    f"GROUP BY collection_name, document HAVING COUNT(*) > 1"
+                )
+            except Exception:
+                continue
+
+            if not rows:
+                continue
+
+            total_groups += len(rows)
+            all_details.extend([
+                f"[{scan_tbl}] {r[0]}/{r[1]} page {r[2]}: \"{r[3][:60]}...\" (x{r[4]})"
+                for r in rows[:5]
+            ])
+
+            if not dry_run:
+                for col, doc, page, document, cnt in rows:
+                    if self.dburl.startswith("sqlite"):
+                        cur = self.connection.cursor()
+                        cur.execute(
+                            f"SELECT rowid FROM {scan_tbl} WHERE collection_name=? AND document=? ORDER BY rowid LIMIT 1",
+                            (col, document),
+                        )
+                        keep = cur.fetchone()
+                        if keep:
+                            cur.execute(
+                                f"DELETE FROM {scan_tbl} WHERE collection_name=? AND document=? AND rowid != ?",
+                                (col, document, keep[0]),
+                            )
+                            total_deleted += cur.rowcount
+                            self.connection.commit()
+                    elif self.dburl.startswith("duckdb"):
+                        keep_row = self._verify_query(scan_tbl,
+                            f"SELECT MIN(id) FROM {scan_tbl} WHERE collection_name='{col}' AND document='{document.replace(chr(39), chr(39)+chr(39))}'"
+                        )
+                        if keep_row and keep_row[0][0]:
+                            before = self._verify_query(scan_tbl,
+                                f"SELECT COUNT(*) FROM {scan_tbl} WHERE collection_name='{col}' AND document='{document.replace(chr(39), chr(39)+chr(39))}'"
+                            )[0][0]
+                            self.connection.sql(
+                                f"DELETE FROM {scan_tbl} WHERE collection_name='{col}' AND document='{document.replace(chr(39), chr(39)+chr(39))}' AND id != {keep_row[0][0]}"
+                            )
+                            after = self._verify_query(scan_tbl,
+                                f"SELECT COUNT(*) FROM {scan_tbl} WHERE collection_name='{col}' AND document='{document.replace(chr(39), chr(39)+chr(39))}'"
+                            )[0][0]
+                            total_deleted += before - after
+                    else:
+                        with self.engine.connect() as conn:
+                            keep = conn.execute(text(
+                                f"SELECT MIN(id) FROM {scan_tbl} WHERE collection_name=:col AND document=:doc"
+                            ), {"col": col, "doc": document}).scalar()
+                            if keep:
+                                result = conn.execute(text(
+                                    f"DELETE FROM {scan_tbl} WHERE collection_name=:col AND document=:doc AND id != :keep"
+                                ), {"col": col, "doc": document, "keep": keep})
+                                total_deleted += result.rowcount
+                                conn.commit()
+
+        check["count"] = total_groups
+        check["details"] = all_details[:10]
+        if not dry_run and total_deleted > 0:
+            check["fix_applied"] = total_deleted
         if check["count"] == 0:
             check["severity"] = "info"
         return check

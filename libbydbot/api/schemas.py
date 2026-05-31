@@ -361,7 +361,8 @@ class VerifyRequest(BaseModel):
         None,
         description="Specific checks to run (default: all). Options: duplicate_hashes, hash_integrity, "
                     "missing_models, mixed_models, dimension_consistency, partial_documents, "
-                    "orphaned_shadows, orphaned_tables, stale_backups, empty_embeddings, duplicate_doc_pages",
+                    "orphaned_shadows, orphaned_tables, stale_backups, empty_embeddings, "
+                    "duplicate_doc_pages, duplicate_content",
     )
 
 
