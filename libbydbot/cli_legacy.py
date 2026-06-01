@@ -101,7 +101,7 @@ class LibbyInterface(LibbyDBot):
         collection_name: str = "",
         new_model: str = "",
         batch_size: int = 100,
-        rechunk: bool = False,
+        rechunk: bool = True,
         new_chunk_size: int = 1500,
         new_chunk_overlap: int = 200,
     ):

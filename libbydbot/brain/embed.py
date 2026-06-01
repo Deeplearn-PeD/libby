@@ -184,39 +184,47 @@ class DocEmbedder:
 
     def _detect_embedding_model_from_db(self) -> str | None:
         """
-        Query the database for the most common ``embedding_model`` value.
+        Query all non-backup embedding tables for the most common
+        ``embedding_model`` value.
 
-        Returns ``None`` when the table is empty or the column is absent.
+        Returns ``None`` when no table has data or the column is absent.
         """
-        table = getattr(self, "table_name", None)
-        if not table:
-            return None
         try:
+            tables = self._get_all_embedding_tables()
+            tables = [t for t in tables if "_backup" not in t and not t.endswith("_fts")]
+            if not tables:
+                return None
+            union_parts = []
+            for t in tables:
+                union_parts.append(
+                    f"SELECT embedding_model, COUNT(*) AS cnt FROM {t} "
+                    "WHERE embedding_model IS NOT NULL AND embedding_model != '' "
+                    "GROUP BY embedding_model"
+                )
+            union_sql = " UNION ALL ".join(union_parts)
+            if not union_sql:
+                return None
+
             if self.dburl.startswith("sqlite"):
                 cur = self.connection.cursor()
                 cur.execute(
-                    f"SELECT embedding_model, COUNT(*) AS cnt FROM \"{table}\" "
-                    "WHERE embedding_model IS NOT NULL AND embedding_model != '' "
-                    "GROUP BY embedding_model ORDER BY cnt DESC LIMIT 1"
+                    f"SELECT embedding_model, SUM(cnt) AS total FROM ({union_sql}) "
+                    "GROUP BY embedding_model ORDER BY total DESC LIMIT 1"
                 )
                 row = cur.fetchone()
                 return row[0] if row else None
-
             elif self.dburl.startswith("duckdb"):
                 row = self.connection.sql(
-                    f"SELECT embedding_model, COUNT(*) AS cnt FROM {table} "
-                    "WHERE embedding_model IS NOT NULL AND embedding_model != '' "
-                    "GROUP BY embedding_model ORDER BY cnt DESC LIMIT 1"
+                    f"SELECT embedding_model, SUM(cnt) AS total FROM ({union_sql}) "
+                    "GROUP BY embedding_model ORDER BY total DESC LIMIT 1"
                 ).fetchone()
                 return row[0] if row else None
-
             else:
                 with Session(self.engine) as session:
                     row = session.execute(
                         text(
-                            f"SELECT embedding_model, COUNT(*) AS cnt FROM {table} "
-                            "WHERE embedding_model IS NOT NULL AND embedding_model != '' "
-                            "GROUP BY embedding_model ORDER BY cnt DESC LIMIT 1"
+                            f"SELECT embedding_model, SUM(cnt) AS total FROM ({union_sql}) "
+                            "GROUP BY embedding_model ORDER BY total DESC LIMIT 1"
                         )
                     ).fetchone()
                     return row[0] if row else None
@@ -322,7 +330,7 @@ class DocEmbedder:
                 with Session(self.engine) as session:
                     result = session.execute(
                         text(
-                            "SELECT tablename FROM pg_tables WHERE tablename='embedding';"
+                            f"SELECT tablename FROM pg_tables WHERE tablename='{self.table_name}';"
                         )
                     ).fetchone()
                     return result is None
@@ -423,13 +431,17 @@ class DocEmbedder:
         else:  # mxbai-embed-large and other Ollama models
             return 1024
 
-    def _get_table_embedding_dimension(self) -> int | None:
-        """Detect the actual embedding dimension of the existing table column."""
+    def _get_table_embedding_dimension(self, table_name: str | None = None) -> int | None:
+        """Detect the actual embedding dimension of the existing table column.
+
+        :param table_name: Table to check (defaults to ``self.table_name``).
+        """
+        tbl = table_name or self.table_name
         try:
             if self.dburl.startswith("sqlite"):
                 import re
                 cur = self.connection.cursor()
-                cur.execute(f"PRAGMA table_info({self.table_name})")
+                cur.execute(f"PRAGMA table_info({tbl})")
                 for col in cur.fetchall():
                     if col[1] == "embedding":
                         m = re.search(r"float\[(\d+)\]", col[2].lower())
@@ -437,7 +449,7 @@ class DocEmbedder:
                             return int(m.group(1))
                 # vec0 virtual tables store types in the CREATE statement
                 row = cur.execute(
-                    f"SELECT sql FROM sqlite_master WHERE type='table' AND name='{self.table_name}'"
+                    f"SELECT sql FROM sqlite_master WHERE type='table' AND name='{tbl}'"
                 ).fetchone()
                 if row:
                     m = re.search(r"float\[(\d+)\]", row[0].lower())
@@ -447,7 +459,7 @@ class DocEmbedder:
             elif self.dburl.startswith("duckdb"):
                 row = self.connection.sql(
                     f"SELECT data_type FROM information_schema.columns "
-                    f"WHERE table_name = '{self.table_name}' AND column_name = 'embedding'"
+                    f"WHERE table_name = '{tbl}' AND column_name = 'embedding'"
                 ).fetchone()
                 if row:
                     import re
@@ -457,8 +469,8 @@ class DocEmbedder:
                 with self.engine.connect() as conn:
                     row = conn.execute(
                         text(
-                            "SELECT data_type FROM information_schema.columns "
-                            "WHERE table_name = 'embedding' AND column_name = 'embedding'"
+                            f"SELECT data_type FROM information_schema.columns "
+                            f"WHERE table_name = '{tbl}' AND column_name = 'embedding'"
                         )
                     ).fetchone()
                     if row:
@@ -1354,9 +1366,9 @@ class DocEmbedder:
         with Session(self.engine) as session:
             # Check if column exists
             result = session.execute(
-                text("""
+                text(f"""
                 SELECT column_name FROM information_schema.columns
-                WHERE table_name = 'embedding' AND column_name = 'embedding_model'
+                WHERE table_name = '{self.table_name}' AND column_name = 'embedding_model'
             """)
             ).fetchall()
 
@@ -1367,7 +1379,7 @@ class DocEmbedder:
             logger.info("Migrating PostgreSQL table to add embedding_model column...")
             session.execute(
                 text(
-                    "ALTER TABLE embedding ADD COLUMN embedding_model TEXT DEFAULT 'unknown'"
+                    f"ALTER TABLE {self.table_name} ADD COLUMN embedding_model TEXT DEFAULT 'unknown'"
                 )
             )
             session.commit()
@@ -1436,7 +1448,7 @@ class DocEmbedder:
         collection_name: str = "",
         new_model: str | None = None,
         batch_size: int = 100,
-        rechunk: bool = False,
+        rechunk: bool = True,
         new_chunk_size: int = 1500,
         new_chunk_overlap: int = 200,
     ) -> dict:
@@ -3386,7 +3398,7 @@ class DocEmbedder:
     def _verify_dimension_consistency(self, tbl: str, col_filter: str, dry_run: bool, collection_name: str) -> dict:
         check = {"name": "dimension_consistency", "severity": "error", "count": 0, "details": [], "fix_applied": None}
         expected_dim = self._get_embedding_dimension()
-        table_dim = self._get_table_embedding_dimension()
+        table_dim = self._get_table_embedding_dimension(tbl)
         if table_dim is None:
             check["details"] = ["Could not detect table dimension"]
             check["severity"] = "info"
@@ -3431,30 +3443,205 @@ class DocEmbedder:
     def _verify_orphaned_tables(self, tbl: str, col_filter: str, dry_run: bool, collection_name: str) -> dict:
         check = {"name": "orphaned_tables", "severity": "info", "count": 0, "details": [], "fix_applied": None}
         tables = self._get_all_embedding_tables()
-        active = self.table_name
+        active = tbl  # Use the actual active table, not self.table_name
         dim_specific = [t for t in tables if t != active and "_backup" not in t and not t.endswith("_fts")]
         check["count"] = len(dim_specific)
+        total_migrated = 0
         for t in dim_specific:
             try:
                 cnt = self._verify_query(t, f"SELECT COUNT(*) FROM {t}")[0][0]
                 check["details"].append(f"{t}: {cnt} rows")
+                if cnt > 0 and not dry_run:
+                    migrated = self._consolidate_table_into_active(t, active, collection_name)
+                    total_migrated += migrated
+                    if migrated > 0:
+                        check["details"].append(f"  -> migrated {migrated} docs to {active}")
             except Exception:
                 check["details"].append(f"{t}: (error reading)")
+        if not dry_run and total_migrated > 0:
+            check["fix_applied"] = total_migrated
         if check["count"] == 0:
             check["severity"] = "info"
         return check
 
+    def _consolidate_table_into_active(self, source: str, active: str, collection_filter: str) -> int:
+        """
+        Migrate documents from *source* table into *active* table.
+
+        If both tables have the same embedding dimension, a bulk INSERT ...
+        SELECT is used.  Otherwise documents are re-embedded with the current
+        model.  Duplicates (matching ``(collection_name, doc_hash)``) are
+        skipped.
+
+        Returns the number of documents migrated.
+        """
+        source_dim = self._get_table_embedding_dimension(source)
+        active_dim = self._get_table_embedding_dimension(active)
+        model_dim = self._get_embedding_dimension()
+
+        # Build an AND-able condition for the source table when filtering
+        and_cond = f"AND src.collection_name = '{collection_filter}'" if collection_filter else ""
+
+        if source_dim is not None and source_dim == active_dim and source_dim == model_dim:
+            return self._bulk_copy_orphan_table(source, active, and_cond)
+        return self._reembed_orphan_table(source, active, and_cond)
+
+    def _bulk_copy_orphan_table(self, source: str, target: str, and_cond: str) -> int:
+        """Bulk-copy rows from *source* to *target* where not already present."""
+        model = self.embedding_model
+        if self.dburl.startswith("sqlite"):
+            cur = self.connection.cursor()
+            cur.execute(f"""
+                INSERT INTO {target} (collection_name, doc_name, page_number, doc_hash, document, embedding_model, embedding)
+                SELECT src.collection_name, src.doc_name, src.page_number, src.doc_hash, src.document, '{model}', src.embedding
+                FROM {source} src
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM {target} dst
+                    WHERE dst.collection_name = src.collection_name AND dst.doc_hash = src.doc_hash
+                ) {and_cond}
+            """)
+            self.connection.commit()
+            return cur.rowcount
+        elif self.dburl.startswith("duckdb"):
+            result = self.connection.sql(f"""
+                INSERT INTO {target} (collection_name, doc_name, page_number, doc_hash, document, embedding_model, embedding)
+                SELECT src.collection_name, src.doc_name, src.page_number, src.doc_hash, src.document, '{model}', src.embedding
+                FROM {source} src
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM {target} dst
+                    WHERE dst.collection_name = src.collection_name AND dst.doc_hash = src.doc_hash
+                ) {and_cond}
+            """)
+            return result.rowcount if hasattr(result, 'rowcount') else 0
+        else:
+            with self.engine.connect() as conn:
+                result = conn.execute(text(f"""
+                    INSERT INTO {target} (collection_name, doc_name, page_number, doc_hash, document, embedding_model, embedding)
+                    SELECT src.collection_name, src.doc_name, src.page_number, src.doc_hash, src.document, :model, src.embedding
+                    FROM {source} src
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM {target} dst
+                        WHERE dst.collection_name = src.collection_name AND dst.doc_hash = src.doc_hash
+                    ) {and_cond}
+                """), {"model": model})
+                conn.commit()
+                return result.rowcount
+
+    def _reembed_orphan_table(self, source: str, target: str, and_cond: str) -> int:
+        """Re-embed documents from *source* into *target* using the current model."""
+        if self.dburl.startswith("sqlite"):
+            cur = self.connection.cursor()
+            rows = cur.execute(f"""
+                SELECT src.collection_name, src.doc_name, src.page_number, src.doc_hash, src.document
+                FROM {source} src
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM {target} dst
+                    WHERE dst.collection_name = src.collection_name AND dst.doc_hash = src.doc_hash
+                ) {and_cond}
+            """).fetchall()
+        elif self.dburl.startswith("duckdb"):
+            rows = self.connection.sql(f"""
+                SELECT src.collection_name, src.doc_name, src.page_number, src.doc_hash, src.document
+                FROM {source} src
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM {target} dst
+                    WHERE dst.collection_name = src.collection_name AND dst.doc_hash = src.doc_hash
+                ) {and_cond}
+            """).fetchall()
+        else:
+            with self.engine.connect() as conn:
+                rows = conn.execute(text(f"""
+                    SELECT src.collection_name, src.doc_name, src.page_number, src.doc_hash, src.document
+                    FROM {source} src
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM {target} dst
+                        WHERE dst.collection_name = src.collection_name AND dst.doc_hash = src.doc_hash
+                    ) {and_cond}
+                """)).fetchall()
+
+        if not rows:
+            logger.info(f"No new documents to re-embed from {source}")
+            return 0
+
+        migrated = 0
+        for col_name, doc_name, page_num, doc_hash, document in rows:
+            try:
+                embedding = self._generate_embedding(document)
+                self._insert_embedding(
+                    col_name, target, doc_name, page_num, doc_hash, document, embedding
+                )
+                migrated += 1
+            except Exception as e:
+                logger.error(f"Error re-embedding {doc_name} page {page_num} from {source}: {e}")
+
+        logger.info(f"Re-embedded {migrated}/{len(rows)} documents from {source} into {target}")
+        return migrated
+
+    def _insert_embedding(
+        self,
+        col_name: str,
+        table: str,
+        doc_name: str,
+        page_num: int,
+        doc_hash: str,
+        document: str,
+        embedding: list[float],
+    ):
+        """Insert a single embedding row into *table*."""
+        model = self.embedding_model
+        if self.dburl.startswith("sqlite"):
+            cur = self.connection.cursor()
+            cur.execute(
+                f"INSERT OR IGNORE INTO {table} "
+                "(collection_name, doc_name, page_number, doc_hash, document, embedding_model, embedding) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (col_name, doc_name, page_num, doc_hash, document, model, embedding),
+            )
+            self.connection.commit()
+        elif self.dburl.startswith("duckdb"):
+            escaped_doc = document.replace(chr(39), chr(39) + chr(39))
+            self.connection.sql(f"""
+                INSERT INTO {table}
+                (collection_name, doc_name, page_number, doc_hash, document, embedding_model, embedding)
+                VALUES ('{col_name}', '{doc_name}', {page_num}, '{doc_hash}', '{escaped_doc}', '{model}', {embedding}::FLOAT[{len(embedding)}])
+            """)
+        else:
+            with self.engine.connect() as conn:
+                conn.execute(
+                    text(f"""
+                        INSERT INTO {table}
+                        (collection_name, doc_name, page_number, doc_hash, document, embedding_model, embedding)
+                        VALUES (:col, :doc, :page, :hash, :text, :model, :embedding)
+                        ON CONFLICT (collection_name, doc_hash) DO NOTHING
+                    """),
+                    {
+                        "col": col_name, "doc": doc_name, "page": page_num,
+                        "hash": doc_hash, "text": document,
+                        "model": model, "embedding": embedding,
+                    },
+                )
+                conn.commit()
+
     def _verify_stale_backups(self, tbl: str, col_filter: str, dry_run: bool, collection_name: str) -> dict:
         check = {"name": "stale_backups", "severity": "info", "count": 0, "details": [], "fix_applied": None}
         tables = self._get_all_embedding_tables()
+        active = tbl
         backups = [t for t in tables if "_backup" in t]
         check["count"] = len(backups)
+        total_migrated = 0
         for t in backups:
             try:
                 cnt = self._verify_query(t, f"SELECT COUNT(*) FROM {t}")[0][0]
                 check["details"].append(f"{t}: {cnt} rows")
+                if cnt > 0 and not dry_run and t != active:
+                    migrated = self._consolidate_table_into_active(t, active, collection_name)
+                    total_migrated += migrated
+                    if migrated > 0:
+                        check["details"].append(f"  -> migrated {migrated} docs to {active}")
             except Exception:
                 check["details"].append(f"{t}: (error reading)")
+        if not dry_run and total_migrated > 0:
+            check["fix_applied"] = total_migrated
         return check
 
     def _verify_empty_embeddings(self, tbl: str, col_filter: str, dry_run: bool, collection_name: str) -> dict:

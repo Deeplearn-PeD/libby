@@ -96,7 +96,7 @@ class ReembedRequest(BaseModel):
         "", description="New embedding model (empty for settings default)"
     )
     batch_size: int = Field(100, ge=1, le=1000, description="Batch size for processing")
-    rechunk: bool = Field(False, description="Reconstruct source text and re-chunk before embedding")
+    rechunk: bool = Field(True, description="Reconstruct source text and re-chunk before embedding")
     new_chunk_size: int = Field(1500, ge=100, le=8000, description="Chunk size when rechunking")
     new_chunk_overlap: int = Field(200, ge=0, le=1000, description="Chunk overlap when rechunking")
 
