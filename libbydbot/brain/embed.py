@@ -3179,7 +3179,13 @@ class DocEmbedder:
         return result
 
     def _finalize_orphaned_shadows(self) -> list[dict]:
-        """Find and finalize all orphaned shadow collections across all tables."""
+        """Find and finalize all orphaned shadow collections across all tables.
+
+        Tries ``finalize_rechunk`` first (renames shadow → original to preserve
+        data).  If that fails (e.g. the 90 % threshold is not met) the shadow
+        rows are simply deleted — they are redundant with the already-finalised
+        original collection.
+        """
         finalized = []
         tables = self._get_all_embedding_tables()
 
@@ -3200,23 +3206,68 @@ class DocEmbedder:
                 original = shadow[:-3]
                 shadow_table = tbl if tbl != self.table_name else None
                 logger.info(f"Auto-finalizing shadow '{shadow}' -> '{original}' in table '{tbl}'")
+
+                stats = {
+                    "success": False,
+                    "collection": original,
+                    "shadow_collection": shadow,
+                    "shadow_table": shadow_table,
+                    "action": "",
+                    "deleted": 0,
+                    "errors": [],
+                }
+
                 try:
-                    stats = self.finalize_rechunk(
+                    result = self.finalize_rechunk(
                         collection_name=original,
                         shadow_collection=shadow,
                         shadow_table=shadow_table,
                     )
-                    finalized.append(stats)
+                    if result.get("errors"):
+                        stats["errors"] = result["errors"]
+                        stats["action"] = "finalize_rechunk_failed"
+                    else:
+                        stats["success"] = True
+                        stats["action"] = "finalized"
+                        stats["deleted"] = result.get("deleted_original", 0)
+                        finalized.append(stats)
+                        continue
                 except Exception as e:
-                    logger.error(f"Failed to finalize '{shadow}': {e}")
-                    finalized.append({
-                        "success": False,
-                        "collection": original,
-                        "shadow_collection": shadow,
-                        "errors": [str(e)],
-                    })
+                    stats["errors"] = [str(e)]
+                    stats["action"] = "finalize_rechunk_exception"
+
+                # Fallback: delete orphaned shadow rows directly
+                logger.warning(
+                    f"finalize_rechunk failed for '{shadow}', "
+                    f"deleting orphaned rows as fallback: {stats['errors']}"
+                )
+                try:
+                    deleted = self._delete_shadow_collection(tbl, shadow)
+                    stats["success"] = True
+                    stats["action"] = "deleted"
+                    stats["deleted"] = deleted
+                except Exception as e:
+                    stats["errors"].append(str(e))
+
+                finalized.append(stats)
 
         return finalized
+
+    def _delete_shadow_collection(self, tbl: str, shadow: str) -> int:
+        """Delete all rows belonging to *shadow* collection from *tbl*."""
+        if self.dburl.startswith("sqlite"):
+            cur = self.connection.cursor()
+            cur.execute(f"DELETE FROM {tbl} WHERE collection_name = ?", (shadow,))
+            self.connection.commit()
+            return cur.rowcount
+        elif self.dburl.startswith("duckdb"):
+            result = self.connection.sql(f"DELETE FROM {tbl} WHERE collection_name = ?", params=[shadow])
+            return result.rowcount if hasattr(result, 'rowcount') else 0
+        else:
+            with self.engine.connect() as conn:
+                result = conn.execute(text(f"DELETE FROM {tbl} WHERE collection_name = :col"), {"col": shadow})
+                conn.commit()
+                return result.rowcount
 
     def _verify_query(self, tbl: str, sql: str) -> list[tuple]:
         if self.dburl.startswith("sqlite"):
