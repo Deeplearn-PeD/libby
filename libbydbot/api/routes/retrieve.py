@@ -54,6 +54,7 @@ def retrieve_documents(request: RetrieveRequest, embedder: EmbedderDep):
                 doc_name=r["doc_name"],
                 page_number=r["page_number"],
                 content=r["content"],
+                collection_name=r["collection_name"],
                 score=r["score"],
             )
             for r in results

@@ -33,6 +33,7 @@ class RetrievedDocument(BaseModel):
     doc_name: str = Field(..., description="Name of the document")
     page_number: int = Field(..., description="Page number or chunk index")
     content: str = Field(..., description="Document content")
+    collection_name: str = Field(..., description="Collection the document belongs to")
     score: float = Field(..., description="Relevance score (higher is better)")
 
 

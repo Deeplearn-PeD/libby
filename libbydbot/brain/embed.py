@@ -1099,18 +1099,18 @@ class DocEmbedder:
 
                 if collection:
                     vector_results = cursor.execute(
-                        f"SELECT doc_hash, doc_name, page_number, document, distance FROM {tbl} WHERE collection_name = ? AND embedding MATCH ? ORDER BY distance LIMIT ?",
+                        f"SELECT doc_hash, doc_name, page_number, document, collection_name, distance FROM {tbl} WHERE collection_name = ? AND embedding MATCH ? ORDER BY distance LIMIT ?",
                         (collection, query_embedding_bytes, num_docs * 2),
                     ).fetchall()
                 else:
                     vector_results = cursor.execute(
-                        f"SELECT doc_hash, doc_name, page_number, document, distance FROM {tbl} WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
+                        f"SELECT doc_hash, doc_name, page_number, document, collection_name, distance FROM {tbl} WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
                         (query_embedding_bytes, num_docs * 2),
                     ).fetchall()
 
                 fts_results = cursor.execute(
                     f"""
-                    SELECT f.doc_hash, t.doc_name, t.page_number, f.document, f.rank
+                    SELECT f.doc_hash, t.doc_name, t.page_number, f.document, t.collection_name, f.rank
                     FROM {tbl}_fts f
                     JOIN {tbl} t ON f.doc_hash = t.doc_hash
                     WHERE f.document MATCH ? ORDER BY f.rank LIMIT ?
@@ -1122,7 +1122,7 @@ class DocEmbedder:
                 scores = {}
                 docs = {}
 
-                for rank, (d_hash, doc_name, page_num, doc, dist) in enumerate(
+                for rank, (d_hash, doc_name, page_num, doc, col_name, dist) in enumerate(
                     vector_results
                 ):
                     scores[d_hash] = scores.get(d_hash, 0) + 1.0 / (k + rank + 1)
@@ -1130,9 +1130,10 @@ class DocEmbedder:
                         "doc_name": doc_name,
                         "page_number": page_num,
                         "content": doc,
+                        "collection_name": col_name,
                     }
 
-                for rank, (d_hash, doc_name, page_num, doc, rank_score) in enumerate(
+                for rank, (d_hash, doc_name, page_num, doc, col_name, rank_score) in enumerate(
                     fts_results
                 ):
                     scores[d_hash] = scores.get(d_hash, 0) + 1.0 / (k + rank + 1)
@@ -1140,6 +1141,7 @@ class DocEmbedder:
                         "doc_name": doc_name,
                         "page_number": page_num,
                         "content": doc,
+                        "collection_name": col_name,
                     }
 
                 sorted_ids = sorted(
@@ -1151,6 +1153,7 @@ class DocEmbedder:
                             "doc_name": docs[d_hash]["doc_name"],
                             "page_number": docs[d_hash]["page_number"],
                             "content": docs[d_hash]["content"],
+                            "collection_name": docs[d_hash]["collection_name"],
                             "score": scores[d_hash],
                         }
                     )
@@ -1161,7 +1164,7 @@ class DocEmbedder:
             conn = self.connection
 
             vector_results = conn.sql(f"""
-                SELECT id, doc_name, page_number, document, array_cosine_similarity(embedding, {embedding_str}::FLOAT[{dimension}]) as similarity
+                SELECT id, doc_name, page_number, document, collection_name, array_cosine_similarity(embedding, {embedding_str}::FLOAT[{dimension}]) as similarity
                 FROM {tbl}
                 {f"WHERE collection_name = '{collection}'" if collection else ""}
                 ORDER BY similarity DESC
@@ -1172,7 +1175,7 @@ class DocEmbedder:
                 conn.sql("LOAD fts;")
                 fts_results = conn.sql(
                     f"""
-                    SELECT id, doc_name, page_number, document, fts_main_{tbl}.match_bm25(id, ?) as score
+                    SELECT id, doc_name, page_number, document, collection_name, fts_main_{tbl}.match_bm25(id, ?) as score
                     FROM {tbl}
                     WHERE score IS NOT NULL
                     ORDER BY score DESC
@@ -1188,15 +1191,16 @@ class DocEmbedder:
             scores = {}
             docs = {}
 
-            for rank, (d_id, doc_name, page_num, doc, sim) in enumerate(vector_results):
+            for rank, (d_id, doc_name, page_num, doc, col_name, sim) in enumerate(vector_results):
                 scores[d_id] = scores.get(d_id, 0) + 1.0 / (k + rank + 1)
                 docs[d_id] = {
                     "doc_name": doc_name,
                     "page_number": page_num,
                     "content": doc,
+                    "collection_name": col_name,
                 }
 
-            for rank, (d_id, doc_name, page_num, doc, fts_score) in enumerate(
+            for rank, (d_id, doc_name, page_num, doc, col_name, fts_score) in enumerate(
                 fts_results
             ):
                 scores[d_id] = scores.get(d_id, 0) + 1.0 / (k + rank + 1)
@@ -1204,6 +1208,7 @@ class DocEmbedder:
                     "doc_name": doc_name,
                     "page_number": page_num,
                     "content": doc,
+                    "collection_name": col_name,
                 }
 
             sorted_ids = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)[
@@ -1215,6 +1220,7 @@ class DocEmbedder:
                         "doc_name": docs[d_id]["doc_name"],
                         "page_number": docs[d_id]["page_number"],
                         "content": docs[d_id]["content"],
+                        "collection_name": docs[d_id]["collection_name"],
                         "score": scores[d_id],
                     }
                 )
@@ -1225,7 +1231,7 @@ class DocEmbedder:
                 col_filter = "WHERE collection_name = :col" if collection else ""
                 rows = session.execute(
                     text(f"""
-                        SELECT doc_name, page_number, document
+                        SELECT doc_name, page_number, document, collection_name
                         FROM {tbl}
                         {col_filter}
                         ORDER BY embedding <=> {vec_literal}::vector({dimension})
@@ -1233,12 +1239,13 @@ class DocEmbedder:
                     """),
                     {"col": collection, "limit": num_docs},
                 ).fetchall()
-                for rank, (doc_name, page_num, doc) in enumerate(rows):
+                for rank, (doc_name, page_num, doc, col_name) in enumerate(rows):
                     results.append(
                         {
                             "doc_name": doc_name,
                             "page_number": page_num,
                             "content": doc,
+                            "collection_name": col_name,
                             "score": 1.0 / (rank + 1),
                         }
                     )
@@ -1247,7 +1254,7 @@ class DocEmbedder:
 
     def get_embedded_documents(self):
         """
-        Get a list of all embedded documents.
+        Get a list of all embedded documents, excluding shadow collections.
         :return: List of tuples (doc_name, collection_name) for all embedded documents
         """
         tbl = self._active_table()
@@ -1257,19 +1264,19 @@ class DocEmbedder:
                 result = cursor.execute(
                     f"SELECT DISTINCT doc_name, collection_name FROM {tbl}"
                 ).fetchall()
-            return [(row[0], row[1]) for row in result]
+            return [(row[0], row[1]) for row in result if not row[1].endswith("_v2")]
         elif self.dburl.startswith("duckdb"):
             conn = self.connection
             result = conn.sql(
                 f"SELECT DISTINCT doc_name, collection_name FROM {tbl}"
             ).fetchall()
-            return [(row[0], row[1]) for row in result]
+            return [(row[0], row[1]) for row in result if not row[1].endswith("_v2")]
         else:
             with Session(self.engine) as session:
                 result = session.execute(
                     text(f"SELECT DISTINCT doc_name, collection_name FROM {tbl}")
                 ).fetchall()
-                return [(row[0], row[1]) for row in result]
+                return [(row[0], row[1]) for row in result if not row[1].endswith("_v2")]
 
     def _migrate_add_embedding_model(self):
         """
@@ -2228,11 +2235,13 @@ class DocEmbedder:
 
             reconstructed = self._reconstruct_documents(rows)
 
-            shadow_suffix = "_v2"
             shadow_map: dict[str, str] = {}
             for (col_name, _doc_name) in reconstructed:
                 if col_name not in shadow_map:
-                    shadow_map[col_name] = col_name + shadow_suffix
+                    base = col_name
+                    while base.endswith("_v2"):
+                        base = base[:-3]
+                    shadow_map[col_name] = base + "_v2"
 
             total_new = 0
             processed = 0
@@ -2321,11 +2330,13 @@ class DocEmbedder:
 
         reconstructed = self._reconstruct_documents(rows)
 
-        shadow_suffix = "_v2"
         shadow_map: dict[str, str] = {}
         for (col_name, _doc_name) in reconstructed:
             if col_name not in shadow_map:
-                shadow_map[col_name] = col_name + shadow_suffix
+                base = col_name
+                while base.endswith("_v2"):
+                    base = base[:-3]
+                shadow_map[col_name] = base + "_v2"
 
         total_new = 0
         processed = 0
@@ -2407,11 +2418,13 @@ class DocEmbedder:
             ]
             reconstructed = self._reconstruct_documents(rows)
 
-            shadow_suffix = "_v2"
             shadow_map: dict[str, str] = {}
             for (col_name, _doc_name) in reconstructed:
                 if col_name not in shadow_map:
-                    shadow_map[col_name] = col_name + shadow_suffix
+                    base = col_name
+                    while base.endswith("_v2"):
+                        base = base[:-3]
+                    shadow_map[col_name] = base + "_v2"
 
             total_new = 0
             processed = 0
@@ -3181,6 +3194,8 @@ class DocEmbedder:
             except Exception:
                 continue
 
+            # Process most-nested shadows first (_v2_v2 before _v2)
+            shadows.sort(key=lambda s: len(s), reverse=True)
             for shadow in shadows:
                 original = shadow[:-3]
                 shadow_table = tbl if tbl != self.table_name else None

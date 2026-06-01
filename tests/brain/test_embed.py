@@ -262,9 +262,16 @@ def test_rechunk_sqlite_writes_shadow_collection(tmp_path):
     assert stats["total_new_chunks"] < stats["total_old_chunks"]
     assert stats["shadow_collection"] == "my_collection_v2"
 
+    # Verify shadow exists via direct query (get_embedded_documents filters _v2 out)
+    shadow_count = embedder._verify_query(
+        "embedding_sqlite",
+        "SELECT COUNT(*) FROM embedding_sqlite WHERE collection_name='my_collection_v2'",
+    )[0][0]
+    assert shadow_count > 0
+
+    # Verify get_embedded_documents filters shadow collections
     all_docs = embedder.get_embedded_documents()
-    shadow_docs = [(d, c) for d, c in all_docs if c == "my_collection_v2"]
-    assert len(shadow_docs) > 0
+    assert all(c != "my_collection_v2" for _, c in all_docs)
 
 
 def test_rechunk_duckdb_writes_shadow_collection(tmp_path):
