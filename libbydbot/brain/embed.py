@@ -3141,6 +3141,11 @@ class DocEmbedder:
         active_checks = checks if checks else ALL_CHECKS
         tbl = self._active_table()
 
+        logger.info(
+            f"verify_and_fix: table={tbl} dry_run={dry_run} "
+            f"auto_finalize={auto_finalize} checks={active_checks}"
+        )
+
         result = {
             "collection": collection_name or "(all)",
             "dry_run": dry_run,
@@ -3159,25 +3164,37 @@ class DocEmbedder:
         for check_name in active_checks:
             handler = getattr(self, f"_verify_{check_name}", None)
             if handler is None:
+                logger.warning(f"verify_and_fix: no handler for '{check_name}', skipping")
                 continue
             try:
                 effective_dry_run = dry_run and check_name not in NON_DESTRUCTIVE
+                logger.info(
+                    f"verify_and_fix: running '{check_name}' "
+                    f"(effective_dry_run={effective_dry_run})"
+                )
                 check_result = handler(tbl, col_filter_sql, effective_dry_run, collection_name)
                 result["checks"].append(check_result)
                 sev = check_result.get("severity", "warning")
+                cnt = check_result.get("count", 0)
+                fix = check_result.get("fix_applied")
+                logger.info(
+                    f"verify_and_fix: '{check_name}' → severity={sev} "
+                    f"count={cnt} fix_applied={fix}"
+                )
                 if sev == "error":
                     result["summary"]["errors"] += 1
                 elif sev == "warning":
                     result["summary"]["warnings"] += 1
                 else:
                     result["summary"]["info"] += 1
-                if check_result.get("fix_applied"):
-                    result["summary"]["fixes_applied"] += check_result["fix_applied"]
+                if fix:
+                    result["summary"]["fixes_applied"] += fix
             except Exception as e:
                 result["errors"].append(f"{check_name}: {e}")
                 logger.error(f"Verify check '{check_name}' failed: {e}")
 
         if auto_finalize and not dry_run:
+            logger.info("verify_and_fix: running _finalize_orphaned_shadows")
             result["finalized"] = self._finalize_orphaned_shadows()
 
         return result
@@ -3306,6 +3323,7 @@ class DocEmbedder:
             )
             deleted = cur.rowcount
             self.connection.commit()
+            logger.info(f"Deleted {deleted} dupes from {tbl} where {column}={value}")
             return deleted
         elif self.dburl.startswith("duckdb"):
             before = self._verify_query(tbl, f"SELECT COUNT(*) FROM {tbl} WHERE collection_name='{col}' AND {column}='{value}'")[0][0]
@@ -3314,7 +3332,9 @@ class DocEmbedder:
                 f"(SELECT MIN(id) FROM {tbl} WHERE collection_name='{col}' AND {column}='{value}')"
             )
             after = self._verify_query(tbl, f"SELECT COUNT(*) FROM {tbl} WHERE collection_name='{col}' AND {column}='{value}'")[0][0]
-            return before - after
+            deleted = before - after
+            logger.info(f"Deleted {deleted} dupes from {tbl} where {column}={value}")
+            return deleted
         else:
             with self.engine.connect() as conn:
                 result = conn.execute(text(
@@ -3323,6 +3343,7 @@ class DocEmbedder:
                 ), {"col": col, "val": value})
                 deleted = result.rowcount
                 conn.commit()
+                logger.info(f"Deleted {deleted} dupes from {tbl} where {column}={value}")
                 return deleted
 
     def _delete_duplicates_keep_one_composite(self, tbl: str, col: str, doc: str, page: int) -> int:
@@ -3336,6 +3357,7 @@ class DocEmbedder:
             )
             deleted = cur.rowcount
             self.connection.commit()
+            logger.info(f"Deleted {deleted} dupes from {tbl}: {col}/{doc} page {page}")
             return deleted
         elif self.dburl.startswith("duckdb"):
             before = self._verify_query(tbl,
@@ -3348,7 +3370,9 @@ class DocEmbedder:
             after = self._verify_query(tbl,
                 f"SELECT COUNT(*) FROM {tbl} WHERE collection_name='{col}' AND doc_name='{doc}' AND page_number={page}"
             )[0][0]
-            return before - after
+            deleted = before - after
+            logger.info(f"Deleted {deleted} dupes from {tbl}: {col}/{doc} page {page}")
+            return deleted
         else:
             with self.engine.connect() as conn:
                 result = conn.execute(text(
@@ -3357,6 +3381,7 @@ class DocEmbedder:
                 ), {"col": col, "doc": doc, "page": page})
                 deleted = result.rowcount
                 conn.commit()
+                logger.info(f"Deleted {deleted} dupes from {tbl}: {col}/{doc} page {page}")
                 return deleted
 
     def _verify_duplicate_hashes(self, tbl: str, col_filter: str, dry_run: bool, collection_name: str) -> dict:
