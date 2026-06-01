@@ -357,7 +357,7 @@ class SchemaMigrationResponse(BaseModel):
 class VerifyRequest(BaseModel):
     collection_name: str = Field("", description="Collection to verify (empty for all)")
     dry_run: bool = Field(True, description="Preview only, do not fix")
-    auto_finalize: bool = Field(False, description="Finalize any orphaned shadow collections found")
+    auto_finalize: bool = Field(True, description="Finalize any orphaned shadow collections found")
     checks: list[str] | None = Field(
         None,
         description="Specific checks to run (default: all). Options: duplicate_hashes, hash_integrity, "

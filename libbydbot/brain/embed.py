@@ -3113,7 +3113,7 @@ class DocEmbedder:
         collection_name: str = "",
         dry_run: bool = True,
         checks: list[str] | None = None,
-        auto_finalize: bool = False,
+        auto_finalize: bool = True,
     ) -> dict:
         """
         Verify embedding data integrity and optionally fix issues.
