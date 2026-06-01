@@ -3153,12 +3153,16 @@ class DocEmbedder:
 
         col_filter_sql = f"WHERE collection_name = '{collection_name}'" if collection_name else ""
 
+        # Non-destructive checks (metadata updates only) always apply fixes
+        NON_DESTRUCTIVE = {"hash_integrity", "missing_models"}
+
         for check_name in active_checks:
             handler = getattr(self, f"_verify_{check_name}", None)
             if handler is None:
                 continue
             try:
-                check_result = handler(tbl, col_filter_sql, dry_run, collection_name)
+                effective_dry_run = dry_run and check_name not in NON_DESTRUCTIVE
+                check_result = handler(tbl, col_filter_sql, effective_dry_run, collection_name)
                 result["checks"].append(check_result)
                 sev = check_result.get("severity", "warning")
                 if sev == "error":
