@@ -3158,6 +3158,11 @@ class DocEmbedder:
 
         col_filter_sql = f"WHERE collection_name = '{collection_name}'" if collection_name else ""
 
+        # Finalize orphaned _v2 shadows first so checks run on clean data
+        if auto_finalize and not dry_run:
+            logger.info("verify_and_fix: finalizing orphaned shadows before checks")
+            result["finalized"] = self._finalize_orphaned_shadows()
+
         # Non-destructive checks (metadata updates only) always apply fixes
         NON_DESTRUCTIVE = {"hash_integrity", "missing_models"}
 
@@ -3192,10 +3197,6 @@ class DocEmbedder:
             except Exception as e:
                 result["errors"].append(f"{check_name}: {e}")
                 logger.error(f"Verify check '{check_name}' failed: {e}")
-
-        if auto_finalize and not dry_run:
-            logger.info("verify_and_fix: running _finalize_orphaned_shadows")
-            result["finalized"] = self._finalize_orphaned_shadows()
 
         return result
 
