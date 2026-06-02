@@ -640,6 +640,75 @@ class DocEmbedder:
         logger.info(f"Safe swap complete: {source} ← {target}, backup → {backup}")
         return result
 
+    def _move_collection_between_tables(
+        self, source_table: str, target_table: str,
+        source_collection: str, target_collection: str,
+    ) -> int:
+        """Move rows for one collection from *source_table* to *target_table*.
+
+        Inserts rows into *target_table* with ``collection_name = target_collection``
+        using ON CONFLICT DO NOTHING (PostgreSQL) or INSERT OR IGNORE (SQLite).
+        Then deletes the moved rows from *source_table*.
+
+        Returns the number of rows inserted into the target.
+        """
+        model = self.embedding_model
+        moved = 0
+
+        if self.dburl.startswith("sqlite"):
+            cur = self.connection.cursor()
+            cur.execute(f"""
+                INSERT OR IGNORE INTO {target_table}
+                (collection_name, doc_name, page_number, doc_hash, document, embedding_model, embedding)
+                SELECT ?, src.doc_name, src.page_number, src.doc_hash, src.document, ?, src.embedding
+                FROM {source_table} src
+                WHERE src.collection_name = ?
+            """, (target_collection, model, source_collection))
+            moved = cur.rowcount
+            cur.execute(
+                f"DELETE FROM {source_table} WHERE collection_name = ?",
+                (source_collection,),
+            )
+            self.connection.commit()
+        elif self.dburl.startswith("duckdb"):
+            result = self.connection.sql(f"""
+                INSERT INTO {target_table}
+                (collection_name, doc_name, page_number, doc_hash, document, embedding_model, embedding)
+                SELECT '{target_collection}', src.doc_name, src.page_number, src.doc_hash, src.document, '{model}', src.embedding
+                FROM {source_table} src
+                WHERE src.collection_name = '{source_collection}'
+                AND NOT EXISTS (
+                    SELECT 1 FROM {target_table} dst
+                    WHERE dst.collection_name = '{target_collection}' AND dst.doc_hash = src.doc_hash
+                )
+            """)
+            moved = result.rowcount if hasattr(result, 'rowcount') else 0
+            self.connection.sql(
+                f"DELETE FROM {source_table} WHERE collection_name = ?",
+                params=[source_collection],
+            )
+        else:
+            with self.engine.connect() as conn:
+                with conn.begin():
+                    result = conn.execute(text(f"""
+                        INSERT INTO {target_table}
+                        (collection_name, doc_name, page_number, doc_hash, document, embedding_model, embedding)
+                        SELECT :target_col, src.doc_name, src.page_number, src.doc_hash, src.document, :model, src.embedding
+                        FROM {source_table} src
+                        WHERE src.collection_name = :source_col
+                        ON CONFLICT (collection_name, doc_hash) DO NOTHING
+                    """), {
+                        "target_col": target_collection, "model": model,
+                        "source_col": source_collection,
+                    })
+                    moved = result.rowcount
+                    conn.execute(text(
+                        f"DELETE FROM {source_table} WHERE collection_name = :col"
+                    ), {"col": source_collection})
+                conn.commit()
+
+        return moved
+
     def _create_postgres_table_for_dim(self, table_name: str, dimension: int):
         """Create a PostgreSQL embedding table with a specific vector dimension."""
         with self.engine.connect() as conn:
@@ -2151,14 +2220,15 @@ class DocEmbedder:
                     conn.commit()
 
             if shadow_table and shadow_table != active:
-                backup = f"{active}_backup_reembed"
-                swap_result = self._safe_swap_tables(active, shadow_table, backup)
-                stats["table_swapped"] = swap_result["swapped"]
-                if swap_result["swapped"]:
-                    self.table_name = active
-                else:
+                moved = self._move_collection_between_tables(
+                    shadow_table, active, shadow_collection, collection_name
+                )
+                stats["table_swapped"] = False
+                stats["rows_moved_between_tables"] = moved
+                if moved == 0 and stats["renamed"] == 0:
                     stats["errors"].append(
-                        f"Collection renamed but table swap refused: {swap_result['target_count']} vs {swap_result['source_count']}"
+                        f"No rows moved from {shadow_table} to {active} for '{collection_name}'. "
+                        f"Dimension mismatch is expected — data remains in {shadow_table}."
                     )
 
             stats["success"] = True
@@ -3125,6 +3195,7 @@ class DocEmbedder:
         :return: Verification report
         """
         ALL_CHECKS = [
+            "missing_documents",
             "duplicate_hashes",
             "hash_integrity",
             "missing_models",
@@ -3738,6 +3809,108 @@ class DocEmbedder:
                 check["details"].append(f"{t}: (error reading)")
         if not dry_run and total_migrated > 0:
             check["fix_applied"] = total_migrated
+        return check
+
+    def _verify_missing_documents(
+        self, tbl: str, col_filter: str, dry_run: bool, collection_name: str
+    ) -> dict:
+        """Find documents present in backup/orphan tables but missing from the active table.
+
+        This is critical after a table swap or failed re-embed: documents that
+        existed only in the original table may have been left behind in a backup.
+        Missing documents are re-embedded and inserted into the active table
+        using ON CONFLICT DO NOTHING so existing rows are never disturbed.
+        """
+        check = {
+            "name": "missing_documents",
+            "severity": "warning",
+            "count": 0,
+            "details": [],
+            "fix_applied": None,
+        }
+
+        tables = self._get_all_embedding_tables()
+        other_tables = [
+            t for t in tables
+            if t != tbl and not t.endswith("_fts")
+        ]
+
+        if not other_tables:
+            check["severity"] = "info"
+            return check
+
+        total_missing = 0
+        total_recovered = 0
+
+        for other in other_tables:
+            try:
+                if self.dburl.startswith("sqlite"):
+                    cur = self.connection.cursor()
+                    missing_rows = cur.execute(f"""
+                        SELECT src.collection_name, src.doc_name, src.page_number,
+                               src.doc_hash, src.document
+                        FROM {other} src
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM {tbl} dst
+                            WHERE dst.collection_name = src.collection_name
+                              AND dst.doc_hash = src.doc_hash
+                        )
+                        {f"AND src.collection_name = '{collection_name}'" if collection_name else ""}
+                    """).fetchall()
+                elif self.dburl.startswith("duckdb"):
+                    missing_rows = self.connection.sql(f"""
+                        SELECT src.collection_name, src.doc_name, src.page_number,
+                               src.doc_hash, src.document
+                        FROM {other} src
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM {tbl} dst
+                            WHERE dst.collection_name = src.collection_name
+                              AND dst.doc_hash = src.doc_hash
+                        )
+                        {f"AND src.collection_name = '{collection_name}'" if collection_name else ""}
+                    """).fetchall()
+                else:
+                    col_and = f"AND src.collection_name = '{collection_name}'" if collection_name else ""
+                    with self.engine.connect() as conn:
+                        missing_rows = conn.execute(text(f"""
+                            SELECT src.collection_name, src.doc_name, src.page_number,
+                                   src.doc_hash, src.document
+                            FROM {other} src
+                            WHERE NOT EXISTS (
+                                SELECT 1 FROM {tbl} dst
+                                WHERE dst.collection_name = src.collection_name
+                                  AND dst.doc_hash = src.doc_hash
+                            )
+                            {col_and}
+                        """)).fetchall()
+            except Exception as e:
+                check["details"].append(f"{other}: (error querying: {e})")
+                continue
+
+            if not missing_rows:
+                continue
+
+            check["details"].append(
+                f"{other}: {len(missing_rows)} documents missing from {tbl}"
+            )
+            total_missing += len(missing_rows)
+
+            if dry_run:
+                continue
+
+            recovered = self._reembed_orphan_table(other, tbl, "")
+            total_recovered += recovered
+            if recovered > 0:
+                check["details"].append(
+                    f"  -> recovered {recovered} documents into {tbl}"
+                )
+
+        check["count"] = total_missing
+        if total_recovered > 0:
+            check["fix_applied"] = total_recovered
+        if total_missing == 0:
+            check["severity"] = "info"
+
         return check
 
     def _verify_empty_embeddings(self, tbl: str, col_filter: str, dry_run: bool, collection_name: str) -> dict:

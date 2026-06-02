@@ -161,12 +161,14 @@ class TestSchemaModels:
         from libbydbot.api.schemas import RetrievedDocument
 
         doc = RetrievedDocument(
+            collection_name="test_collection",
             doc_name="test.pdf",
             page_number=1,
             content="Sample content",
             score=0.95,
         )
 
+        assert doc.collection_name == "test_collection"
         assert doc.doc_name == "test.pdf"
         assert doc.page_number == 1
         assert doc.content == "Sample content"
@@ -238,6 +240,7 @@ class TestSchemaModels:
             collection_name="main",
             documents=[
                 RetrievedDocument(
+                    collection_name="main",
                     doc_name="test.pdf",
                     page_number=1,
                     content="content",
