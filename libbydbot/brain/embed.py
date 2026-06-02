@@ -1323,29 +1323,46 @@ class DocEmbedder:
 
     def get_embedded_documents(self):
         """
-        Get a list of all embedded documents, excluding shadow collections.
+        Get a list of all embedded documents across ALL non-backup tables,
+        excluding shadow collections.
+
         :return: List of tuples (doc_name, collection_name) for all embedded documents
         """
-        tbl = self._active_table()
-        if self.dburl.startswith("sqlite"):
-            with self.connection as conn:
-                cursor = conn.cursor()
-                result = cursor.execute(
-                    f"SELECT DISTINCT doc_name, collection_name FROM {tbl}"
-                ).fetchall()
-            return [(row[0], row[1]) for row in result if not row[1].endswith("_v2")]
-        elif self.dburl.startswith("duckdb"):
-            conn = self.connection
-            result = conn.sql(
-                f"SELECT DISTINCT doc_name, collection_name FROM {tbl}"
-            ).fetchall()
-            return [(row[0], row[1]) for row in result if not row[1].endswith("_v2")]
-        else:
-            with Session(self.engine) as session:
-                result = session.execute(
-                    text(f"SELECT DISTINCT doc_name, collection_name FROM {tbl}")
-                ).fetchall()
-                return [(row[0], row[1]) for row in result if not row[1].endswith("_v2")]
+        tables = self._get_all_embedding_tables()
+        data_tables = [t for t in tables if "_backup" not in t and not t.endswith("_fts")]
+        if not data_tables:
+            return []
+
+        seen: set[tuple[str, str]] = set()
+        result: list[tuple[str, str]] = []
+
+        for tbl in data_tables:
+            try:
+                if self.dburl.startswith("sqlite"):
+                    cur = self.connection.cursor()
+                    rows = cur.execute(
+                        f"SELECT DISTINCT doc_name, collection_name FROM {tbl}"
+                    ).fetchall()
+                elif self.dburl.startswith("duckdb"):
+                    rows = self.connection.sql(
+                        f"SELECT DISTINCT doc_name, collection_name FROM {tbl}"
+                    ).fetchall()
+                else:
+                    with Session(self.engine) as session:
+                        rows = session.execute(
+                            text(f"SELECT DISTINCT doc_name, collection_name FROM {tbl}")
+                        ).fetchall()
+                for doc_name, col_name in rows:
+                    if col_name.endswith("_v2"):
+                        continue
+                    key = (doc_name, col_name)
+                    if key not in seen:
+                        seen.add(key)
+                        result.append(key)
+            except Exception:
+                continue
+
+        return result
 
     def _migrate_add_embedding_model(self):
         """
@@ -3904,8 +3921,10 @@ class DocEmbedder:
 
         This is critical after a table swap or failed re-embed: documents that
         existed only in the original table may have been left behind in a backup.
-        Missing documents are re-embedded and inserted into the active table
-        using ON CONFLICT DO NOTHING so existing rows are never disturbed.
+        When source and target tables share the same embedding dimension, a bulk
+        INSERT ... SELECT recovers missing documents cheaply.  When dimensions
+        differ, documents are re-embedded with the current model.
+        Either way, ON CONFLICT DO NOTHING ensures existing rows are never disturbed.
         """
         check = {
             "name": "missing_documents",
@@ -3984,7 +4003,7 @@ class DocEmbedder:
             if dry_run:
                 continue
 
-            recovered = self._reembed_orphan_table(other, tbl, "")
+            recovered = self._consolidate_table_into_active(other, tbl, collection_name)
             total_recovered += recovered
             if recovered > 0:
                 check["details"].append(
