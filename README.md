@@ -10,13 +10,16 @@
 [![GitHub last commit](https://img.shields.io/github/last-commit/Deeplearn-PeD/libby.svg)](https://github.com/Deeplearn-PeD/libby/commits/main)
 [![DOI](https://zenodo.org/badge/784398327.svg)](https://zenodo.org/doi/10.5281/zenodo.12744747)
 
-Libby the librarian. AI agent specialized in creating and querying embeddings for RAG (Retrieval Augmented Generation). Now featuring an **LLM Wiki** — a persistent, compounding markdown knowledge base — and a rich **Terminal User Interface (TUI)**.
+Libby the librarian. AI agent specialized in creating and querying embeddings for RAG (Retrieval Augmented Generation). Now featuring an **LLM Wiki** — a persistent, compounding markdown knowledge base — a rich **Terminal User Interface (TUI)** — and a comprehensive **Embedding Management API** with re-embedding, verification, rollback, and backend migration.
 
 ![Libby D. Bot](/libby.jpeg)
 
 ## What's New
 
-- **Textual TUI** (`libby`) — A rich interactive terminal interface with screens for chat, embedding, wiki browsing, and settings.
+- **Embedding Management API** — Re-embed documents with a new model, verify data integrity (12 automated checks), rollback failed re-embeds, and migrate between database backends — all via REST API.
+- **Hybrid Search** — Vector similarity + full-text keyword search combined with Reciprocal Rank Fusion (RRF) for superior retrieval quality.
+- **Rechunk & Re-embed** — Switch embedding models or chunk sizes without downtime. Shadow collections keep the original data queryable during re-embedding, then a single finalize step cuts over.
+- **Textual TUI** (`libby`) — A rich interactive terminal interface with screens for chat, embedding, wiki browsing, wiki ingest, and settings.
 - **LLM Wiki** (`libby-cli wiki_*`) — A persistent markdown knowledge base that accumulates insights from your documents over time, with entity/concept extraction, synthesis, and automated health-checks.
 - **Legacy CLI** (`libby-cli`) — The original Fire-based command-line interface preserved for scripting.
 
@@ -78,6 +81,10 @@ Navigate your collection's markdown wiki as a tree:
 
 Select any page to render it as Markdown. Use **Refresh** to reload, **Ingest** to add documents, or **Lint** to health-check the wiki.
 
+#### Wiki Ingest Screen
+
+Dedicated screen for ingesting PDFs into the LLM Wiki with per-document progress showing pages touched, entities, and concepts extracted.
+
 #### Settings Screen
 
 Change the active LLM model, embedding model, and collection name.
@@ -96,6 +103,97 @@ libby-cli answer "What is the main topic of the documents?" --collection_name yo
 # Generating content
 libby-cli generate "Write a summary of..." --output_file output.txt
 ```
+
+## Embedding Management
+
+Libby provides a complete workflow for managing embeddings over their lifecycle — from initial embedding through model changes, integrity verification, and recovery.
+
+### Re-embedding & Rechunking
+
+Switch to a new embedding model or adjust chunk size without downtime:
+
+```bash
+# Re-embed with a new model (with rechunking)
+curl -X POST "http://localhost:8001/api/embed/reembed" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "collection_name": "research",
+    "new_model": "embeddinggemma",
+    "rechunk": true,
+    "new_chunk_size": 1500,
+    "new_chunk_overlap": 200
+  }'
+```
+
+The re-embed writes to a **shadow collection** (`{name}_v2`) so the original remains fully queryable. When ready:
+
+```bash
+# Finalize: swap shadow into production
+curl -X POST "http://localhost:8001/api/embed/finalize" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "collection_name": "research",
+    "shadow_collection": "research_v2"
+  }'
+```
+
+### Data Integrity Verification
+
+Run automated checks to detect and fix data issues:
+
+```bash
+# Dry run: preview issues only
+curl -X POST "http://localhost:8001/api/embed/verify" \
+  -H "Content-Type: application/json" \
+  -d '{"dry_run": true}'
+
+# Apply fixes
+curl -X POST "http://localhost:8001/api/embed/verify" \
+  -H "Content-Type: application/json" \
+  -d '{"dry_run": false, "auto_finalize": true}'
+```
+
+**12 verification checks:**
+
+| Check | What it finds | Auto-fix |
+|-------|---------------|----------|
+| `missing_documents` | Docs in backup tables missing from active table | Re-embeds missing docs |
+| `duplicate_hashes` | Duplicate `(collection, doc_hash)` pairs | Deduplicates |
+| `hash_integrity` | `sha256(document)` != stored hash | Recomputes hashes |
+| `missing_models` | Rows with NULL/empty embedding model | Stamps current model |
+| `mixed_models` | Collections using multiple models | Report only |
+| `dimension_consistency` | Table dimension vs model mismatch | Report only |
+| `partial_documents` | Incomplete page sequences | Report only |
+| `orphaned_shadows` | Leftover `_v2` shadow collections | Report only |
+| `orphaned_tables` | Dimension-specific tables with data | Consolidates into active |
+| `stale_backups` | Old backup tables with recoverable data | Consolidates into active |
+| `empty_embeddings` | Rows with NULL or empty document text | Report only |
+| `duplicate_content` | Identical document text within a collection | Deduplicates |
+
+### Rollback
+
+Revert to a previous backup after a failed re-embed:
+
+```bash
+curl -X POST "http://localhost:8001/api/embed/rollback" \
+  -H "Content-Type: application/json" \
+  -d '{"dry_run": false}'
+```
+
+### Backend Migration
+
+Migrate embeddings between PostgreSQL, DuckDB, and SQLite:
+
+```bash
+curl -X POST "http://localhost:8001/api/embed/migrate" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target_backend": "postgresql",
+    "dry_run": true
+  }'
+```
+
+Supports dry-run mode and resume (skips already-migrated records).
 
 ## LLM Wiki
 
@@ -169,7 +267,7 @@ Auto-fix creates stub pages for broken links with `status: stub` frontmatter.
 
 ## REST API Server
 
-Libby D. Bot provides a REST API server for programmatic access to embedding, retrieval, and wiki functionality.
+Libby D. Bot provides a REST API server for programmatic access to embedding, retrieval, wiki, and management functionality.
 
 ### Running the Server
 
@@ -184,6 +282,9 @@ uv run libby-server --host 0.0.0.0 --port 8080
 
 # Run with auto-reload for development
 uv run libby-server --reload
+
+# Run with custom keep-alive timeout (default 7200s)
+uv run libby-server --timeout-keep-alive 3600
 ```
 
 **Using uvicorn directly:**
@@ -229,26 +330,64 @@ Once the server is running, access the interactive API documentation at:
 
 ### API Endpoints
 
+#### Embedding
+
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `POST` | `/api/embed/text` | Embed raw text into the database |
-| `POST` | `/api/embed/upload` | Upload and embed PDF files |
-| `POST` | `/api/retrieve` | Hybrid search for documents (vector + keyword) |
+| `POST` | `/api/embed/upload` | Upload and embed PDF files (async, returns job ID) |
+| `POST` | `/api/embed/upload/sync` | Upload and embed PDF files (synchronous) |
+| `POST` | `/api/embed/reembed` | Re-embed documents with a new model |
+| `POST` | `/api/embed/finalize` | Finalize a rechunk operation (shadow → production) |
+| `POST` | `/api/embed/verify` | Verify data integrity (12 checks with auto-fix) |
+| `POST` | `/api/embed/rollback` | Rollback to a backup table |
+| `POST` | `/api/embed/migrate` | Migrate embeddings between backends |
+| `POST` | `/api/embed/migrate-schema` | Migrate to compound unique constraint |
+| `GET`  | `/api/embed/status/{job_id}` | Poll async embedding job status |
+| `GET`  | `/api/embed/jobs` | List all embed jobs |
+| `GET`  | `/api/embed/model-info` | Get embedding models used per collection |
+| `GET`  | `/api/embed/models` | List available embedding models |
+| `GET`  | `/api/embed/backends` | List available database backends |
+| `GET`  | `/api/embed/backups` | List backup tables with metadata |
+
+#### Retrieval & Search
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/retrieve` | Hybrid search (vector + keyword with RRF) |
 | `GET`  | `/api/documents` | List all embedded documents |
 | `GET`  | `/api/collections` | List all collections with document counts |
+
+#### Document & Collection Management
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `DELETE` | `/api/collection` | Delete all documents in a collection |
+| `DELETE` | `/api/document` | Delete all chunks of a document |
+| `POST` | `/api/reassign/document` | Move a document to a different collection |
+| `POST` | `/api/reassign/collection` | Rename a collection |
+
+#### Wiki
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
 | `POST` | `/api/wiki/ingest` | Ingest a source into the wiki |
 | `POST` | `/api/wiki/query` | Query the wiki |
 | `POST` | `/api/wiki/lint` | Lint the wiki |
 | `GET`  | `/api/wiki/status/{collection_name}` | Wiki statistics |
-| `GET`  | `/api/health` | Health check endpoint |
+
+#### System
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET`  | `/` | API info, version, and docs links |
+| `GET`  | `/api/health` | Health check (LLM + database) |
 
 ### API Usage Examples
 
 #### POST /api/embed/text
 
 Embed raw text content into the vector database.
-
-**Request:**
 
 ```bash
 curl -X POST "http://localhost:8001/api/embed/text" \
@@ -261,22 +400,92 @@ curl -X POST "http://localhost:8001/api/embed/text" \
   }'
 ```
 
+#### POST /api/retrieve
+
+Hybrid search combining vector similarity with full-text keyword search using Reciprocal Rank Fusion.
+
+```bash
+curl -X POST "http://localhost:8001/api/retrieve" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "What machine learning techniques are discussed?",
+    "collection_name": "research",
+    "n_results": 5
+  }'
+```
+
 **Response:**
 
 ```json
 {
-  "success": true,
-  "doc_name": "ml_notes.txt",
-  "doc_hash": "abc123def456",
-  "message": "Successfully embedded text from 'ml_notes.txt' into collection 'research'"
+  "query": "What machine learning techniques are discussed?",
+  "collection_name": "research",
+  "documents": [
+    {
+      "collection_name": "research",
+      "doc_name": "ml_notes.txt",
+      "page_number": 0,
+      "content": "Machine learning is a subset of artificial intelligence...",
+      "score": 0.87
+    }
+  ],
+  "total": 1
 }
+```
+
+#### POST /api/embed/verify
+
+Verify embedding data integrity.
+
+```bash
+# Dry run — preview issues
+curl -X POST "http://localhost:8001/api/embed/verify" \
+  -H "Content-Type: application/json" \
+  -d '{"dry_run": true}'
+
+# Apply fixes
+curl -X POST "http://localhost:8001/api/embed/verify" \
+  -H "Content-Type: application/json" \
+  -d '{"dry_run": false, "auto_finalize": true}'
+```
+
+**Response:**
+
+```json
+{
+  "collection": "(all)",
+  "dry_run": false,
+  "table": "embedding",
+  "checks": [
+    {"name": "missing_documents", "severity": "info", "count": 0, "fix_applied": null},
+    {"name": "hash_integrity", "severity": "warning", "count": 3, "fix_applied": 3},
+    {"name": "missing_models", "severity": "info", "count": 0, "fix_applied": null}
+  ],
+  "summary": {"errors": 0, "warnings": 1, "info": 11, "fixes_applied": 3},
+  "errors": [],
+  "finalized": []
+}
+```
+
+#### POST /api/embed/reembed
+
+Re-embed documents with a new model, optionally rechunking.
+
+```bash
+curl -X POST "http://localhost:8001/api/embed/reembed" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "collection_name": "research",
+    "new_model": "embeddinggemma",
+    "rechunk": true,
+    "new_chunk_size": 1500,
+    "new_chunk_overlap": 200
+  }'
 ```
 
 #### POST /api/wiki/ingest
 
 Ingest a document into the LLM Wiki.
-
-**Request:**
 
 ```bash
 curl -X POST "http://localhost:8001/api/wiki/ingest" \
@@ -289,25 +498,9 @@ curl -X POST "http://localhost:8001/api/wiki/ingest" \
   }'
 ```
 
-**Response:**
-
-```json
-{
-  "success": true,
-  "source": "research_paper.pdf",
-  "pages_touched": 5,
-  "entities_created": 3,
-  "concepts_created": 2,
-  "summary": "This paper explores...",
-  "message": "Successfully ingested 'research_paper.pdf' into wiki 'research'"
-}
-```
-
 #### POST /api/wiki/query
 
 Query the wiki and synthesize an answer.
-
-**Request:**
 
 ```bash
 curl -X POST "http://localhost:8001/api/wiki/query" \
@@ -319,25 +512,9 @@ curl -X POST "http://localhost:8001/api/wiki/query" \
   }'
 ```
 
-**Response:**
-
-```json
-{
-  "question": "What are the key findings?",
-  "answer": "The key findings include... [[Source Page]]",
-  "sources_used": ["sources/research_paper.md", "concepts/key_finding.md"],
-  "confidence": "high",
-  "gaps": [],
-  "suggested_followups": ["What methodology was used?"],
-  "filed_page": null
-}
-```
-
 #### POST /api/wiki/lint
 
 Health-check the wiki.
-
-**Request:**
 
 ```bash
 curl -X POST "http://localhost:8001/api/wiki/lint" \
@@ -348,42 +525,24 @@ curl -X POST "http://localhost:8001/api/wiki/lint" \
   }'
 ```
 
-**Response:**
+#### DELETE /api/collection
 
-```json
-{
-  "orphan_pages": ["entities/old_entity.md"],
-  "broken_links": ["MissingConcept"],
-  "contradictions": [],
-  "stale_claims": [],
-  "missing_pages": [{"name": "MissingConcept", "page_type": "concept"}],
-  "suggestions": ["Add more cross-references between sources."],
-  "fixes_applied": 1
-}
-```
-
-#### GET /api/wiki/status/{collection_name}
-
-Get wiki statistics.
-
-**Request:**
+Delete all documents in a collection.
 
 ```bash
-curl "http://localhost:8001/api/wiki/status/research"
+curl -X DELETE "http://localhost:8001/api/collection" \
+  -H "Content-Type: application/json" \
+  -d '{"collection_name": "old_research"}'
 ```
 
-**Response:**
+#### POST /api/reassign/collection
 
-```json
-{
-  "collection": "research",
-  "wiki_path": "/home/user/.libby/wikis/research",
-  "total_pages": 42,
-  "page_counts": {"sources": 10, "entities": 15, "concepts": 12, "synthesis": 5},
-  "orphan_pages": 2,
-  "broken_links": 1,
-  "last_operation": "## [2026-04-21 12:00] ingest | research_paper.pdf | touched 5 pages"
-}
+Rename a collection.
+
+```bash
+curl -X POST "http://localhost:8001/api/reassign/collection" \
+  -H "Content-Type: application/json" \
+  -d '{"old_name": "draft_papers", "new_name": "published_papers"}'
 ```
 
 ### Environment Variables
@@ -408,7 +567,7 @@ curl "http://localhost:8001/api/wiki/status/research"
 
 ### PostgreSQL (Default/Recommended)
 
-Libby D. Bot now uses PostgreSQL with the pgvector extension as the default database backend. This provides:
+Libby D. Bot uses PostgreSQL with the pgvector extension as the default database backend. This provides:
 
 - **Better scalability** for large document collections
 - **Production-ready** performance and reliability
@@ -417,7 +576,7 @@ Libby D. Bot now uses PostgreSQL with the pgvector extension as the default data
 
 ### Migrating from DuckDB
 
-**📋 Complete Migration Guide**: See [docs/COMPLETE_MIGRATION_GUIDE.md](docs/COMPLETE_MIGRATION_GUIDE.md) for comprehensive instructions.
+**Complete Migration Guide**: See [docs/COMPLETE_MIGRATION_GUIDE.md](docs/COMPLETE_MIGRATION_GUIDE.md) for comprehensive instructions.
 
 #### Quick Migration
 
@@ -433,13 +592,6 @@ docker compose up -d postgres
 # Migration with re-embedding (if dimensions don't match)
 ./scripts/migrate.sh --re-embed
 ```
-
-#### What Gets Migrated
-
-- ✅ Document embeddings
-- ✅ Document metadata (names, page numbers, hashes)
-- ✅ **Collection names** (preserved from DuckDB)
-- ✅ Document text content
 
 #### Migration Features
 
@@ -459,7 +611,13 @@ While PostgreSQL is recommended, Libby also supports:
 - **DuckDB**: Good for development/testing (`duckdb:///path/to/embeddings.duckdb`)
 - **SQLite**: For simple use cases (`sqlite:///path/to/embeddings.db`)
 
-To use an alternative backend, set the `EMBED_DB` environment variable accordingly.
+To use an alternative backend, set the `EMBED_DB` environment variable accordingly. You can also migrate between backends at any time via the API:
+
+```bash
+curl -X POST "http://localhost:8001/api/embed/migrate" \
+  -H "Content-Type: application/json" \
+  -d '{"target_backend": "duckdb", "dry_run": true}'
+```
 
 ## Backup and Restore
 
@@ -494,26 +652,36 @@ gunzip -c libby_backup_YYYYMMDD_HHMMSS.sql.gz | \
 
 ## Features
 
-- **Rich Textual TUI** — Interactive terminal interface with dashboards, chat, embedding, and wiki browsing
+- **Rich Textual TUI** — Interactive terminal interface with dashboards, chat, embedding, wiki browsing, and wiki ingest
 - **LLM Wiki** — Persistent markdown knowledge base with entity/concept extraction, synthesis, and health-checks
+- **Embedding Management** — Re-embed, verify integrity, rollback, and migrate between backends
+- **Hybrid Search** — Vector similarity + full-text keyword search with Reciprocal Rank Fusion
+- **Shadow Collections** — Zero-downtime re-embedding with shadow/finalize workflow
+- **12 Verification Checks** — Automated data integrity analysis with auto-fix capabilities
 - **Multiple language support** (English and Portuguese)
-- **Various AI models** available (Llama3, Gemma, ChatGPT, Qwen, Gemini)
-- **PDF document processing** and embedding with chunking
+- **Various AI models** available (Llama3, Gemma3, ChatGPT, Qwen3, Gemini, GPT-4o)
+- **PDF document processing** and embedding with configurable chunking
 - **Question answering** with context from your documents
 - **Content generation** capabilities
-- **REST API** for programmatic access
+- **REST API** with 25 endpoints for full programmatic access
 - **Docker support** for containerized deployment
 - **Obsidian-compatible** wiki format
+- **Auto model detection** — Detects and uses the embedding model from existing data on startup
 
 ## Configuration
 
 Libby supports different AI models and languages. You can configure these through environment variables or the config.yml file.
 
-Available Models:
-- Llama3 (default)
-- Gemma
-- ChatGPT
-- Qwen
+Available Embedding Models:
+- `mxbai-embed-large` (default)
+- `embeddinggemma` (768-dim, recommended for Gemma-based workflows)
+- `nomic-embed-text`
+
+Available LLM Models:
+- Llama3.2 (default)
+- Gemma3
+- GPT-4o
+- Qwen3
 - Gemini
 
 Supported Languages:
