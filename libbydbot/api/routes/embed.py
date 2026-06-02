@@ -67,7 +67,7 @@ def _run_embed_job(
         if embedder is None:
             raise RuntimeError("Embedder not initialized")
 
-        from libbydbot.brain.ingest import PDFPipeline
+        from libbydbot.brain.ingest import PDFPipeline, ChunkInfo
 
         embedder.collection_name = collection_name
         chunks_embedded = 0
@@ -78,7 +78,11 @@ def _run_embed_job(
 
         for text, metadata in pipeline:
             doc_name = metadata.get("title") or filename or "Unknown"
-            if isinstance(text, list):
+            if isinstance(text, list) and text and isinstance(text[0], ChunkInfo):
+                for chunk in text:
+                    embedder.embed_text(chunk.text, doc_name, chunk.page_number)
+                    chunks_embedded += 1
+            elif isinstance(text, list):
                 for i, chunk in enumerate(text):
                     embedder.embed_text(chunk, doc_name, i)
                     chunks_embedded += 1
@@ -279,7 +283,7 @@ async def upload_and_embed_sync(
         with open(temp_file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        from libbydbot.brain.ingest import PDFPipeline
+        from libbydbot.brain.ingest import PDFPipeline, ChunkInfo
 
         embedder.collection_name = collection_name
         chunks_embedded = 0
@@ -290,7 +294,11 @@ async def upload_and_embed_sync(
 
         for text, metadata in pipeline:
             doc_name = metadata.get("title") or file.filename or "Unknown"
-            if isinstance(text, list):
+            if isinstance(text, list) and text and isinstance(text[0], ChunkInfo):
+                for chunk in text:
+                    embedder.embed_text(chunk.text, doc_name, chunk.page_number)
+                    chunks_embedded += 1
+            elif isinstance(text, list):
                 for i, chunk in enumerate(text):
                     embedder.embed_text(chunk, doc_name, i)
                     chunks_embedded += 1

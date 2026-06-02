@@ -2123,12 +2123,14 @@ class DocEmbedder:
         """
         Finalize a rechunk operation by cutover from the shadow collection.
 
-        Steps:
-        1. Count rows in shadow vs original to ensure completeness.
-        2. Delete the original collection from the active table.
-        3. Rename the shadow collection to the original name.
-        4. If *shadow_table* is a dimension-specific table, swap it to
-           become the active table.
+        When *shadow_table* is the same as the active table (same-dimension
+        rechunk), the original collection is deleted and the shadow is renamed
+        in-place.
+
+        When *shadow_table* is a dimension-specific table (cross-dimension
+        rechunk), the shadow is renamed in the dimension-specific table only.
+        The original collection in the base table is **not deleted** — it may
+        contain vectors of a different dimension that cannot be moved.
 
         :param collection_name: Original collection name (e.g. ``"my_docs"``)
         :param shadow_collection: Shadow collection name (e.g. ``"my_docs_v2"``)
@@ -2150,6 +2152,7 @@ class DocEmbedder:
 
         active = self.table_name
         target = shadow_table or active
+        cross_table = shadow_table is not None and shadow_table != active
 
         def _col_count(table: str, col: str) -> int:
             if self.dburl.startswith("sqlite"):
@@ -2185,61 +2188,107 @@ class DocEmbedder:
             return stats
 
         try:
-            if self.dburl.startswith("sqlite"):
-                cur = self.connection.cursor()
-                cur.execute(f"DELETE FROM {active} WHERE collection_name = ?", (collection_name,))
-                stats["deleted_original"] = cur.rowcount
-                cur.execute(
-                    f"UPDATE {target} SET collection_name = ? WHERE collection_name = ?",
-                    (collection_name, shadow_collection),
+            if cross_table:
+                self._finalize_cross_table(
+                    active, target, collection_name, shadow_collection, stats
                 )
-                stats["renamed"] = cur.rowcount
-                self.connection.commit()
-            elif self.dburl.startswith("duckdb"):
-                conn = self.connection
-                conn.sql(f"DELETE FROM {active} WHERE collection_name = ?", params=[collection_name])
-                stats["deleted_original"] = stats["original_count"]
-                conn.sql(
-                    f"UPDATE {target} SET collection_name = ? WHERE collection_name = ?",
-                    params=[collection_name, shadow_collection],
-                )
-                stats["renamed"] = stats["shadow_count"]
             else:
-                with self.engine.connect() as conn:
-                    with conn.begin():
-                        result = conn.execute(
-                            text(f"DELETE FROM {active} WHERE collection_name = :col"),
-                            {"col": collection_name},
-                        )
-                        stats["deleted_original"] = result.rowcount
-                        result = conn.execute(
-                            text(f"UPDATE {target} SET collection_name = :new WHERE collection_name = :old"),
-                            {"new": collection_name, "old": shadow_collection},
-                        )
-                        stats["renamed"] = result.rowcount
-                    conn.commit()
-
-            if shadow_table and shadow_table != active:
-                moved = self._move_collection_between_tables(
-                    shadow_table, active, shadow_collection, collection_name
+                self._finalize_same_table(
+                    active, target, collection_name, shadow_collection, stats
                 )
-                stats["table_swapped"] = False
-                stats["rows_moved_between_tables"] = moved
-                if moved == 0 and stats["renamed"] == 0:
-                    stats["errors"].append(
-                        f"No rows moved from {shadow_table} to {active} for '{collection_name}'. "
-                        f"Dimension mismatch is expected — data remains in {shadow_table}."
-                    )
 
             stats["success"] = True
             logger.info(
-                f"Finalized rechunk: {collection_name} ({stats['renamed']} rows from shadow)"
+                f"Finalized rechunk: {collection_name} "
+                f"({stats['renamed']} rows renamed"
+                f"{f', {stats['deleted_original']} originals deleted' if stats['deleted_original'] else ''})"
             )
         except Exception as e:
             stats["errors"].append(str(e))
             logger.error(f"Error finalizing rechunk: {e}")
 
         return stats
+
+    def _finalize_cross_table(
+        self, active: str, target: str,
+        collection_name: str, shadow_collection: str, stats: dict,
+    ):
+        """Finalize a shadow collection in a dimension-specific table.
+
+        Only renames the shadow in the target table.  Does NOT delete the
+        original from the active table because the active table may use a
+        different vector dimension.
+        """
+        if self.dburl.startswith("sqlite"):
+            cur = self.connection.cursor()
+            cur.execute(
+                f"UPDATE {target} SET collection_name = ? WHERE collection_name = ?",
+                (collection_name, shadow_collection),
+            )
+            stats["renamed"] = cur.rowcount
+            self.connection.commit()
+        elif self.dburl.startswith("duckdb"):
+            self.connection.sql(
+                f"UPDATE {target} SET collection_name = ? WHERE collection_name = ?",
+                params=[collection_name, shadow_collection],
+            )
+            stats["renamed"] = stats["shadow_count"]
+        else:
+            with self.engine.connect() as conn:
+                with conn.begin():
+                    result = conn.execute(
+                        text(f"UPDATE {target} SET collection_name = :new WHERE collection_name = :old"),
+                        {"new": collection_name, "old": shadow_collection},
+                    )
+                    stats["renamed"] = result.rowcount
+                conn.commit()
+
+        logger.info(
+            f"Cross-table finalize: renamed '{shadow_collection}' → '{collection_name}' "
+            f"in {target} ({stats['renamed']} rows). Original in {active} preserved."
+        )
+
+    def _finalize_same_table(
+        self, active: str, target: str,
+        collection_name: str, shadow_collection: str, stats: dict,
+    ):
+        """Finalize a shadow collection in the same table as the original.
+
+        Deletes the original collection and renames the shadow in-place.
+        """
+        if self.dburl.startswith("sqlite"):
+            cur = self.connection.cursor()
+            cur.execute(f"DELETE FROM {active} WHERE collection_name = ?", (collection_name,))
+            stats["deleted_original"] = cur.rowcount
+            cur.execute(
+                f"UPDATE {target} SET collection_name = ? WHERE collection_name = ?",
+                (collection_name, shadow_collection),
+            )
+            stats["renamed"] = cur.rowcount
+            self.connection.commit()
+        elif self.dburl.startswith("duckdb"):
+            conn = self.connection
+            conn.sql(f"DELETE FROM {active} WHERE collection_name = ?", params=[collection_name])
+            stats["deleted_original"] = stats["original_count"]
+            conn.sql(
+                f"UPDATE {target} SET collection_name = ? WHERE collection_name = ?",
+                params=[collection_name, shadow_collection],
+            )
+            stats["renamed"] = stats["shadow_count"]
+        else:
+            with self.engine.connect() as conn:
+                with conn.begin():
+                    result = conn.execute(
+                        text(f"DELETE FROM {active} WHERE collection_name = :col"),
+                        {"col": collection_name},
+                    )
+                    stats["deleted_original"] = result.rowcount
+                    result = conn.execute(
+                        text(f"UPDATE {target} SET collection_name = :new WHERE collection_name = :old"),
+                        {"new": collection_name, "old": shadow_collection},
+                    )
+                    stats["renamed"] = result.rowcount
+                conn.commit()
 
     @staticmethod
     def _reconstruct_documents(rows: list[tuple]) -> dict[tuple[str, str], str]:
@@ -3229,10 +3278,40 @@ class DocEmbedder:
 
         col_filter_sql = f"WHERE collection_name = '{collection_name}'" if collection_name else ""
 
+        def _total_rows(table: str) -> int:
+            try:
+                return self._verify_query(table, f"SELECT COUNT(*) FROM {table}")[0][0]
+            except Exception:
+                return 0
+
+        rows_before = {t: _total_rows(t) for t in self._get_all_embedding_tables()}
+        logger.info(f"verify_and_fix: row counts before finalize: {rows_before}")
+
         # Finalize orphaned _v2 shadows first so checks run on clean data
         if auto_finalize and not dry_run:
             logger.info("verify_and_fix: finalizing orphaned shadows before checks")
             result["finalized"] = self._finalize_orphaned_shadows()
+
+            rows_after_finalize = {t: _total_rows(t) for t in self._get_all_embedding_tables()}
+            logger.info(f"verify_and_fix: row counts after finalize: {rows_after_finalize}")
+
+            total_before = sum(rows_before.values())
+            total_after = sum(rows_after_finalize.values())
+            if total_before > 0 and total_after < total_before * 0.5:
+                loss_pct = (1 - total_after / total_before) * 100
+                msg = (
+                    f"SAFETY ABORT: finalize caused {loss_pct:.0f}% data loss "
+                    f"({total_before} → {total_after} rows). "
+                    f"Stopping before checks to prevent further damage."
+                )
+                logger.error(msg)
+                result["errors"].append(msg)
+                result["finalized_summary"] = {
+                    "before": rows_before,
+                    "after": rows_after_finalize,
+                    "total_lost": total_before - total_after,
+                }
+                return result
 
         # Non-destructive checks (metadata updates only) always apply fixes
         NON_DESTRUCTIVE = {"hash_integrity", "missing_models"}
@@ -3636,21 +3715,28 @@ class DocEmbedder:
         Migrate documents from *source* table into *active* table.
 
         If both tables have the same embedding dimension, a bulk INSERT ...
-        SELECT is used.  Otherwise documents are re-embedded with the current
-        model.  Duplicates (matching ``(collection_name, doc_hash)``) are
-        skipped.
+        SELECT is used (cheap).  Otherwise documents are re-embedded with the
+        current model (expensive).
+
+        Duplicates (matching ``(collection_name, doc_hash)``) are skipped.
 
         Returns the number of documents migrated.
         """
         source_dim = self._get_table_embedding_dimension(source)
         active_dim = self._get_table_embedding_dimension(active)
-        model_dim = self._get_embedding_dimension()
 
-        # Build an AND-able condition for the source table when filtering
         and_cond = f"AND src.collection_name = '{collection_filter}'" if collection_filter else ""
 
-        if source_dim is not None and source_dim == active_dim and source_dim == model_dim:
+        if source_dim is not None and active_dim is not None and source_dim == active_dim:
+            logger.info(
+                f"Bulk-copying from {source} ({source_dim}d) to {active} ({active_dim}d)"
+            )
             return self._bulk_copy_orphan_table(source, active, and_cond)
+
+        logger.info(
+            f"Re-embedding from {source} ({source_dim}d) to {active} ({active_dim}d) "
+            f"— dimension mismatch"
+        )
         return self._reembed_orphan_table(source, active, and_cond)
 
     def _bulk_copy_orphan_table(self, source: str, target: str, and_cond: str) -> int:

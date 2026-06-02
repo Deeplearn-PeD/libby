@@ -5,7 +5,11 @@ These tests verify that the API module can be imported and the FastAPI app
 can be created successfully.
 """
 
+from pathlib import Path
+
 import pytest
+
+from libbydbot.brain.embed import DocEmbedder
 
 
 class TestAPIImports:
@@ -301,3 +305,83 @@ class TestSchemaModels:
         assert response.error == "ValueError"
         assert response.message == "Invalid input"
         assert response.detail == "Text cannot be empty"
+
+
+class TestUploadEmbed:
+    """Test PDF upload and embedding via the API."""
+
+    @pytest.fixture
+    def client(self, tmp_path):
+        """Create a TestClient with a fresh SQLite-backed embedder."""
+        from fastapi.testclient import TestClient
+        from libbydbot.api.main import app_state, create_app
+
+        db_path = tmp_path / "test_upload.db"
+        embedder = DocEmbedder(
+            "test_upload",
+            dburl=f"sqlite:///{db_path}",
+            embedding_model="mxbai-embed-large",
+        )
+
+        app_state.embedder = embedder
+        test_app = create_app()
+        client = TestClient(test_app)
+        yield client
+
+        app_state.embedder = None
+
+    def test_upload_sync_embeds_pdf(self, client):
+        """Upload a real PDF via /api/embed/upload/sync and verify chunks are stored."""
+        corpus = Path(__file__).parent / "test_corpus"
+        pdf_files = sorted(corpus.glob("*.pdf"))
+        assert len(pdf_files) > 0, f"No PDFs found in {corpus}"
+
+        pdf_path = pdf_files[0]
+
+        with open(pdf_path, "rb") as f:
+            response = client.post(
+                "/api/embed/upload/sync",
+                files={"file": (pdf_path.name, f, "application/pdf")},
+                data={
+                    "collection_name": "test_upload",
+                    "chunk_size": "800",
+                    "chunk_overlap": "100",
+                },
+            )
+
+        assert response.status_code == 200, f"Upload failed: {response.text}"
+        data = response.json()
+        assert data["success"] is True
+        assert data["chunks_embedded"] > 0
+        assert data["collection_name"] == "test_upload"
+
+        docs = client.get("/api/documents", params={"collection_name": "test_upload"})
+        assert docs.status_code == 200
+        doc_list = docs.json()
+        assert len(doc_list["documents"]) > 0
+
+    def test_upload_multiple_pdfs(self, client):
+        """Upload all PDFs from test_corpus and verify each is embedded."""
+        corpus = Path(__file__).parent / "test_corpus"
+        pdf_files = sorted(corpus.glob("*.pdf"))
+
+        total_chunks = 0
+        for pdf_path in pdf_files:
+            with open(pdf_path, "rb") as f:
+                response = client.post(
+                    "/api/embed/upload/sync",
+                    files={"file": (pdf_path.name, f, "application/pdf")},
+                    data={
+                        "collection_name": "multi_upload",
+                        "chunk_size": "800",
+                        "chunk_overlap": "100",
+                    },
+                )
+            assert response.status_code == 200, f"Upload {pdf_path.name} failed: {response.text}"
+            total_chunks += response.json()["chunks_embedded"]
+
+        assert total_chunks > 0
+
+        docs = client.get("/api/documents", params={"collection_name": "multi_upload"})
+        doc_names = {d["doc_name"] for d in docs.json()["documents"]}
+        assert len(doc_names) == len(pdf_files)
