@@ -149,6 +149,60 @@ class TestIngest:
         assert result["pages_touched"] >= 1
         assert (temp_wiki.sources_dir / "test_doc.md").exists()
 
+    def test_ingest_from_embeddings(self, tmp_path):
+        """Build the wiki straight from the embedding table (no PDF re-parse)."""
+        import numpy as np
+        from libbydbot.brain.embed import DocEmbedder
+
+        with patch(
+            "libbydbot.brain.embed.DocEmbedder._generate_embedding"
+        ) as mocked, patch(
+            "libbydbot.brain.embed.DocEmbedder._get_embedding_dimension",
+            return_value=1024,
+        ):
+            mocked.return_value = np.zeros(1024).tolist()
+            db_path = tmp_path / "emb.db"
+            embedder = DocEmbedder(
+                "test_collection",
+                dburl=f"sqlite:///{db_path}",
+                embedding_model="mxbai-embed-large",
+            )
+            embedder.embed_text("Alpha page one.", "alpha_doc", 0)
+            embedder.embed_text("Alpha page two.", "alpha_doc", 1)
+            embedder.embed_text("Beta standalone.", "beta_doc", 0)
+
+        wiki = WikiManager(
+            collection_name="test_collection",
+            wiki_base=str(tmp_path / "wiki"),
+            model="llama3.2",
+        )
+        wiki._generate_source_summary = MagicMock(
+            return_value=SourceSummary(
+                title="x",
+                summary="s",
+                key_takeaways=[],
+                entities=[],
+                concepts=[],
+                contradictions=[],
+                questions_raised=[],
+            )
+        )
+        wiki._generate_update_plan = MagicMock(
+            return_value=WikiUpdatePlan(
+                source_title="x",
+                pages_to_update=[],
+                pages_to_link=[],
+                synthesis_notes="",
+            )
+        )
+
+        result = wiki.ingest_from_embeddings(embedder, collection="test_collection")
+
+        assert result["documents_ingested"] == 2
+        assert result["pages_touched"] >= 2
+        assert (wiki.sources_dir / "alpha_doc.md").exists()
+        assert (wiki.sources_dir / "beta_doc.md").exists()
+
     def test_ingest_updates_entity_page(self, temp_wiki):
         # First ingest
         temp_wiki._generate_source_summary = MagicMock(

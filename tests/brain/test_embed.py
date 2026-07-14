@@ -41,6 +41,31 @@ def test_embed_text(tmp_path):
     edocs = embedder.get_embedded_documents()
     assert len(edocs) == 1
 
+
+def test_get_document_texts(tmp_path):
+    """Reconstruct document text from the embedding table."""
+    db_path = tmp_path / "embedding.db"
+    embedder = DocEmbedder(
+        "my_coll", dburl=f"sqlite:///{db_path}", embedding_model="mxbai-embed-large"
+    )
+    embedder.embed_text("Page one about cats.", "doc_a", 0)
+    embedder.embed_text("Page two about dogs.", "doc_a", 1)
+    embedder.embed_text("Solo document about fish.", "doc_b", 0)
+
+    # All documents in the collection, ordered by page number.
+    texts = embedder.get_document_texts(collection="my_coll")
+    assert set(texts.keys()) == {"doc_a", "doc_b"}
+    assert texts["doc_a"] == "Page one about cats.\nPage two about dogs."
+    assert texts["doc_b"] == "Solo document about fish."
+
+    # Single document filter.
+    one = embedder.get_document_texts(collection="my_coll", doc_name="doc_a")
+    assert list(one.keys()) == ["doc_a"]
+    assert "cats" in one["doc_a"]
+
+    # Missing document returns empty mapping.
+    assert embedder.get_document_texts(collection="my_coll", doc_name="nope") == {}
+
 @pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL not available")
 def test_embed_text_postgres():
     embedder = DocEmbedder("test_collection", embedding_model='mxbai-embed-large')

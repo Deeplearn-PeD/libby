@@ -50,6 +50,43 @@ def get_embedder() -> DocEmbedder:
 EmbedderDep = Annotated[DocEmbedder, Depends(get_embedder)]
 
 
+def _maybe_auto_ingest_wiki(
+    embedder: DocEmbedder, collection_name: str, doc_name: str = ""
+) -> None:
+    """
+    If ``wiki_auto_ingest`` is enabled, rebuild the affected wiki pages from
+    the freshly embedded chunks (reading straight from the embedding table, so
+    no PDF re-parsing is needed).
+
+    Failures are logged but never propagated, so a wiki problem can never break
+    the embedding flow.
+    """
+    try:
+        from libbydbot.settings import Settings
+
+        settings = Settings()
+        if not getattr(settings, "wiki_auto_ingest", False):
+            return
+
+        from libbydbot.brain.wiki import WikiManager
+
+        wiki = WikiManager(
+            collection_name=collection_name,
+            wiki_base=settings.wiki_base_path,
+            model=settings.default_model,
+        )
+        result = wiki.ingest_from_embeddings(
+            embedder, collection=collection_name, doc_name=doc_name
+        )
+        logger.info(
+            f"Auto-ingested into wiki '{collection_name}': "
+            f"{result.get('documents_ingested', 0)} source(s), "
+            f"{result.get('pages_touched', 0)} page(s) touched"
+        )
+    except Exception as e:
+        logger.warning(f"Wiki auto-ingest skipped for '{doc_name or collection_name}': {e}")
+
+
 def _run_embed_job(
     job_id: str,
     temp_dir: str,
@@ -71,6 +108,7 @@ def _run_embed_job(
 
         embedder.collection_name = collection_name
         chunks_embedded = 0
+        embedded_doc_names: set[str] = set()
 
         pipeline = PDFPipeline(
             temp_dir, chunk_size=chunk_size, chunk_overlap=chunk_overlap
@@ -78,6 +116,7 @@ def _run_embed_job(
 
         for text, metadata in pipeline:
             doc_name = metadata.get("title") or filename or "Unknown"
+            embedded_doc_names.add(doc_name)
             if isinstance(text, list) and text and isinstance(text[0], ChunkInfo):
                 for chunk in text:
                     embedder.embed_text(chunk.text, doc_name, chunk.page_number)
@@ -97,6 +136,9 @@ def _run_embed_job(
             _jobs[job_id]["finished_at"] = time.time()
 
         logger.info(f"Job {job_id} completed: {chunks_embedded} chunks embedded")
+
+        for name in embedded_doc_names:
+            _maybe_auto_ingest_wiki(embedder, collection_name, name)
 
     except Exception as e:
         logger.error(f"Job {job_id} failed: {e}")
@@ -125,6 +167,8 @@ def embed_text(request: EmbedTextRequest, embedder: EmbedderDep):
 
         embedder.collection_name = request.collection_name
         embedder.embed_text(request.text, request.doc_name, request.page_number)
+
+        _maybe_auto_ingest_wiki(embedder, request.collection_name, request.doc_name)
 
         return EmbedTextResponse(
             success=True,
@@ -287,6 +331,7 @@ async def upload_and_embed_sync(
 
         embedder.collection_name = collection_name
         chunks_embedded = 0
+        embedded_doc_names: set[str] = set()
 
         pipeline = PDFPipeline(
             temp_dir, chunk_size=chunk_size, chunk_overlap=chunk_overlap
@@ -294,6 +339,7 @@ async def upload_and_embed_sync(
 
         for text, metadata in pipeline:
             doc_name = metadata.get("title") or file.filename or "Unknown"
+            embedded_doc_names.add(doc_name)
             if isinstance(text, list) and text and isinstance(text[0], ChunkInfo):
                 for chunk in text:
                     embedder.embed_text(chunk.text, doc_name, chunk.page_number)
@@ -306,6 +352,9 @@ async def upload_and_embed_sync(
                 for page_number, page_text in text.items():
                     embedder.embed_text(page_text, doc_name, page_number)
                     chunks_embedded += 1
+
+        for name in embedded_doc_names:
+            _maybe_auto_ingest_wiki(embedder, collection_name, name)
 
         return EmbedUploadResponse(
             success=True,

@@ -1364,6 +1364,79 @@ class DocEmbedder:
 
         return result
 
+    def get_document_texts(
+        self, collection: str = "", doc_name: str = ""
+    ) -> dict[str, str]:
+        """
+        Reconstruct full document text from the embedding table.
+
+        Returns a mapping of ``doc_name`` -> concatenated text, with chunks
+        ordered by ``page_number``. Optionally filtered by *collection* and/or
+        *doc_name*. Reads from the dimension-appropriate table so the wiki can
+        be built directly from embedded data when the original PDFs are no
+        longer on disk.
+        """
+        collection = collection or self.collection_name
+        tbl = self._target_table_for_dimension()
+        docs: dict[str, list[str]] = {}
+
+        if self.dburl.startswith("sqlite"):
+            with self.connection as conn:
+                cur = conn.cursor()
+                if doc_name:
+                    rows = cur.execute(
+                        f"SELECT doc_name, page_number, document FROM {tbl} "
+                        "WHERE collection_name=? AND doc_name=? ORDER BY page_number",
+                        (collection, doc_name),
+                    ).fetchall()
+                else:
+                    rows = cur.execute(
+                        f"SELECT doc_name, page_number, document FROM {tbl} "
+                        "WHERE collection_name=? ORDER BY doc_name, page_number",
+                        (collection,),
+                    ).fetchall()
+            for name, _page, document in rows:
+                docs.setdefault(name, []).append(document or "")
+        elif self.dburl.startswith("duckdb"):
+            conn = self.connection
+            if doc_name:
+                rows = conn.sql(
+                    f"SELECT doc_name, page_number, document FROM {tbl} "
+                    "WHERE collection_name=? AND doc_name=? ORDER BY page_number",
+                    params=[collection, doc_name],
+                ).fetchall()
+            else:
+                rows = conn.sql(
+                    f"SELECT doc_name, page_number, document FROM {tbl} "
+                    "WHERE collection_name=? ORDER BY doc_name, page_number",
+                    params=[collection],
+                ).fetchall()
+            for name, _page, document in rows:
+                docs.setdefault(name, []).append(document or "")
+        else:
+            with Session(self.engine) as session:
+                if doc_name:
+                    rows = session.execute(
+                        text(
+                            f"SELECT doc_name, page_number, document FROM {tbl} "
+                            "WHERE collection_name=:col AND doc_name=:doc "
+                            "ORDER BY page_number"
+                        ),
+                        {"col": collection, "doc": doc_name},
+                    ).fetchall()
+                else:
+                    rows = session.execute(
+                        text(
+                            f"SELECT doc_name, page_number, document FROM {tbl} "
+                            "WHERE collection_name=:col ORDER BY doc_name, page_number"
+                        ),
+                        {"col": collection},
+                    ).fetchall()
+            for name, _page, document in rows:
+                docs.setdefault(name, []).append(document or "")
+
+        return {name: "\n".join(parts) for name, parts in docs.items()}
+
     def _migrate_add_embedding_model(self):
         """
         Add embedding_model column to existing tables if it doesn't exist.

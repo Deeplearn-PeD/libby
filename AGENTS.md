@@ -178,7 +178,7 @@ libby/
 - `OLLAMA_HOST` - Ollama server URL (default: http://localhost:11434)
 - `GEMINI_API_KEY` - Google Gemini API key
 - `WIKI_BASE_PATH` - Base directory for LLM wikis (default: `~/.libby/wikis`)
-- `WIKI_AUTO_INGEST` - Automatically ingest documents into wiki after embedding (default: `False`)
+- `WIKI_AUTO_INGEST` - Automatically ingest documents into the wiki after embedding (default: `True`). Reads straight from the embedding table, so no PDF re-parsing is needed.
 
 ## Supported Models
 
@@ -251,7 +251,7 @@ Content here with [[Other Page]] links.
 
 ### Ingest Workflow
 
-1. Read source content (from raw PDF or embedded chunks).
+1. Read source content (from raw PDF **or** embedded chunks via `WikiManager.ingest_from_embeddings`, which reads straight from the embedding table — no PDF re-parsing, works when source files are no longer on disk).
 2. Generate `SourceSummary` (entities, concepts, contradictions).
 3. Generate `WikiUpdatePlan` (pages to create/update).
 4. Write/update:
@@ -260,6 +260,11 @@ Content here with [[Other Page]] links.
    - `concepts/<concept>.md` (create or append mention)
    - `synthesis/overview.md` (if synthesis notes exist)
 5. Update `index.md` and append to `log.md`.
+
+> **Auto-ingest:** when `WIKI_AUTO_INGEST` is `True` (the default), the embed
+> routes automatically run `ingest_from_embeddings` for each newly embedded
+> document, so the wiki stays in sync with the embedding store without manual
+> steps. This can be disabled via the `WIKI_AUTO_INGEST` env var.
 
 ### Query Workflow
 
@@ -293,6 +298,9 @@ In the TUI, use the Wiki Browser screen (`Ctrl+W`) and the Ingest button.
 ### REST API Endpoints
 
 - `POST /api/wiki/ingest` — ingest a source into the wiki
+- `POST /api/wiki/ingest-from-embeddings` — build/update the wiki straight from the embedding table (no PDF re-parsing)
 - `POST /api/wiki/query` — query the wiki
 - `POST /api/wiki/lint` — lint the wiki
 - `GET /api/wiki/status/{collection_name}` — wiki statistics
+- `GET /api/wiki/pages/{collection_name}` — list all wiki pages grouped by category
+- `GET /api/wiki/page/{collection_name}` — read a single wiki page (`?category=...&page=...`)

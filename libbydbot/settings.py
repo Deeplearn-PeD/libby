@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     )
 
     wiki_auto_ingest: bool = Field(
-        default=False,
+        default=True,
         description="Automatically ingest documents into the wiki after embedding",
     )
 

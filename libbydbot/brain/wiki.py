@@ -394,6 +394,58 @@ class WikiManager:
             "summary": summary.summary,
         }
 
+    def ingest_from_embeddings(
+        self,
+        embedder,
+        collection: str = "",
+        doc_name: str = "",
+    ) -> dict[str, Any]:
+        """
+        Build/update the wiki directly from the embedding table.
+
+        Reconstructs each document's text from its embedded chunks (ordered by
+        page number) and feeds it through :meth:`ingest_source`. This avoids
+        re-parsing the original PDFs and works even when the source files are
+        no longer on disk.
+
+        :param embedder: a ``DocEmbedder`` instance backed by the same store
+            as the embedded collection.
+        :param collection: collection to read; defaults to this wiki's collection.
+        :param doc_name: ingest only this document; empty means all documents.
+        """
+        collection = collection or self.collection_name
+        texts = embedder.get_document_texts(collection=collection, doc_name=doc_name)
+        if not texts:
+            logger.warning(f"No embedded documents found for '{collection}'")
+            return {
+                "collection": collection,
+                "documents_ingested": 0,
+                "pages_touched": 0,
+                "results": [],
+            }
+
+        results = []
+        total_pages = 0
+        for name, content in texts.items():
+            if not content.strip():
+                logger.info(f"Skipping empty document '{name}'")
+                continue
+            logger.info(f"Ingesting embedded document into wiki: {name}")
+            result = self.ingest_source(name, content)
+            results.append(result)
+            total_pages += result.get("pages_touched", 0)
+
+        logger.success(
+            f"Wiki ingest from embeddings complete: {len(results)} sources, "
+            f"{total_pages} pages touched"
+        )
+        return {
+            "collection": collection,
+            "documents_ingested": len(results),
+            "pages_touched": total_pages,
+            "results": results,
+        }
+
     def _structured_llm_call(self, prompt: str, response_model, context: str = ""):
         """
         Call the LLM with structured output, falling back to plain text + JSON extraction.

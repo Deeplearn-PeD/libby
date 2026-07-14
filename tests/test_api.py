@@ -5,6 +5,7 @@ These tests verify that the API module can be imported and the FastAPI app
 can be created successfully.
 """
 
+import os
 from pathlib import Path
 
 import pytest
@@ -72,20 +73,25 @@ class TestAppCreation:
         assert test_app.version == VERSION
 
     def test_app_routes(self):
-        """Test that app has expected routes."""
+        """Test that app has expected routes.
+
+        FastAPI >= 0.115 includes routers lazily, so routes added via
+        include_router do not appear directly in app.routes. Inspecting the
+        generated OpenAPI schema resolves all routers reliably.
+        """
         from libbydbot.api.main import create_app
 
         test_app = create_app()
-        route_paths = []
-        for route in test_app.routes:
-            if hasattr(route, "path"):
-                route_paths.append(route.path)
+        route_paths = set(test_app.openapi()["paths"].keys())
 
         assert "/api/health" in route_paths
         assert "/api/embed/text" in route_paths
         assert "/api/retrieve" in route_paths
         assert "/api/documents" in route_paths
         assert "/api/collections" in route_paths
+        # Wiki browsing endpoints
+        assert "/api/wiki/pages/{collection_name}" in route_paths
+        assert "/api/wiki/page/{collection_name}" in route_paths
 
 
 class TestSchemaModels:
@@ -385,3 +391,200 @@ class TestUploadEmbed:
         docs = client.get("/api/documents", params={"collection_name": "multi_upload"})
         doc_names = {d["doc_name"] for d in docs.json()["documents"]}
         assert len(doc_names) == len(pdf_files)
+
+
+class TestWikiBrowse:
+    """Test the wiki browsing endpoints (list pages + read a page)."""
+
+    @pytest.fixture
+    def wiki_client(self, tmp_path, monkeypatch):
+        """Create a TestClient backed by a temp wiki with sample pages."""
+        os.environ["EMBED_DB"] = f"sqlite:///{tmp_path / 'embed.db'}"
+
+        from fastapi.testclient import TestClient
+        from libbydbot.api.main import create_app
+        from libbydbot.api.routes import wiki as wiki_routes
+        from libbydbot.brain.wiki import WikiManager
+
+        wiki = WikiManager(
+            collection_name="main", wiki_base=str(tmp_path), model="llama3.2"
+        )
+        (wiki.sources_dir / "doc1.md").write_text(
+            "---\ntitle: Doc1\n---\n\n# Doc1\n\nHello world.", encoding="utf-8"
+        )
+        (wiki.entities_dir / "person_a.md").write_text(
+            "---\ntitle: Person A\n---\n\n# Person A", encoding="utf-8"
+        )
+
+        def fake_get_wiki_manager(collection_name: str = "main") -> WikiManager:
+            return WikiManager(
+                collection_name=collection_name,
+                wiki_base=str(tmp_path),
+                model="llama3.2",
+            )
+
+        monkeypatch.setattr(wiki_routes, "get_wiki_manager", fake_get_wiki_manager)
+
+        client = TestClient(create_app())
+        yield client
+        os.environ.pop("EMBED_DB", None)
+
+    def test_browse_returns_categories(self, wiki_client):
+        """GET /api/wiki/pages/main lists pages grouped by category."""
+        response = wiki_client.get("/api/wiki/pages/main")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["collection"] == "main"
+        assert set(data["categories"].keys()) == {
+            "sources",
+            "entities",
+            "concepts",
+            "synthesis",
+        }
+        assert data["categories"]["sources"] == ["doc1"]
+        assert data["categories"]["entities"] == ["person_a"]
+        assert "index" in data["root_pages"]
+        assert "log" in data["root_pages"]
+
+    def test_read_source_page(self, wiki_client):
+        """GET /api/wiki/page/main reads a source page."""
+        response = wiki_client.get(
+            "/api/wiki/page/main", params={"category": "sources", "page": "doc1"}
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["category"] == "sources"
+        assert data["page"] == "doc1"
+        assert "# Doc1" in data["content"]
+        assert data["path"].endswith("doc1.md")
+
+    def test_read_root_page(self, wiki_client):
+        """GET /api/wiki/page/main reads the root index page."""
+        response = wiki_client.get(
+            "/api/wiki/page/main", params={"category": "root", "page": "index"}
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["category"] == "root"
+        assert "Wiki Index" in data["content"]
+
+    def test_missing_page_returns_404(self, wiki_client):
+        """A non-existent page returns 404."""
+        response = wiki_client.get(
+            "/api/wiki/page/main", params={"category": "sources", "page": "nope"}
+        )
+        assert response.status_code == 404
+
+    def test_invalid_category_returns_400(self, wiki_client):
+        """An unknown category returns 400."""
+        response = wiki_client.get(
+            "/api/wiki/page/main", params={"category": "evil", "page": "x"}
+        )
+        assert response.status_code == 400
+
+    def test_path_traversal_blocked(self, wiki_client):
+        """A page name with path separators is rejected."""
+        response = wiki_client.get(
+            "/api/wiki/page/main",
+            params={"category": "sources", "page": "../index"},
+        )
+        assert response.status_code == 400
+
+
+class TestWikiIngestFromEmbeddings:
+    """Test the DB-driven wiki ingest endpoint and auto-ingest wiring."""
+
+    @pytest.fixture
+    def ingest_client(self, tmp_path, monkeypatch):
+        """A TestClient with a real SQLite embedder + wiki pointing at temp dirs."""
+        import numpy as np
+        from unittest.mock import patch
+
+        os.environ["EMBED_DB"] = f"sqlite:///{tmp_path / 'embed.db'}"
+        os.environ["WIKI_BASE_PATH"] = str(tmp_path / "wikis")
+
+        from fastapi.testclient import TestClient
+        from libbydbot.api.main import app_state, create_app
+        from libbydbot.brain.embed import DocEmbedder
+
+        embed_patch = patch("libbydbot.brain.embed.DocEmbedder._generate_embedding")
+        dim_patch = patch(
+            "libbydbot.brain.embed.DocEmbedder._get_embedding_dimension",
+            return_value=1024,
+        )
+        mocked = embed_patch.start()
+        dim_patch.start()
+        mocked.return_value = np.zeros(1024).tolist()
+
+        embedder = DocEmbedder(
+            "main",
+            dburl=f"sqlite:///{tmp_path / 'embed.db'}",
+            embedding_model="mxbai-embed-large",
+        )
+        embedder.embed_text("Content about Carnegie and steel.", "doc_one", 0)
+        app_state.embedder = embedder
+
+        client = TestClient(create_app())
+        yield client
+
+        embed_patch.stop()
+        dim_patch.stop()
+        app_state.embedder = None
+        os.environ.pop("EMBED_DB", None)
+        os.environ.pop("WIKI_BASE_PATH", None)
+
+    def test_ingest_from_embeddings_endpoint(self, ingest_client, monkeypatch):
+        """POST /api/wiki/ingest-from-embeddings builds the wiki from the DB."""
+        from libbydbot.brain.wiki import WikiManager
+
+        canned = {
+            "collection": "main",
+            "documents_ingested": 1,
+            "pages_touched": 3,
+            "results": [
+                {
+                    "source": "doc_one",
+                    "pages_touched": 3,
+                    "entities_created": 1,
+                    "concepts_created": 1,
+                    "summary": "A summary.",
+                }
+            ],
+        }
+        monkeypatch.setattr(
+            WikiManager, "ingest_from_embeddings", lambda self, *a, **k: canned
+        )
+
+        response = ingest_client.post(
+            "/api/wiki/ingest-from-embeddings",
+            json={"collection_name": "main", "doc_name": "doc_one"},
+        )
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["success"] is True
+        assert data["documents_ingested"] == 1
+        assert data["pages_touched"] >= 1
+        assert data["results"][0]["source"] == "doc_one"
+
+    def test_ingest_from_embeddings_route_registered(self):
+        """The new endpoint is present in the OpenAPI schema."""
+        from libbydbot.api.main import create_app
+
+        paths = set(create_app().openapi()["paths"].keys())
+        assert "/api/wiki/ingest-from-embeddings" in paths
+
+    def test_auto_ingest_helper_exists(self):
+        """The embed routes expose the auto-ingest helper."""
+        from libbydbot.api.routes import embed
+
+        assert callable(getattr(embed, "_maybe_auto_ingest_wiki", None))
+
+    def test_auto_ingest_disabled_when_setting_off(self, tmp_path, monkeypatch):
+        """Auto-ingest is a no-op (and never raises) when the setting is off."""
+        from libbydbot.api.routes.embed import _maybe_auto_ingest_wiki
+        from libbydbot.brain.embed import DocEmbedder
+
+        monkeypatch.setenv("WIKI_AUTO_INGEST", "false")
+        embedder = DocEmbedder("main", dburl=f"sqlite:///{tmp_path}/e.db")
+        # Should return None without error even with a bare embedder.
+        assert _maybe_auto_ingest_wiki(embedder, "main", "x") is None

@@ -1,13 +1,18 @@
+from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from loguru import logger
 
 from libbydbot.api.schemas import (
+    WikiBrowseResponse,
+    WikiIngestFromEmbeddingsRequest,
+    WikiIngestFromEmbeddingsResponse,
     WikiIngestRequest,
     WikiIngestResponse,
     WikiLintRequest,
     WikiLintResponse,
+    WikiPageResponse,
     WikiQueryRequest,
     WikiQueryResponse,
     WikiStatusResponse,
@@ -15,6 +20,10 @@ from libbydbot.api.schemas import (
 from libbydbot.brain.wiki import WikiManager
 
 router = APIRouter(prefix="/wiki", tags=["wiki"])
+
+# Known wiki categories (directories under the wiki root) plus the "root"
+# pseudo-category used for index.md / log.md.
+WIKI_CATEGORIES = ("sources", "entities", "concepts", "synthesis")
 
 
 def get_wiki_manager(collection_name: str = "main") -> WikiManager:
@@ -65,6 +74,66 @@ def wiki_ingest(request: WikiIngestRequest):
         )
     except Exception as e:
         logger.error(f"Error ingesting into wiki: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/ingest-from-embeddings", response_model=WikiIngestFromEmbeddingsResponse
+)
+def wiki_ingest_from_embeddings(request: WikiIngestFromEmbeddingsRequest):
+    """
+    Build/update the wiki directly from the embedding table.
+
+    Reconstructs each document's text from its embedded chunks (no PDF
+    re-parsing) and ingests it. Useful when the original source files are no
+    longer on disk, and as the manual trigger for the same path used by
+    automatic post-embedding ingest.
+    """
+    try:
+        from libbydbot.api.main import app_state
+
+        embedder = app_state.embedder
+        if embedder is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Embedder not initialized; cannot read embedding table.",
+            )
+
+        wiki = get_wiki_manager(request.collection_name)
+        result = wiki.ingest_from_embeddings(
+            embedder,
+            collection=request.collection_name,
+            doc_name=request.doc_name,
+        )
+
+        per_doc = [
+            WikiIngestResponse(
+                success=True,
+                source=r["source"],
+                pages_touched=r["pages_touched"],
+                entities_created=r["entities_created"],
+                concepts_created=r["concepts_created"],
+                summary=r["summary"],
+                message=f"Ingested '{r['source']}' from embeddings",
+            )
+            for r in result.get("results", [])
+        ]
+
+        return WikiIngestFromEmbeddingsResponse(
+            success=True,
+            collection=result["collection"],
+            documents_ingested=result["documents_ingested"],
+            pages_touched=result["pages_touched"],
+            results=per_doc,
+            message=(
+                f"Ingested {result['documents_ingested']} document(s) "
+                f"({result['pages_touched']} pages touched) from embeddings"
+            ),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error ingesting wiki from embeddings: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -137,4 +206,119 @@ def wiki_status(collection_name: str = "main"):
         )
     except Exception as e:
         logger.error(f"Error getting wiki status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _category_dir(wiki: WikiManager, category: str) -> Path:
+    """Resolve a category name to its directory on disk."""
+    dirs = {
+        "sources": wiki.sources_dir,
+        "entities": wiki.entities_dir,
+        "concepts": wiki.concepts_dir,
+        "synthesis": wiki.synthesis_dir,
+    }
+    if category not in dirs:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid category '{category}'. Must be one of: {', '.join(dirs)} or 'root'.",
+        )
+    return dirs[category]
+
+
+def _safe_resolve(base: Path, *parts: str) -> Path:
+    """Resolve *parts* under *base*, rejecting any path that escapes base."""
+    candidate = (base.joinpath(*parts)).resolve()
+    base_resolved = base.resolve()
+    try:
+        candidate.relative_to(base_resolved)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="Requested path is outside the wiki directory.",
+        )
+    return candidate
+
+
+@router.get("/pages/{collection_name}", response_model=WikiBrowseResponse)
+def wiki_browse(collection_name: str = "main"):
+    """
+    Browse a collection's wiki.
+
+    Returns the page names grouped by category (sources/entities/concepts/
+    synthesis) plus the root-level pages (index, log), mirroring the TUI tree.
+    """
+    try:
+        wiki = get_wiki_manager(collection_name)
+        categories: dict[str, list[str]] = {}
+        for category in WIKI_CATEGORIES:
+            directory = _category_dir(wiki, category)
+            categories[category] = sorted(
+                p.stem for p in directory.glob("*.md") if p.is_file()
+            )
+
+        root_pages = []
+        if wiki.index_path.exists():
+            root_pages.append(wiki.index_path.stem)
+        if wiki.log_path.exists():
+            root_pages.append(wiki.log_path.stem)
+
+        return WikiBrowseResponse(
+            collection=wiki.collection_name,
+            wiki_path=str(wiki.wiki_dir),
+            categories=categories,
+            root_pages=root_pages,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error browsing wiki: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/page/{collection_name}", response_model=WikiPageResponse)
+def wiki_page(
+    collection_name: str = "main",
+    category: str = Query(..., description="Category: sources/entities/concepts/synthesis/root"),
+    page: str = Query(..., description="Page name (stem without .md), e.g. 'index' or a doc name"),
+):
+    """
+    Read a single wiki page's markdown content.
+
+    Use category='root' with page='index' or page='log' for the root pages.
+    """
+    try:
+        wiki = get_wiki_manager(collection_name)
+
+        if category == "root":
+            base = wiki.wiki_dir
+        else:
+            base = _category_dir(wiki, category)
+
+        # Reject anything that looks like a path component to avoid traversal.
+        if not page or "/" in page or "\\" in page or page.startswith("."):
+            raise HTTPException(
+                status_code=400, detail="page must be a simple page name with no path separators."
+            )
+
+        page_path = _safe_resolve(base, f"{page}.md")
+        if not page_path.is_file():
+            raise HTTPException(
+                status_code=404,
+                detail=f"Page '{page}' not found in category '{category}'.",
+            )
+
+        rel_path = page_path.relative_to(wiki.wiki_dir.resolve())
+        content = page_path.read_text(encoding="utf-8")
+
+        return WikiPageResponse(
+            collection=wiki.collection_name,
+            category=category,
+            page=page_path.stem,
+            path=str(rel_path),
+            content=content,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error reading wiki page: {e}")
         raise HTTPException(status_code=500, detail=str(e))

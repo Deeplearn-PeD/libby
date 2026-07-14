@@ -139,16 +139,6 @@ Screen {
     width: 100%;
 }
 
-/* Status bar */
-#status-bar {
-    dock: bottom;
-    height: 1;
-    background: $surface;
-    color: $text;
-    content-align: left middle;
-    padding: 0 2;
-}
-
 /* Notifications */
 Notification {
     color: $text;

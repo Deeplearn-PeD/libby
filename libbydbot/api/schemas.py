@@ -190,6 +190,20 @@ class WikiIngestResponse(BaseModel):
     message: str = Field(..., description="Status message")
 
 
+class WikiIngestFromEmbeddingsRequest(BaseModel):
+    collection_name: str = Field("main", description="Collection whose embeddings to ingest")
+    doc_name: str = Field("", description="Ingest only this document; empty means all documents in the collection")
+
+
+class WikiIngestFromEmbeddingsResponse(BaseModel):
+    success: bool = Field(..., description="Whether ingest succeeded")
+    collection: str = Field(..., description="Collection ingested")
+    documents_ingested: int = Field(..., description="Number of documents ingested")
+    pages_touched: int = Field(..., description="Number of wiki pages created/updated")
+    results: list[WikiIngestResponse] = Field(default_factory=list, description="Per-document ingest results")
+    message: str = Field(..., description="Status message")
+
+
 class WikiQueryRequest(BaseModel):
     question: str = Field(..., description="Question to answer from the wiki")
     collection_name: str = Field("main", description="Collection wiki to query")
@@ -329,6 +343,25 @@ class WikiStatusResponse(BaseModel):
     orphan_pages: int = Field(..., description="Number of orphan pages")
     broken_links: int = Field(..., description="Number of broken links")
     last_operation: str = Field("", description="Most recent log entry")
+
+
+class WikiBrowseResponse(BaseModel):
+    collection: str = Field(..., description="Collection name")
+    wiki_path: str = Field(..., description="Filesystem path to the wiki")
+    categories: dict[str, list[str]] = Field(
+        ..., description="Page names (stems) grouped by category: sources/entities/concepts/synthesis"
+    )
+    root_pages: list[str] = Field(
+        default_factory=list, description="Root-level pages such as 'index' and 'log'"
+    )
+
+
+class WikiPageResponse(BaseModel):
+    collection: str = Field(..., description="Collection name")
+    category: str = Field(..., description="Category the page belongs to (sources/entities/concepts/synthesis/root)")
+    page: str = Field(..., description="Page name (stem without .md)")
+    path: str = Field(..., description="Relative path of the page within the wiki")
+    content: str = Field(..., description="Full markdown content of the page")
 
 
 class FinalizeRequest(BaseModel):

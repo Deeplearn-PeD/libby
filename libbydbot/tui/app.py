@@ -7,6 +7,7 @@ Manages global state, screen navigation, and background workers.
 from pathlib import Path
 
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.reactive import reactive
 from textual.widgets import Footer, Header, Static
 
@@ -26,13 +27,16 @@ class LibbyApp(App):
     """Libby D. Bot Terminal User Interface."""
 
     CSS_PATH = "libby.tcss"
+    # Priority bindings so navigation works even when a widget (e.g. an Input)
+    # would otherwise capture the key (Ctrl+D, Ctrl+E, etc. are readline keys
+    # consumed by focused Input widgets).
     BINDINGS = [
-        ("ctrl+q", "quit", "Quit"),
-        ("ctrl+d", "switch_screen('dashboard')", "Dashboard"),
-        ("ctrl+c", "switch_screen('chat')", "Chat"),
-        ("ctrl+e", "switch_screen('embed')", "Embed"),
-        ("ctrl+w", "switch_screen('wiki_browser')", "Wiki"),
-        ("ctrl+s", "switch_screen('settings')", "Settings"),
+        Binding("ctrl+q", "quit", "Quit", priority=True),
+        Binding("ctrl+d", "switch_screen('dashboard')", "Dashboard", priority=True),
+        Binding("ctrl+c", "switch_screen('chat')", "Chat", priority=True),
+        Binding("ctrl+e", "switch_screen('embed')", "Embed", priority=True),
+        Binding("ctrl+w", "switch_screen('wiki_browser')", "Wiki", priority=True),
+        Binding("ctrl+s", "switch_screen('settings')", "Settings", priority=True),
     ]
 
     SCREENS = {
