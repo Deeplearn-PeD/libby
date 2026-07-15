@@ -330,3 +330,220 @@ class TestStatus:
     def test_status_shows_wiki_path(self, temp_wiki):
         status = temp_wiki.status()
         assert "test_collection" in status["wiki_path"]
+
+
+class TestPartGrouping:
+    def test_doc_base_and_part_recognizes_suffixes(self):
+        cases = [
+            ("report_part1", "report", 1),
+            ("report_part_2", "report", 2),
+            ("Report Part 3", "Report", 3),
+            ("report_p4", "report", 4),
+            ("report (1)", "report", 1),
+            ("report (part 2)", "report", 2),
+            ("report_vol1", "report", 1),
+            ("report_chapter_10", "report", 10),
+            ("my_doc_sec5", "my_doc", 5),
+        ]
+        for name, base, part in cases:
+            assert WikiManager._doc_base_and_part(name) == (base, part), name
+
+    def test_doc_base_and_part_leaves_plain_docs_alone(self):
+        # Standalone document names must not be treated as parts.
+        for name in ("report", "annual_report_2023", "Chapter 1", "setup", "report_v2"):
+            base, part = WikiManager._doc_base_and_part(name)
+            assert part is None, name
+            assert base == name, name
+
+    def test_group_documents_concatenates_parts_in_order(self):
+        texts = {
+            "report_part2": "SECOND",
+            "report_part1": "FIRST",
+            "standalone": "ALONE",
+        }
+        merged = WikiManager._group_documents_by_base(texts)
+        # Parts merged under the base name, in ascending part order.
+        assert merged["report"] == "FIRST\n\nSECOND"
+        # Standalone doc unchanged.
+        assert merged["standalone"] == "ALONE"
+
+    def test_group_documents_renames_lone_part_to_base(self):
+        # A single part with no siblings is still renamed to its base name.
+        merged = WikiManager._group_documents_by_base({"report_part1": "ONLY"})
+        assert list(merged.keys()) == ["report"]
+        assert merged["report"] == "ONLY"
+
+
+class TestIngestFromEmbeddingsParts:
+    def test_parts_produce_single_page(self, tmp_path):
+        """Embedded document parts merge into one wiki source page."""
+        import numpy as np
+        from libbydbot.brain.embed import DocEmbedder
+
+        with patch(
+            "libbydbot.brain.embed.DocEmbedder._generate_embedding"
+        ) as mocked, patch(
+            "libbydbot.brain.embed.DocEmbedder._get_embedding_dimension",
+            return_value=1024,
+        ):
+            mocked.return_value = np.zeros(1024).tolist()
+            db_path = tmp_path / "emb.db"
+            embedder = DocEmbedder(
+                "test_collection",
+                dburl=f"sqlite:///{db_path}",
+                embedding_model="mxbai-embed-large",
+            )
+            embedder.embed_text("Part one intro.", "report_part1", 0)
+            embedder.embed_text("Part one body.", "report_part1", 1)
+            embedder.embed_text("Part two body.", "report_part2", 0)
+
+        wiki = WikiManager(
+            collection_name="test_collection",
+            wiki_base=str(tmp_path / "wiki"),
+            model="llama3.2",
+        )
+        seen = []
+
+        def _fake_summary(doc_name, doc_content):
+            seen.append((doc_name, doc_content))
+            return SourceSummary(
+                title=doc_name,
+                summary=f"summary of {doc_name}",
+                key_takeaways=[],
+                entities=[],
+                concepts=[],
+                contradictions=[],
+                questions_raised=[],
+            )
+
+        wiki._generate_source_summary = MagicMock(side_effect=_fake_summary)
+        wiki._generate_update_plan = MagicMock(
+            return_value=WikiUpdatePlan(
+                source_title="x",
+                pages_to_update=[],
+                pages_to_link=[],
+                synthesis_notes="",
+            )
+        )
+
+        result = wiki.ingest_from_embeddings(embedder, collection="test_collection")
+
+        # One collective page despite three embedded chunks across two parts.
+        assert result["documents_ingested"] == 1
+        names = [n for n, _ in seen]
+        assert names == ["report"]
+        # Concatenated content preserves part order (part1 before part2).
+        assert "Part one body." in seen[0][1]
+        assert "Part two body." in seen[0][1]
+        assert seen[0][1].index("Part one intro.") < seen[0][1].index("Part two body.")
+        assert (wiki.sources_dir / "report.md").exists()
+        # No per-part page should have been created.
+        assert not (wiki.sources_dir / "report_part1.md").exists()
+        assert not (wiki.sources_dir / "report_part2.md").exists()
+
+    def test_merge_parts_disabled_keeps_separate(self, tmp_path):
+        """With merge_parts=False, parts stay as separate pages."""
+        import numpy as np
+        from libbydbot.brain.embed import DocEmbedder
+
+        with patch(
+            "libbydbot.brain.embed.DocEmbedder._generate_embedding"
+        ) as mocked, patch(
+            "libbydbot.brain.embed.DocEmbedder._get_embedding_dimension",
+            return_value=1024,
+        ):
+            mocked.return_value = np.zeros(1024).tolist()
+            db_path = tmp_path / "emb.db"
+            embedder = DocEmbedder(
+                "test_collection",
+                dburl=f"sqlite:///{db_path}",
+                embedding_model="mxbai-embed-large",
+            )
+            embedder.embed_text("Part one.", "report_part1", 0)
+            embedder.embed_text("Part two.", "report_part2", 0)
+
+        wiki = WikiManager(
+            collection_name="test_collection",
+            wiki_base=str(tmp_path / "wiki"),
+            model="llama3.2",
+        )
+        wiki._generate_source_summary = MagicMock(
+            return_value=SourceSummary(
+                title="x",
+                summary="s",
+                key_takeaways=[],
+                entities=[],
+                concepts=[],
+                contradictions=[],
+                questions_raised=[],
+            )
+        )
+        wiki._generate_update_plan = MagicMock(
+            return_value=WikiUpdatePlan(
+                source_title="x",
+                pages_to_update=[],
+                pages_to_link=[],
+                synthesis_notes="",
+            )
+        )
+
+        result = wiki.ingest_from_embeddings(
+            embedder, collection="test_collection", merge_parts=False
+        )
+        assert result["documents_ingested"] == 2
+
+
+class TestConsolidate:
+    def test_consolidate_merges_part_pages_and_rewrites_links(self, temp_wiki):
+        # Two per-part source pages for the same base document.
+        temp_wiki._write_page(
+            temp_wiki.sources_dir / "report_part1.md",
+            "---\ntitle: Report Part 1\n---\n\n# Report Part 1\n\n"
+            "First section content.\n\n## Summary\n\nPart one summary.\n",
+        )
+        temp_wiki._write_page(
+            temp_wiki.sources_dir / "report_part2.md",
+            "---\ntitle: Report Part 2\n---\n\n# Report Part 2\n\n"
+            "Second section content.\n",
+        )
+        # A standalone source page that must be left untouched.
+        temp_wiki._write_page(
+            temp_wiki.sources_dir / "other.md", "# Other\n\nUnrelated doc.\n"
+        )
+        # An entity page linking to a part page.
+        temp_wiki._write_page(
+            temp_wiki.entities_dir / "topic.md",
+            "# Topic\n\nSee [[report_part1]] and [[report_part2|the report]].\n",
+        )
+
+        result = temp_wiki.consolidate_part_pages()
+
+        assert result["groups_merged"] == 1
+        assert result["pages_removed"] == 2
+        # Merged collective page exists under the base name.
+        merged = temp_wiki.sources_dir / "report.md"
+        assert merged.exists()
+        merged_text = merged.read_text(encoding="utf-8")
+        assert "Part one summary." in merged_text
+        assert "Second section content." in merged_text
+        assert "merged_from" in merged_text
+        # Per-part pages are gone.
+        assert not (temp_wiki.sources_dir / "report_part1.md").exists()
+        assert not (temp_wiki.sources_dir / "report_part2.md").exists()
+        # Standalone page is untouched.
+        assert (temp_wiki.sources_dir / "other.md").exists()
+        # Links were rewritten to the merged page.
+        topic = temp_wiki.entities_dir / "topic.md"
+        topic_text = topic.read_text(encoding="utf-8")
+        assert "[[report]]" in topic_text
+        assert "[[report|the report]]" in topic_text
+        assert "report_part1" not in topic_text
+
+    def test_consolidate_noop_without_part_pages(self, temp_wiki):
+        temp_wiki._write_page(
+            temp_wiki.sources_dir / "plain.md", "# Plain\n\nNo parts here.\n"
+        )
+        result = temp_wiki.consolidate_part_pages()
+        assert result["groups_merged"] == 0
+        assert result["pages_removed"] == 0
+        assert (temp_wiki.sources_dir / "plain.md").exists()

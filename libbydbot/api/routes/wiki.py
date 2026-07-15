@@ -6,6 +6,8 @@ from loguru import logger
 
 from libbydbot.api.schemas import (
     WikiBrowseResponse,
+    WikiConsolidateRequest,
+    WikiConsolidateResponse,
     WikiIngestFromEmbeddingsRequest,
     WikiIngestFromEmbeddingsResponse,
     WikiIngestRequest,
@@ -134,6 +136,36 @@ def wiki_ingest_from_embeddings(request: WikiIngestFromEmbeddingsRequest):
         raise
     except Exception as e:
         logger.error(f"Error ingesting wiki from embeddings: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/consolidate", response_model=WikiConsolidateResponse)
+def wiki_consolidate(request: WikiConsolidateRequest):
+    """
+    Merge per-part source pages into a single collective page per document.
+
+    Wikis created before per-part merging was supported may contain one
+    source page per document part (e.g. ``report_part1``, ``report_part2``).
+    This endpoint merges each such group into one page named after the
+    original document (``report``) and rewrites inbound wikilinks.
+    """
+    try:
+        wiki = get_wiki_manager(request.collection_name)
+        result = wiki.consolidate_part_pages()
+        return WikiConsolidateResponse(
+            success=True,
+            collection=request.collection_name,
+            groups_merged=result["groups_merged"],
+            pages_removed=result["pages_removed"],
+            links_rewritten=result["links_rewritten"],
+            message=(
+                f"Merged {result['groups_merged']} document group(s); "
+                f"removed {result['pages_removed']} part page(s); "
+                f"rewrote {result['links_rewritten']} link(s)."
+            ),
+        )
+    except Exception as e:
+        logger.error(f"Error consolidating wiki: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

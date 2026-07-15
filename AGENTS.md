@@ -266,6 +266,16 @@ Content here with [[Other Page]] links.
 > document, so the wiki stays in sync with the embedding store without manual
 > steps. This can be disabled via the `WIKI_AUTO_INGEST` env var.
 
+> **Per-part merging:** large documents that were split into parts at embedding
+> time (stored under several `doc_name` values that share a part suffix, e.g.
+> `report_part1`, `report_part2`, `report (1)`) are concatenated back into a
+> single source by `ingest_from_embeddings` (default `merge_parts=True`), so
+> the wiki gets **one** `sources/<doc_name>.md` page per original document.
+> To fix a wiki that already has one page per part, call
+> `WikiManager.consolidate_part_pages()` (or `POST /api/wiki/consolidate` /
+> `libby-cli wiki_consolidate`), which merges the part pages and rewrites
+> inbound `[[wikilinks]]`.
+
 ### Query Workflow
 
 1. Read `index.md` to identify candidate pages.
@@ -291,6 +301,7 @@ uv run libby-cli wiki_ingest --corpus_path /path/to/docs --collection_name my_co
 uv run libby-cli wiki_query "What is the main topic?" --collection_name my_collection --file_answer
 uv run libby-cli wiki_lint --collection_name my_collection --auto_fix
 uv run libby-cli wiki_status --collection_name my_collection
+uv run libby-cli wiki_consolidate --collection_name my_collection
 ```
 
 In the TUI, use the Wiki Browser screen (`Ctrl+W`) and the Ingest button.
@@ -299,6 +310,7 @@ In the TUI, use the Wiki Browser screen (`Ctrl+W`) and the Ingest button.
 
 - `POST /api/wiki/ingest` — ingest a source into the wiki
 - `POST /api/wiki/ingest-from-embeddings` — build/update the wiki straight from the embedding table (no PDF re-parsing)
+- `POST /api/wiki/consolidate` — merge per-part source pages into one collective page per document
 - `POST /api/wiki/query` — query the wiki
 - `POST /api/wiki/lint` — lint the wiki
 - `GET /api/wiki/status/{collection_name}` — wiki statistics

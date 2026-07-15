@@ -140,6 +140,17 @@ class WikiManager:
     with Obsidian-compatible wikilinks and YAML frontmatter.
     """
 
+    # Patterns that identify a document "part" suffix, e.g. "report_part1",
+    # "report part 2", "report_p3", "report (1)", "report_vol2". The first
+    # capture group is the part index used for ordering when merging.
+    _PART_PATTERNS: list[re.Pattern] = [
+        re.compile(
+            r"[\s_-]+(?:part|pt|p|vol(?:ume)?|chapter|ch|section|sec)[\s_-]*(\d+)\s*$",
+            re.IGNORECASE,
+        ),
+        re.compile(r"\s*\(\s*(?:part\s+)?(\d+)\s*\)\s*$", re.IGNORECASE),
+    ]
+
     def __init__(
         self,
         collection_name: str,
@@ -335,6 +346,69 @@ class WikiManager:
                     broken.add(link)
         return sorted(broken)
 
+    # ────────────────────────── part detection ──────────────────────
+
+    @classmethod
+    def _doc_base_and_part(cls, doc_name: str) -> tuple[str, int | None]:
+        """
+        Strip a document "part" suffix and return the base name + part index.
+
+        Recognizes suffixes such as ``_part1``, `` part 2``, ``_p3``,
+        ``(4)``, ``_vol2``, ``_chapter1``. Returns ``(doc_name, None)`` when
+        no part suffix is detected so that standalone documents are left
+        untouched.
+        """
+        for pat in cls._PART_PATTERNS:
+            m = pat.search(doc_name)
+            if m:
+                base = doc_name[: m.start()].rstrip(" _-")
+                if not base:
+                    # The entire name was the suffix; keep the original.
+                    return doc_name, None
+                try:
+                    part = int(m.group(1))
+                except (ValueError, IndexError):
+                    part = None
+                return base, part
+        return doc_name, None
+
+    @staticmethod
+    def _group_documents_by_base(texts: dict[str, str]) -> dict[str, str]:
+        """
+        Merge documents that are parts of the same source into one entry.
+
+        Takes a ``{doc_name: text}`` mapping (as returned by
+        ``get_document_texts``) and returns a mapping keyed by the *base*
+        document name, with the text of each group's parts concatenated in
+        ascending part-index order. Singleton documents are passed through
+        unchanged, except that a lone part (e.g. ``report_part1`` with no
+        siblings) is renamed to its base name so the wiki page reflects the
+        original document name.
+        """
+        buckets: dict[str, list[tuple[int | None, str, str]]] = {}
+        order: list[str] = []
+        for name, content in texts.items():
+            base, part = WikiManager._doc_base_and_part(name)
+            if base not in buckets:
+                buckets[base] = []
+                order.append(base)
+            buckets[base].append((part, name, content))
+
+        merged: dict[str, str] = {}
+        for base in order:
+            items = buckets[base]
+            if len(items) == 1:
+                part, name, content = items[0]
+                # A lone part still gets renamed to its base document name.
+                key = base if part is not None else name
+                merged[key] = content
+            else:
+                items.sort(
+                    key=lambda t: (t[0] if t[0] is not None else float("inf"), t[1])
+                )
+                merged[base] = "\n\n".join(content for _, _, content in items)
+        return merged
+
     # ────────────────────────── ingest ──────────────────────────────
 
     def ingest_source(
@@ -399,6 +473,7 @@ class WikiManager:
         embedder,
         collection: str = "",
         doc_name: str = "",
+        merge_parts: bool = True,
     ) -> dict[str, Any]:
         """
         Build/update the wiki directly from the embedding table.
@@ -408,10 +483,18 @@ class WikiManager:
         re-parsing the original PDFs and works even when the source files are
         no longer on disk.
 
+        When *merge_parts* is ``True`` (the default), documents that were split
+        into parts at embedding time — and therefore stored under several
+        ``doc_name`` values that share a part suffix (e.g. ``report_part1``,
+        ``report_part2``) — are concatenated back into a single source and
+        produce **one** wiki page named after the original document
+        (``report``).
+
         :param embedder: a ``DocEmbedder`` instance backed by the same store
             as the embedded collection.
         :param collection: collection to read; defaults to this wiki's collection.
         :param doc_name: ingest only this document; empty means all documents.
+        :param merge_parts: merge per-part documents into one page each.
         """
         collection = collection or self.collection_name
         texts = embedder.get_document_texts(collection=collection, doc_name=doc_name)
@@ -423,6 +506,15 @@ class WikiManager:
                 "pages_touched": 0,
                 "results": [],
             }
+
+        if merge_parts:
+            raw_count = len(texts)
+            texts = self._group_documents_by_base(texts)
+            if len(texts) < raw_count:
+                logger.info(
+                    f"Merged {raw_count} embedded parts into {len(texts)} "
+                    f"document(s) before wiki ingest"
+                )
 
         results = []
         total_pages = 0
@@ -803,6 +895,172 @@ class WikiManager:
         content += entry
         self._write_page(synthesis_path, content)
         return 1
+
+    # ────────────────────────── consolidate ────────────────────────
+
+    def consolidate_part_pages(self) -> dict[str, Any]:
+        """
+        Merge per-part source pages into one page per original document.
+
+        Scans ``sources/`` for pages whose stem carries a part suffix (e.g.
+        ``report_part1``, ``report_part2``, ``report (1)``) and merges each
+        group into a single page named after the base document (``report``).
+        Wikilinks across the whole wiki that pointed at the part pages are
+        rewritten to the merged page.
+
+        This is a pure filesystem operation — no LLM or embedder is required.
+        To regenerate fresh LLM summaries for the merged documents, re-run
+        :meth:`ingest_from_embeddings` afterwards.
+
+        :returns: stats dict with ``groups_merged``, ``pages_removed`` and
+            ``links_rewritten`` counts.
+        """
+        logger.info("Consolidating per-part wiki source pages...")
+
+        source_files: dict[str, Path] = {
+            p.stem: p for p in self.sources_dir.glob("*.md")
+        }
+
+        # Group source page stems by their base document name.
+        buckets: dict[str, list[tuple[int | None, str, Path]]] = {}
+        for stem, path in source_files.items():
+            base, part = self._doc_base_and_part(stem)
+            buckets.setdefault(base, []).append((part, stem, path))
+
+        groups_merged = 0
+        pages_removed = 0
+        links_rewritten = 0
+
+        for base, items in buckets.items():
+            part_items = [(p, s, path) for p, s, path in items if p is not None]
+            non_part_items = [(p, s, path) for p, s, path in items if p is None]
+            if not part_items:
+                # No part-suffixed page in this group → nothing to consolidate.
+                continue
+
+            # Order: any existing base page first, then parts by index.
+            part_items.sort(
+                key=lambda t: (t[0] if t[0] is not None else float("inf"), t[1])
+            )
+            ordered = non_part_items + part_items
+
+            base_stem = self._sanitize_name(base)
+            base_path = self.sources_dir / f"{base_stem}.md"
+
+            merged_md = self._merge_source_markdown(base_stem, ordered)
+            self._write_page(base_path, merged_md)
+
+            # Remove the now-merged source files (parts + old base page).
+            for _, stem, path in ordered:
+                if path.resolve() == base_path.resolve():
+                    continue
+                if path.exists():
+                    path.unlink()
+                    pages_removed += 1
+
+            # Rewrite links that pointed at the part pages.
+            links_rewritten += self._rewrite_wikilinks(
+                [stem for _, stem, _ in part_items], base_stem
+            )
+            groups_merged += 1
+
+        if groups_merged:
+            self._write_index()
+            self._append_log(
+                "consolidate",
+                f"merged {groups_merged} document group(s)",
+                pages_removed,
+            )
+
+        logger.success(
+            f"Consolidation complete: {groups_merged} group(s) merged, "
+            f"{pages_removed} part page(s) removed, "
+            f"{links_rewritten} link(s) rewritten"
+        )
+        return {
+            "groups_merged": groups_merged,
+            "pages_removed": pages_removed,
+            "links_rewritten": links_rewritten,
+        }
+
+    def _merge_source_markdown(
+        self, base_stem: str, parts: list[tuple[int | None, str, Path]]
+    ) -> str:
+        """
+        Build merged markdown for several source pages under one base page.
+
+        :param base_stem: sanitized stem to use as the merged page filename.
+        :param parts: ordered list of ``(part_index, stem, path)``.
+        """
+        date_str = datetime.now().isoformat()
+
+        # Recover a clean display title from the first available frontmatter.
+        display_title = base_stem
+        for _part, stem, path in parts:
+            content = self._read_page(path)
+            fm, _ = self._parse_frontmatter(content)
+            fm_title = str(fm.get("title") or stem)
+            clean_title, _ = self._doc_base_and_part(fm_title)
+            if clean_title:
+                display_title = clean_title
+                break
+
+        multi = len(parts) > 1
+        sections: list[str] = []
+        for part, _stem, path in parts:
+            content = self._read_page(path)
+            _, body = self._parse_frontmatter(content)
+            if not body.strip():
+                continue
+            # Drop the leading "# Title" line; we provide our own headers.
+            body_lines = body.split("\n")
+            if body_lines and body_lines[0].lstrip().startswith("# "):
+                body_lines = body_lines[1:]
+            body = "\n".join(body_lines).strip()
+            if not body:
+                continue
+            if multi:
+                label = f"Part {part}" if part is not None else _stem
+                sections.append(f"## {label}\n\n{body}")
+            else:
+                sections.append(body)
+
+        body = "\n\n".join(sections).strip()
+        fm = {
+            "title": display_title,
+            "date_ingested": date_str,
+            "source_type": "document",
+        }
+        if multi:
+            fm["merged_from"] = [stem for _, stem, _ in parts]
+        return self._build_frontmatter(fm) + f"# {display_title}\n\n{body}\n"
+
+    def _rewrite_wikilinks(self, old_stems: list[str], new_stem: str) -> int:
+        """
+        Rewrite ``[[old_stem...]]`` wikilinks anywhere in the wiki to
+        ``[[new_stem...]]``, preserving any alias (``|alias``) or anchor
+        (``#anchor``) suffix. Returns the number of links rewritten.
+        """
+        if not old_stems:
+            return 0
+        pattern = re.compile(
+            r"\[\[("
+            + "|".join(re.escape(s) for s in old_stems)
+            + r")((?:#[^\]]*)?(?:\|[^]]*)?)\]\]",
+            re.IGNORECASE,
+        )
+        count = 0
+        for md_file in self.wiki_dir.rglob("*.md"):
+            if md_file.name in ("index.md", "log.md"):
+                continue
+            content = self._read_page(md_file)
+            new_content, n = pattern.subn(
+                lambda m: f"[[{new_stem}{m.group(2)}]]", content
+            )
+            if n:
+                self._write_page(md_file, new_content)
+                count += n
+        return count
 
     # ────────────────────────── query ───────────────────────────────
 

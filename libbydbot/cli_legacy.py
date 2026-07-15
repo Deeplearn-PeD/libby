@@ -258,6 +258,19 @@ class LibbyInterface(LibbyDBot):
                 print(f"  - {s}")
         return report
 
+    def wiki_consolidate(self, collection_name: str = "main"):
+        """Merge per-part source pages into one page per original document."""
+        wiki = self._get_wiki(collection_name)
+        result = wiki.consolidate_part_pages()
+
+        print(f"Wiki Consolidation for '{collection_name}':")
+        print(f"  Document groups merged: {result['groups_merged']}")
+        print(f"  Part pages removed:     {result['pages_removed']}")
+        print(f"  Links rewritten:        {result['links_rewritten']}")
+        if not result["groups_merged"]:
+            print("  No per-part pages found to consolidate.")
+        return result
+
     def wiki_status(self, collection_name: str = "main"):
         """Show wiki statistics."""
         wiki = self._get_wiki(collection_name)

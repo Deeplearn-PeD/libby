@@ -204,6 +204,19 @@ class WikiIngestFromEmbeddingsResponse(BaseModel):
     message: str = Field(..., description="Status message")
 
 
+class WikiConsolidateRequest(BaseModel):
+    collection_name: str = Field("main", description="Collection whose wiki source pages to consolidate")
+
+
+class WikiConsolidateResponse(BaseModel):
+    success: bool = Field(..., description="Whether consolidation succeeded")
+    collection: str = Field(..., description="Collection name")
+    groups_merged: int = Field(0, description="Number of document groups merged into collective pages")
+    pages_removed: int = Field(0, description="Number of per-part source pages removed")
+    links_rewritten: int = Field(0, description="Number of wikilinks repointed at the merged pages")
+    message: str = Field(..., description="Status message")
+
+
 class WikiQueryRequest(BaseModel):
     question: str = Field(..., description="Question to answer from the wiki")
     collection_name: str = Field("main", description="Collection wiki to query")

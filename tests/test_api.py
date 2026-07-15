@@ -588,3 +588,55 @@ class TestWikiIngestFromEmbeddings:
         embedder = DocEmbedder("main", dburl=f"sqlite:///{tmp_path}/e.db")
         # Should return None without error even with a bare embedder.
         assert _maybe_auto_ingest_wiki(embedder, "main", "x") is None
+
+
+class TestWikiConsolidate:
+    """Test the POST /api/wiki/consolidate endpoint."""
+
+    @pytest.fixture
+    def consolidate_client(self, tmp_path, monkeypatch):
+        os.environ["EMBED_DB"] = f"sqlite:///{tmp_path / 'embed.db'}"
+
+        from fastapi.testclient import TestClient
+        from libbydbot.api.main import create_app
+        from libbydbot.api.routes import wiki as wiki_routes
+        from libbydbot.brain.wiki import WikiManager
+
+        wiki = WikiManager(
+            collection_name="main", wiki_base=str(tmp_path), model="llama3.2"
+        )
+        for stem, body in (
+            ("report_part1.md", "# Report Part 1\n\nFirst part.\n"),
+            ("report_part2.md", "# Report Part 2\n\nSecond part.\n"),
+            ("standalone.md", "# Standalone\n\nUnrelated.\n"),
+        ):
+            (wiki.sources_dir / stem).write_text(body, encoding="utf-8")
+
+        def fake_get_wiki_manager(collection_name: str = "main") -> WikiManager:
+            return WikiManager(
+                collection_name=collection_name,
+                wiki_base=str(tmp_path),
+                model="llama3.2",
+            )
+
+        monkeypatch.setattr(wiki_routes, "get_wiki_manager", fake_get_wiki_manager)
+
+        client = TestClient(create_app())
+        yield client
+        os.environ.pop("EMBED_DB", None)
+
+    def test_consolidate_endpoint_merges_parts(self, consolidate_client):
+        response = consolidate_client.post(
+            "/api/wiki/consolidate", json={"collection_name": "main"}
+        )
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["success"] is True
+        assert data["groups_merged"] == 1
+        assert data["pages_removed"] == 2
+
+    def test_consolidate_route_registered(self):
+        from libbydbot.api.main import create_app
+
+        paths = set(create_app().openapi()["paths"].keys())
+        assert "/api/wiki/consolidate" in paths
