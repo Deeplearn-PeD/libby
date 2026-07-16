@@ -507,6 +507,25 @@ class WikiManager:
                 "results": [],
             }
 
+        # Guard against empty/whitespace doc_names. Such rows (e.g. from PDFs
+        # whose title metadata was empty) would otherwise produce a hidden
+        # "sources/.md" page that nothing lists. Replace with a visible name.
+        fixed: dict[str, str] = {}
+        empty_count = 0
+        for name, content in texts.items():
+            if not (name or "").strip():
+                name = "untitled_document"
+                empty_count += 1
+            fixed[name] = content
+        if empty_count:
+            logger.warning(
+                f"{empty_count} document group(s) in the embedding table have an "
+                f"empty doc_name and will be combined into a single "
+                f"'untitled_document' page. Re-embed the sources (or run "
+                f"DocEmbedder.backfill_empty_doc_names) to name them properly."
+            )
+        texts = fixed
+
         if merge_parts:
             raw_count = len(texts)
             texts = self._group_documents_by_base(texts)

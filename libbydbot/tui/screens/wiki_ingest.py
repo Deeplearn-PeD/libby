@@ -93,7 +93,7 @@ class WikiIngestScreen(Screen):
                     text = ""
                     for page in doc:
                         text += page.get_text() + "\n"
-                    doc_name = doc.metadata.get("title", os.path.basename(pdf_path))
+                    doc_name = doc.metadata.get("title") or os.path.basename(pdf_path)
                 except Exception as e:
                     self._safe_call(log.write, f"Error reading {pdf_path}: {e}")
                     continue

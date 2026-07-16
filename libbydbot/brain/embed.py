@@ -1006,7 +1006,11 @@ class DocEmbedder:
         )
 
         for chunks_or_dict, metadata in pipeline:
-            docname = metadata.get("title", "Unknown")
+            docname = (
+                metadata.get("title")
+                or metadata.get("source_name")
+                or "Unknown"
+            )
 
             if isinstance(chunks_or_dict, list) and chunks_or_dict and isinstance(chunks_or_dict[0], ChunkInfo):
                 total = len(chunks_or_dict)
@@ -1372,12 +1376,13 @@ class DocEmbedder:
 
         Returns a mapping of ``doc_name`` -> concatenated text, with chunks
         ordered by ``page_number``. Optionally filtered by *collection* and/or
-        *doc_name*. Reads from the dimension-appropriate table so the wiki can
+        *doc_name*. Reads from the active data table (falling back to the base
+        table when a dimension-specific table would be empty) so the wiki can
         be built directly from embedded data when the original PDFs are no
         longer on disk.
         """
         collection = collection or self.collection_name
-        tbl = self._target_table_for_dimension()
+        tbl = self._active_table()
         docs: dict[str, list[str]] = {}
 
         if self.dburl.startswith("sqlite"):

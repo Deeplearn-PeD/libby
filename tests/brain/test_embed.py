@@ -66,6 +66,51 @@ def test_get_document_texts(tmp_path):
     # Missing document returns empty mapping.
     assert embedder.get_document_texts(collection="my_coll", doc_name="nope") == {}
 
+
+def test_get_document_texts_falls_back_to_base_table(tmp_path):
+    """get_document_texts reads from the table that has data even when the
+    configured model dimension differs from the stored vectors.
+
+    Regression: previously it used _target_table_for_dimension(), which
+    redirected to an empty dimension-specific table and silently produced an
+    empty wiki (no documents found).
+    """
+    db_path = tmp_path / "embedding.db"
+
+    # Embed data at 1024-dim into the base table.
+    with patch("libbydbot.brain.embed.DocEmbedder._generate_embedding") as mocked, patch(
+        "libbydbot.brain.embed.DocEmbedder._get_embedding_dimension",
+        return_value=1024,
+    ), patch(
+        "libbydbot.brain.embed.DocEmbedder._detect_embedding_model_from_db",
+        return_value=None,
+    ):
+        mocked.return_value = np.zeros(1024).tolist()
+        writer = DocEmbedder(
+            "c", dburl=f"sqlite:///{db_path}", embedding_model="mxbai-embed-large"
+        )
+        writer.embed_text("alpha text.", "alpha", 0)
+
+    # Read with a DIFFERENT dimension (768). A dim-specific table would be
+    # empty, so get_document_texts must fall back to the base table.
+    with patch("libbydbot.brain.embed.DocEmbedder._generate_embedding") as mocked, patch(
+        "libbydbot.brain.embed.DocEmbedder._get_embedding_dimension",
+        return_value=768,
+    ), patch(
+        "libbydbot.brain.embed.DocEmbedder._detect_embedding_model_from_db",
+        return_value=None,
+    ):
+        mocked.return_value = np.zeros(768).tolist()
+        reader = DocEmbedder(
+            "c", dburl=f"sqlite:///{db_path}", embedding_model="embeddinggemma"
+        )
+        # Data lives in the base table; _active_table falls back to it.
+        assert reader._active_table() == "embedding_sqlite"
+        texts = reader.get_document_texts(collection="c")
+        assert "alpha" in texts
+        assert texts["alpha"] == "alpha text."
+
+
 @pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL not available")
 def test_embed_text_postgres():
     embedder = DocEmbedder("test_collection", embedding_model='mxbai-embed-large')

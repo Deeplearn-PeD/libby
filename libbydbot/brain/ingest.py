@@ -194,10 +194,18 @@ class PDFPipeline:
         for d in glob(os.path.join(self.path, '*.pdf')):
             try:
                 doc = fitz.open(d)
-                metadata = doc.metadata
+                metadata = dict(doc.metadata)
             except (EmptyFileError, Exception) as e:
                 logger.error(f"Error opening {d}: {e}")
                 continue
+
+            # Expose the source filename so callers can fall back to it when
+            # the PDF's title metadata is empty (PyMuPDF returns '' for unset
+            # titles, which defeats dict.get(key, default)).
+            metadata.setdefault(
+                "source_name", os.path.splitext(os.path.basename(d))[0]
+            )
+            metadata.setdefault("source_path", d)
 
             if self.splitter:
                 chunks: list[ChunkInfo] = []
