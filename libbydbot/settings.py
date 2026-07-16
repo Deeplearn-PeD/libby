@@ -22,7 +22,7 @@ class Settings(BaseSettings):
         "Gemma": {"code": "gemma3"},
         "ChatGPT": {"code": "gpt-4o"},
         "Qwen": {"code": "qwen3.5:4b"},
-        "Kimi": {"code": "kimi-k2.5", "is_default": True},
+        "Kimi": {"code": "kimi-k2.6", "is_default": True},
     }
 
     embedding_models: Dict[str, Dict[str, Any]] = {
