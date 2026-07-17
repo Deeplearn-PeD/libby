@@ -536,25 +536,34 @@ class WikiManager:
                 )
 
         results = []
+        errors = []
         total_pages = 0
         for name, content in texts.items():
             if not content.strip():
                 logger.info(f"Skipping empty document '{name}'")
                 continue
             logger.info(f"Ingesting embedded document into wiki: {name}")
-            result = self.ingest_source(name, content)
+            try:
+                result = self.ingest_source(name, content)
+            except Exception as e:
+                # One bad document must not abort the whole batch.
+                logger.exception(f"Failed to ingest '{name}' into wiki: {e}")
+                errors.append({"source": name, "error": str(e)})
+                continue
             results.append(result)
             total_pages += result.get("pages_touched", 0)
 
         logger.success(
             f"Wiki ingest from embeddings complete: {len(results)} sources, "
             f"{total_pages} pages touched"
+            + (f", {len(errors)} error(s)" if errors else "")
         )
         return {
             "collection": collection,
             "documents_ingested": len(results),
             "pages_touched": total_pages,
             "results": results,
+            "errors": errors,
         }
 
     def _structured_llm_call(self, prompt: str, response_model, context: str = ""):

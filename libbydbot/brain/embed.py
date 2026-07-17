@@ -1376,48 +1376,92 @@ class DocEmbedder:
 
         Returns a mapping of ``doc_name`` -> concatenated text, with chunks
         ordered by ``page_number``. Optionally filtered by *collection* and/or
-        *doc_name*. Reads from the active data table (falling back to the base
-        table when a dimension-specific table would be empty) so the wiki can
-        be built directly from embedded data when the original PDFs are no
-        longer on disk.
+        *doc_name*.
+
+        Robust to multi-table stores: it tries the active table first, then
+        falls back to every other data table, returning the rows from the
+        first table that actually holds the requested collection. This matters
+        when vectors of different dimensions live in different tables (e.g. a
+        base table plus dimension-specific tables) — the "active" table may
+        hold a *different* collection, so naively reading it would silently
+        return nothing.
         """
         collection = collection or self.collection_name
-        tbl = self._active_table()
-        docs: dict[str, list[str]] = {}
+        candidates = self._candidate_text_tables()
+        for tbl in candidates:
+            try:
+                rows = self._fetch_doc_rows(tbl, collection, doc_name)
+            except Exception as e:
+                # Shadow/FTS tables (no doc_name/document columns) are skipped
+                # silently here.
+                logger.debug(f"get_document_texts: skipping table '{tbl}': {e}")
+                continue
+            if not rows:
+                continue
+            docs: dict[str, list[str]] = {}
+            for name, _page, document in rows:
+                docs.setdefault(name, []).append(document or "")
+            logger.info(
+                f"get_document_texts: read {len(rows)} row(s) for "
+                f"'{collection}' from table '{tbl}'"
+            )
+            return {name: "\n".join(parts) for name, parts in docs.items()}
 
+        logger.warning(
+            f"get_document_texts: no rows for collection '{collection}' "
+            f"(tried tables {candidates})"
+        )
+        return {}
+
+    def _candidate_text_tables(self) -> list[str]:
+        """Ordered list of tables to try when reading document text.
+
+        The active table is tried first, then the base table, then any other
+        embedding table. FTS and backup tables are excluded.
+        """
+        raw = [self._active_table(), self.table_name] + self._get_all_embedding_tables()
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for t in raw:
+            if not t or t in seen:
+                continue
+            if t.endswith("_fts") or "_fts_" in t or "_backup" in t:
+                continue
+            seen.add(t)
+            ordered.append(t)
+        return ordered
+
+    def _fetch_doc_rows(
+        self, tbl: str, collection: str, doc_name: str
+    ) -> list[tuple]:
+        """Return ``(doc_name, page_number, document)`` rows for one table."""
         if self.dburl.startswith("sqlite"):
             with self.connection as conn:
                 cur = conn.cursor()
                 if doc_name:
-                    rows = cur.execute(
+                    return cur.execute(
                         f"SELECT doc_name, page_number, document FROM {tbl} "
                         "WHERE collection_name=? AND doc_name=? ORDER BY page_number",
                         (collection, doc_name),
                     ).fetchall()
-                else:
-                    rows = cur.execute(
-                        f"SELECT doc_name, page_number, document FROM {tbl} "
-                        "WHERE collection_name=? ORDER BY doc_name, page_number",
-                        (collection,),
-                    ).fetchall()
-            for name, _page, document in rows:
-                docs.setdefault(name, []).append(document or "")
+                return cur.execute(
+                    f"SELECT doc_name, page_number, document FROM {tbl} "
+                    "WHERE collection_name=? ORDER BY doc_name, page_number",
+                    (collection,),
+                ).fetchall()
         elif self.dburl.startswith("duckdb"):
             conn = self.connection
             if doc_name:
-                rows = conn.sql(
+                return conn.sql(
                     f"SELECT doc_name, page_number, document FROM {tbl} "
                     "WHERE collection_name=? AND doc_name=? ORDER BY page_number",
                     params=[collection, doc_name],
                 ).fetchall()
-            else:
-                rows = conn.sql(
-                    f"SELECT doc_name, page_number, document FROM {tbl} "
-                    "WHERE collection_name=? ORDER BY doc_name, page_number",
-                    params=[collection],
-                ).fetchall()
-            for name, _page, document in rows:
-                docs.setdefault(name, []).append(document or "")
+            return conn.sql(
+                f"SELECT doc_name, page_number, document FROM {tbl} "
+                "WHERE collection_name=? ORDER BY doc_name, page_number",
+                params=[collection],
+            ).fetchall()
         else:
             with Session(self.engine) as session:
                 if doc_name:
@@ -1437,10 +1481,7 @@ class DocEmbedder:
                         ),
                         {"col": collection},
                     ).fetchall()
-            for name, _page, document in rows:
-                docs.setdefault(name, []).append(document or "")
-
-        return {name: "\n".join(parts) for name, parts in docs.items()}
+            return [tuple(r) for r in rows]
 
     def _migrate_add_embedding_model(self):
         """

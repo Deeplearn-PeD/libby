@@ -111,6 +111,64 @@ def test_get_document_texts_falls_back_to_base_table(tmp_path):
         assert texts["alpha"] == "alpha text."
 
 
+def test_get_document_texts_finds_collection_across_tables(tmp_path):
+    """get_document_texts returns a collection's docs even when the active
+    (dimension-specific) table holds a *different* collection.
+
+    Regression for the production "no wiki pages" bug: with collection A in
+    the base table and collection B in a dim-specific table, reading A used to
+    hit the dim-specific table (chosen by total row count) and find nothing.
+    """
+    db_path = tmp_path / "emb.db"
+
+    # Collection A at 1024-dim -> base table embedding_sqlite.
+    with patch("libbydbot.brain.embed.DocEmbedder._generate_embedding") as mocked, patch(
+        "libbydbot.brain.embed.DocEmbedder._get_embedding_dimension",
+        return_value=1024,
+    ), patch(
+        "libbydbot.brain.embed.DocEmbedder._detect_embedding_model_from_db",
+        return_value=None,
+    ):
+        mocked.return_value = np.zeros(1024).tolist()
+        w = DocEmbedder(
+            "collA", dburl=f"sqlite:///{db_path}", embedding_model="mxbai-embed-large"
+        )
+        w.embed_text("alpha from A.", "alpha", 0)
+
+    # Collection B at 768-dim -> dimension-specific table embedding_sqlite_768.
+    with patch("libbydbot.brain.embed.DocEmbedder._generate_embedding") as mocked, patch(
+        "libbydbot.brain.embed.DocEmbedder._get_embedding_dimension",
+        return_value=768,
+    ), patch(
+        "libbydbot.brain.embed.DocEmbedder._detect_embedding_model_from_db",
+        return_value=None,
+    ):
+        mocked.return_value = np.zeros(768).tolist()
+        w2 = DocEmbedder(
+            "collB", dburl=f"sqlite:///{db_path}", embedding_model="embeddinggemma"
+        )
+        w2.embed_text("beta from B.", "beta", 0)
+
+    # A 768-dim reader's "active" table is the dim-specific one (it has rows),
+    # but that table holds collB, not collA.
+    with patch("libbydbot.brain.embed.DocEmbedder._generate_embedding") as mocked, patch(
+        "libbydbot.brain.embed.DocEmbedder._get_embedding_dimension",
+        return_value=768,
+    ), patch(
+        "libbydbot.brain.embed.DocEmbedder._detect_embedding_model_from_db",
+        return_value=None,
+    ):
+        mocked.return_value = np.zeros(768).tolist()
+        reader = DocEmbedder(
+            "collA", dburl=f"sqlite:///{db_path}", embedding_model="embeddinggemma"
+        )
+        assert reader._active_table() == "embedding_sqlite_768"
+        # Must still find collA by falling back to the base table.
+        texts = reader.get_document_texts(collection="collA")
+        assert "alpha" in texts
+        assert texts["alpha"] == "alpha from A."
+
+
 @pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL not available")
 def test_embed_text_postgres():
     embedder = DocEmbedder("test_collection", embedding_model='mxbai-embed-large')

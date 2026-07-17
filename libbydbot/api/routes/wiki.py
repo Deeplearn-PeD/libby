@@ -127,6 +127,7 @@ def wiki_ingest_from_embeddings(request: WikiIngestFromEmbeddingsRequest):
             documents_ingested=result["documents_ingested"],
             pages_touched=result["pages_touched"],
             results=per_doc,
+            errors=result.get("errors", []),
             message=(
                 f"Ingested {result['documents_ingested']} document(s) "
                 f"({result['pages_touched']} pages touched) from embeddings"
