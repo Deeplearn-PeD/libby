@@ -41,6 +41,17 @@ class Settings(BaseSettings):
         description="Automatically ingest documents into the wiki after embedding",
     )
 
+    wiki_model: str = Field(
+        default="",
+        description=(
+            "Dedicated LLM model for wiki ingest/query/summary. Empty falls "
+            "back to the default chat model. Prefer a non-thinking model "
+            "(e.g. deepseek-v4-pro, gpt-4o, gemini-2.5-flash) since thinking "
+            "models reject pydantic-ai structured tool-calling and produce "
+            "sparse summaries."
+        ),
+    )
+
     db_url: str = Field(
         default_factory=lambda: f"sqlite:///{Path.home() / '.libby' / 'data' / 'libby.db'}",
         description="Database URL for chat history",

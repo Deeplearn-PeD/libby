@@ -125,7 +125,7 @@ class ChatScreen(Screen):
                 wiki = WikiManager(
                     collection_name=self.app.current_collection,
                     wiki_base=self.app._settings.wiki_base_path if self.app._settings else "",
-                    model=self.app.current_model,
+                    model=self.app.wiki_model,
                 )
                 result = wiki.query(question, file_answer=False)
                 response = f"**Confidence:** {result['confidence']}\n\n{result['answer']}"

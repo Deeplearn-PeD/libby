@@ -640,3 +640,29 @@ class TestWikiConsolidate:
 
         paths = set(create_app().openapi()["paths"].keys())
         assert "/api/wiki/consolidate" in paths
+
+
+class TestWikiModelConfig:
+    """The wiki LLM model is configurable independently of the chat model."""
+
+    def test_settings_reads_wiki_model_env(self, monkeypatch):
+        from libbydbot.settings import Settings
+
+        monkeypatch.setenv("WIKI_MODEL", "deepseek-v4-pro")
+        s = Settings()
+        assert s.wiki_model == "deepseek-v4-pro"
+
+    def test_get_wiki_manager_prefers_wiki_model(self, monkeypatch):
+        from libbydbot.api.routes.wiki import get_wiki_manager
+
+        monkeypatch.setenv("WIKI_MODEL", "deepseek-v4-pro")
+        wiki = get_wiki_manager("main")
+        assert wiki.model == "deepseek-v4-pro"
+
+    def test_get_wiki_manager_falls_back_to_default(self, monkeypatch):
+        from libbydbot.api.routes.wiki import get_wiki_manager
+        from libbydbot.settings import Settings
+
+        monkeypatch.delenv("WIKI_MODEL", raising=False)
+        wiki = get_wiki_manager("main")
+        assert wiki.model == Settings().default_model

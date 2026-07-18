@@ -38,10 +38,10 @@ def get_wiki_manager(collection_name: str = "main") -> WikiManager:
         settings = None
 
     wiki_base = settings.wiki_base_path if settings else ""
-    # Default model from settings if available
+    # Dedicated wiki model if configured, else the default chat model.
     model = "llama3.2"
-    if settings and settings.default_model:
-        model = settings.default_model
+    if settings:
+        model = settings.wiki_model or settings.default_model or model
 
     return WikiManager(
         collection_name=collection_name,

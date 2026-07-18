@@ -192,10 +192,11 @@ class LibbyInterface(LibbyDBot):
     def _get_wiki(self, collection_name: str) -> WikiManager:
         """Return a WikiManager for the given collection."""
         wiki_base = settings.wiki_base_path if settings else ""
+        model = (settings.wiki_model or settings.default_model) if settings else self.model
         return WikiManager(
             collection_name=collection_name,
             wiki_base=wiki_base,
-            model=self.model,
+            model=model,
         )
 
     def wiki_ingest(self, corpus_path: str = ".", collection_name: str = "main"):

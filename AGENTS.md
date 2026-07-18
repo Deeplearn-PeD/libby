@@ -179,6 +179,7 @@ libby/
 - `GEMINI_API_KEY` - Google Gemini API key
 - `WIKI_BASE_PATH` - Base directory for LLM wikis (default: `~/.libby/wikis`)
 - `WIKI_AUTO_INGEST` - Automatically ingest documents into the wiki after embedding (default: `True`). Reads straight from the embedding table, so no PDF re-parsing is needed.
+- `WIKI_MODEL` - Dedicated LLM model for wiki ingest/query/summary (default: empty → uses the default chat model). Prefer a **non-thinking** model (`deepseek-v4-pro`, `gpt-4o`, `gemini-2.5-flash`) — thinking models (`kimi-k2.6`, `deepseek-v4-flash`) reject pydantic-ai structured tool-calling and yield sparse summaries.
 
 ## Supported Models
 

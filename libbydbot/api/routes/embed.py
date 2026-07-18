@@ -73,7 +73,7 @@ def _maybe_auto_ingest_wiki(
         wiki = WikiManager(
             collection_name=collection_name,
             wiki_base=settings.wiki_base_path,
-            model=settings.default_model,
+            model=settings.wiki_model or settings.default_model,
         )
         result = wiki.ingest_from_embeddings(
             embedder, collection=collection_name, doc_name=doc_name

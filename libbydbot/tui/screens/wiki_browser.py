@@ -46,7 +46,7 @@ class WikiBrowserScreen(Screen):
             wiki = WikiManager(
                 collection_name=self.app.current_collection,
                 wiki_base=self.app._settings.wiki_base_path if self.app._settings else "",
-                model=self.app.current_model,
+                model=self.app.wiki_model,
             )
             self._wiki = wiki
             root = tree.root
@@ -111,7 +111,7 @@ class WikiBrowserScreen(Screen):
             wiki = WikiManager(
                 collection_name=self.app.current_collection,
                 wiki_base=self.app._settings.wiki_base_path if self.app._settings else "",
-                model=self.app.current_model,
+                model=self.app.wiki_model,
             )
             report = wiki.lint(auto_fix=False)
             msg = (

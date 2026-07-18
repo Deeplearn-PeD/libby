@@ -102,5 +102,17 @@ class LibbyApp(App):
         self._libby = None
         self.status_message = f"Model: {model}"
 
+    @property
+    def wiki_model(self) -> str:
+        """LLM model to use for wiki operations.
+
+        Prefers the dedicated ``WIKI_MODEL`` setting, then the default chat
+        model, then the currently selected model. Non-thinking models are
+        recommended (thinking models reject pydantic-ai structured output).
+        """
+        if self._settings:
+            return self._settings.wiki_model or self._settings.default_model or self.current_model
+        return self.current_model
+
     def action_quit(self) -> None:
         self.exit()
