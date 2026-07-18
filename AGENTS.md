@@ -177,9 +177,10 @@ libby/
 - `PGURL` - PostgreSQL connection URL
 - `OLLAMA_HOST` - Ollama server URL (default: http://localhost:11434)
 - `GEMINI_API_KEY` - Google Gemini API key
+- `ZHIPUAI_API_KEY` - Zhipu AI API key (for GLM models; required by the default wiki model `glm-5-turbo`)
 - `WIKI_BASE_PATH` - Base directory for LLM wikis (default: `~/.libby/wikis`)
 - `WIKI_AUTO_INGEST` - Automatically ingest documents into the wiki after embedding (default: `True`). Reads straight from the embedding table, so no PDF re-parsing is needed.
-- `WIKI_MODEL` - Dedicated LLM model for wiki ingest/query/summary (default: empty → uses the default chat model). Prefer a **non-thinking** model (`deepseek-v4-pro`, `gpt-4o`, `gemini-2.5-flash`) — thinking models (`kimi-k2.6`, `deepseek-v4-flash`) reject pydantic-ai structured tool-calling and yield sparse summaries.
+- `WIKI_MODEL` - Dedicated LLM model for wiki ingest/query/summary (default: `glm-5-turbo`). Must be a **non-thinking** model that supports structured tool-calling — thinking models (`kimi-k2.6`, `deepseek-v4-flash/pro`) reject pydantic-ai `tool_choice` and yield empty summaries. Working options: `glm-5-turbo`/`glm-5.2` (Zhipu), `gpt-4o`, `gemini-2.5-flash`.
 
 ## Supported Models
 

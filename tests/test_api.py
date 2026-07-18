@@ -663,6 +663,16 @@ class TestWikiModelConfig:
         from libbydbot.api.routes.wiki import get_wiki_manager
         from libbydbot.settings import Settings
 
-        monkeypatch.delenv("WIKI_MODEL", raising=False)
+        # An explicitly-empty WIKI_MODEL falls back to the default chat model.
+        monkeypatch.setenv("WIKI_MODEL", "")
         wiki = get_wiki_manager("main")
         assert wiki.model == Settings().default_model
+
+    def test_get_wiki_manager_uses_wiki_model_default(self, monkeypatch):
+        # With WIKI_MODEL unset, the Settings default wiki_model is used.
+        from libbydbot.api.routes.wiki import get_wiki_manager
+        from libbydbot.settings import Settings
+
+        monkeypatch.delenv("WIKI_MODEL", raising=False)
+        wiki = get_wiki_manager("main")
+        assert wiki.model == Settings().wiki_model

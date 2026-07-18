@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     models: Dict[str, Dict[str, Any]] = {
         "Llama3": {"code": "llama3.2"},
         "Gemma": {"code": "gemma3"},
-        "ChatGPT": {"code": "gpt-4o"},
+        "GLM": {"code": "glm-5-turbo"},
         "Qwen": {"code": "qwen3.5:4b"},
         "Kimi": {"code": "kimi-k2.6", "is_default": True},
     }
@@ -42,13 +42,13 @@ class Settings(BaseSettings):
     )
 
     wiki_model: str = Field(
-        default="",
+        default="glm-5-turbo",
         description=(
             "Dedicated LLM model for wiki ingest/query/summary. Empty falls "
             "back to the default chat model. Prefer a non-thinking model "
-            "(e.g. deepseek-v4-pro, gpt-4o, gemini-2.5-flash) since thinking "
-            "models reject pydantic-ai structured tool-calling and produce "
-            "sparse summaries."
+            "(e.g. glm-5-turbo via the Zhipu provider, gpt-4o, "
+            "gemini-2.5-flash) since thinking models reject pydantic-ai "
+            "structured tool-calling and yield sparse summaries."
         ),
     )
 

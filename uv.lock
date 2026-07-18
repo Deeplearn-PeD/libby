@@ -207,7 +207,7 @@ wheels = [
 [[package]]
 name = "base-ai-agent"
 version = "0.6.0"
-source = { git = "https://github.com/Deeplearn-PeD/base-ai-agent.git?rev=main#5ce5b266aa1b47522cc24861308f2f9b206c9c8b" }
+source = { git = "https://github.com/Deeplearn-PeD/base-ai-agent.git?rev=main#673e0776ba9079e796156188bde7af95168d318e" }
 dependencies = [
     { name = "anthropic" },
     { name = "httpx" },
