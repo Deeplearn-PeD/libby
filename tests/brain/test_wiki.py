@@ -69,6 +69,54 @@ class TestPageIO:
         assert "title: Test" in result
 
 
+class TestExtractJson:
+    def test_picks_outer_object_over_nested(self, temp_wiki):
+        """When the model wraps JSON in reasoning, the extractor must return
+        the outer SourceSummary payload, not a nested entity dict that would
+        otherwise coerce to an empty SourceSummary."""
+        from libbydbot.brain.wiki_models import SourceSummary
+
+        # Reasoning + a nested entity-like object + the real outer payload.
+        response = (
+            "Let me analyze.\n"
+            "Here is an entity: {\"name\": \"Aedes aegypti\", \"entity_type\": \"Species\", "
+            "\"description\": \"a mosquito\"}.\n"
+            "Final JSON:\n"
+            "{\n"
+            "  \"title\": \"Mosquito Study\",\n"
+            "  \"summary\": \"A study of mosquito-borne diseases.\",\n"
+            "  \"key_takeaways\": [\"dengue is spreading\"],\n"
+            "  \"entities\": [{\"name\": \"Aedes aegypti\", \"entity_type\": \"Species\", "
+            "\"description\": \"vector\", \"related_entities\": []}],\n"
+            "  \"concepts\": [{\"name\": \"Bridge vector\", \"description\": \"a vector\", "
+            "\"related_concepts\": []}],\n"
+            "  \"contradictions\": [],\n"
+            "  \"questions_raised\": []\n"
+            "}"
+        )
+        parsed = temp_wiki._extract_json_from_response(response, SourceSummary)
+        assert isinstance(parsed, SourceSummary)
+        assert parsed.title == "Mosquito Study"
+        assert parsed.summary == "A study of mosquito-borne diseases."
+        assert len(parsed.entities) == 1
+        assert parsed.entities[0].name == "Aedes aegypti"
+        assert len(parsed.concepts) == 1
+
+    def test_extracts_markdown_code_block(self, temp_wiki):
+        from libbydbot.brain.wiki_models import SourceSummary
+
+        response = (
+            "Here you go:\n```json\n"
+            "{\"title\": \"T\", \"summary\": \"S\", \"key_takeaways\": [], "
+            "\"entities\": [], \"concepts\": [], \"contradictions\": [], "
+            "\"questions_raised\": []}\n```\n"
+        )
+        parsed = temp_wiki._extract_json_from_response(response, SourceSummary)
+        assert isinstance(parsed, SourceSummary)
+        assert parsed.title == "T"
+        assert parsed.summary == "S"
+
+
 class TestLinkGraph:
     def test_extract_wikilinks(self, temp_wiki):
         content = "See [[Entity A]] and [[Concept B]] for details."

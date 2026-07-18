@@ -668,40 +668,68 @@ class WikiManager:
         return "\n".join(hints)
 
     def _extract_json_from_response(self, response, response_model):
-        """Try to extract and validate JSON from an LLM text response."""
+        """Try to extract and validate JSON from an LLM text response.
+
+        When the model wraps the JSON in reasoning, there may be several
+        ``{...}`` fragments in the text (including nested entity/concept
+        objects). We collect every parseable object and pick the one whose
+        top-level keys overlap most with ``response_model``'s fields — that
+        is the real outer payload, not a nested sub-object (which would
+        otherwise coerce to an empty model with all-default fields).
+        """
         import json as _json
 
         raw = response if isinstance(response, str) else str(response)
         text = raw.strip()
 
-        # Handle markdown code blocks first (most reliable signal)
+        model_fields = set(response_model.model_fields.keys())
+
+        def _score(obj) -> int:
+            """Number of model-field keys present at the top level."""
+            return len(model_fields & set(obj.keys())) if isinstance(obj, dict) else -1
+
+        best_obj = None
+        best_score = 0
+
+        def _consider(obj) -> bool:
+            nonlocal best_obj, best_score
+            s = _score(obj)
+            if s > best_score:
+                best_score = s
+                best_obj = obj
+                return True
+            return False
+
+        # Markdown code block (most reliable when present).
         if "```" in text:
             match = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
             if match:
-                candidate = match.group(1).strip()
-                parsed = self._try_parse_json(candidate, response_model, _json)
-                if parsed is not None:
-                    return parsed
+                try:
+                    _consider(_json.loads(match.group(1).strip()))
+                except _json.JSONDecodeError:
+                    pass
 
-        # Try the whole text if it starts with {
+        # Whole text if it starts with {.
         if text.startswith("{"):
-            parsed = self._try_parse_json(text, response_model, _json)
-            if parsed is not None:
-                return parsed
+            try:
+                _consider(_json.loads(text))
+            except _json.JSONDecodeError:
+                pass
 
-        # Scan for valid JSON objects from the END (JSON usually appears last)
-        # Use raw_decode for proper nested-brace handling
+        # Scan every brace position for a valid JSON object.
         decoder = _json.JSONDecoder()
         brace_positions = [i for i, ch in enumerate(text) if ch == "{"]
-        for i in reversed(brace_positions):
+        for i in brace_positions:
             try:
-                obj, end = decoder.raw_decode(text, i)
-                candidate = _json.dumps(obj)
-                parsed = self._try_parse_json(candidate, response_model, _json)
-                if parsed is not None:
-                    return parsed
+                obj, _end = decoder.raw_decode(text, i)
             except _json.JSONDecodeError:
                 continue
+            _consider(obj)
+
+        if best_obj is not None:
+            parsed = self._try_parse_json(_json.dumps(best_obj), response_model, _json)
+            if parsed is not None:
+                return parsed
 
         return None
 
