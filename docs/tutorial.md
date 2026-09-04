@@ -117,7 +117,7 @@ Navigate your collection's markdown wiki as a hierarchical tree:
 - `concepts/` — Topics, theories, ideas
 - `synthesis/` — Analyses, overviews, answers
 
-Click any page to view it as rendered Markdown. Use **Refresh** to reload the tree, **Ingest** to add new sources, or **Lint** to run health-checks.
+Click any page to view it as rendered Markdown. Use **Refresh** to reload the tree, **Ingest** to add new sources, **Lint** to run health-checks, or **Graph** to rebuild the collection's knowledge graph and export its interactive `graph.html` visualization.
 
 ---
 
@@ -174,6 +174,8 @@ Each collection gets its own wiki under `~/.libby/wikis/<collection_name>/`:
 research/
 ├── index.md          # Catalog of all pages
 ├── log.md            # Chronological operation log
+├── graph.json        # Knowledge graph (NetworkX node-link format)
+├── graph.html        # Interactive graph visualization (on export)
 ├── sources/          # Summaries of each document
 │   ├── paper_1.md
 │   └── paper_2.md
@@ -237,6 +239,7 @@ print(f"Concepts: {result['concepts_created']}")
    - `synthesis/overview.md` — Running synthesis notes
 5. **Index Update** — `index.md` is rebuilt with all pages
 6. **Log Entry** — `log.md` gets an append-only entry
+7. **Graph Update** — the knowledge graph (`graph.json`) gains nodes and edges for the new pages, and embedded chunks are linked to the entities/concepts they mention
 
 ### Health-Checking the Wiki (Lint)
 
@@ -263,7 +266,81 @@ With `--auto_fix`, stub pages are created for broken links.
 libby-cli wiki_status --collection_name research
 ```
 
-Shows: total pages, breakdown by category, orphans, broken links, last operation.
+Shows: total pages, breakdown by category, orphans, broken links, last operation, and knowledge graph statistics when a graph exists.
+
+### Knowledge Graph
+
+Alongside the markdown pages, Libby maintains a **NetworkX knowledge graph** over the
+wiki pages and the embedded chunks of each collection. It is persisted as
+`graph.json` inside the wiki directory and is updated automatically on every ingest
+(disable with `WIKI_GRAPH_ENABLED=False`).
+
+- **Nodes** — one per source/entity/concept/synthesis page, plus one per embedded chunk.
+- **Typed edges** — `mentions`, `mentioned_in`, `related_to`, `links_to`, `chunk_of`
+  (chunk → its source document) and `references` (chunk → entity/concept whose name
+  appears in the chunk text).
+- **Rebuilds are safe** — chunk nodes and their reference edges survive full rebuilds.
+
+#### Exploring the graph from the CLI
+
+```bash
+# Rebuild the graph from the wiki pages and show statistics + hubs
+libby-cli wiki_graph research
+
+# How do two concepts connect?
+libby-cli wiki_path "Alice" "Gravity" research
+
+# Inspect a node's connections
+libby-cli wiki_explain "Alice" research
+
+# Export the interactive visualization
+libby-cli wiki_graph_export research --output graph.html
+```
+
+!!! note
+    Because the legacy CLI constructor also accepts `collection_name`, pass the
+    collection as a positional argument (shown above) to target a specific wiki.
+
+#### Graph-aware queries
+
+`wiki_query` uses the graph automatically: pages are ranked by seed matching on the
+question, neighborhood expansion, and node degree — so multi-hop questions such as
+"How does X relate to Y?" pull in the right pages. When no graph exists, Libby
+falls back to keyword ranking.
+
+#### Visualization
+
+The graph exports to a self-contained interactive `graph.html` (pyvis): nodes are
+colored by type and sized by degree, edges show their relationship type on hover.
+The REST API serves it directly — open
+`http://localhost:8000/api/wiki/graph/<collection>/viz` in a browser. The TUI's
+**Wiki Browser → Graph** button rebuilds and exports it as well.
+
+#### Using the graph from Python
+
+```python
+from libbydbot.brain.wiki import WikiManager
+
+wiki = WikiManager(collection_name="research")
+
+# Rebuild from disk and inspect
+status = wiki.graph_rebuild()
+print(status["total_nodes"], status["total_edges"], status["hubs"])
+
+# Navigation
+path = wiki.graph_path("Alice", "Gravity")
+print([n["title"] for n in path["nodes"]])
+
+node = wiki.graph_explain("Alice")
+print(node["node_type"], node["degree"])
+
+# Ranked subgraph for a question
+sub = wiki.graph_query("What does Alice study?")
+print([n["title"] for n in sub["nodes"]])
+
+# Interactive visualization
+wiki.graph_export_html()  # writes graph.html into the wiki directory
+```
 
 ---
 
@@ -411,6 +488,36 @@ curl -X POST "http://localhost:8001/api/wiki/lint" \
 curl "http://localhost:8001/api/wiki/status/research"
 ```
 
+#### Knowledge Graph
+
+```bash
+# Rebuild the knowledge graph from the wiki pages
+curl -X POST "http://localhost:8001/api/wiki/graph/rebuild" \
+  -H "Content-Type: application/json" \
+  -d '{"collection_name": "research"}'
+
+# Graph statistics (nodes, edges, hubs)
+curl "http://localhost:8001/api/wiki/graph/research"
+
+# Interactive visualization — open in a browser
+curl "http://localhost:8001/api/wiki/graph/research/viz" --output graph.html
+
+# Shortest path between two concepts
+curl -X POST "http://localhost:8001/api/wiki/graph/path" \
+  -H "Content-Type: application/json" \
+  -d '{"source": "Alice", "target": "Gravity", "collection_name": "research"}'
+
+# Explain a node's connections
+curl -X POST "http://localhost:8001/api/wiki/graph/explain" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Alice", "collection_name": "research"}'
+
+# Ranked subgraph for a question
+curl -X POST "http://localhost:8001/api/wiki/graph/query" \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What does Alice study?", "collection_name": "research"}'
+```
+
 ---
 
 ## Advanced Usage
@@ -531,9 +638,17 @@ report = wiki.lint(auto_fix=True)
 print(f"Orphans: {len(report['orphan_pages'])}")
 print(f"Broken links: {len(report['broken_links'])}")
 
-# Status
+# Status (includes knowledge graph statistics when a graph exists)
 status = wiki.status()
 print(f"Total pages: {status['total_pages']}")
+
+# Knowledge graph
+graph_status = wiki.graph_rebuild()
+print(f"Graph: {graph_status['total_nodes']} nodes, {graph_status['total_edges']} edges")
+path = wiki.graph_path("Alice", "Gravity")
+explain = wiki.graph_explain("Alice")
+subgraph = wiki.graph_query("What does Alice study?")
+wiki.graph_export_html()  # interactive graph.html in the wiki directory
 ```
 
 ## Docker Deployment

@@ -164,7 +164,8 @@ libby/
 │       ├── memory.py    # Chat history
 │       ├── analyze.py   # Article summarization
 │       ├── wiki.py      # LLM Wiki manager
-│       └── wiki_models.py # Structured wiki schemas
+│       ├── wiki_models.py # Structured wiki schemas
+│       └── graph.py     # Knowledge graph over wiki pages + chunks
 ├── tests/
 │   ├── conftest.py      # Shared fixtures
 │   ├── test_tui.py      # TUI tests
@@ -181,6 +182,7 @@ libby/
 - `WIKI_BASE_PATH` - Base directory for LLM wikis (default: `~/.libby/wikis`)
 - `WIKI_AUTO_INGEST` - Automatically ingest documents into the wiki after embedding (default: `True`). Reads straight from the embedding table, so no PDF re-parsing is needed.
 - `WIKI_MODEL` - Dedicated LLM model for wiki ingest/query/summary (default: `glm-5-turbo`). Must be a **non-thinking** model that supports structured tool-calling — thinking models (`kimi-k2.6`, `deepseek-v4-flash/pro`) reject pydantic-ai `tool_choice` and yield empty summaries. Working options: `glm-5-turbo`/`glm-5.2` (Zhipu), `gpt-4o`, `gemini-2.5-flash`.
+- `WIKI_GRAPH_ENABLED` - Maintain a knowledge graph over wiki pages and embedded chunks (default: `True`)
 
 ## Supported Models
 
@@ -296,6 +298,30 @@ Periodic health-checks scan for:
 
 Auto-fix creates stub pages for broken links with `status: stub` frontmatter.
 
+### Knowledge Graph
+
+Libby maintains a NetworkX knowledge graph per collection, persisted as `graph.json`
+inside the wiki directory. `WikiKnowledgeGraph` (`libbydbot/brain/graph.py`) builds and
+queries it.
+
+- **Page nodes** — one per source/entity/concept/synthesis page (id = relative path).
+- **Chunk nodes** — one per embedded chunk (id = `chunk:<doc_hash>`).
+- **Edge types** — `mentions`, `mentioned_in`, `related_to`, `links_to`, `chunk_of`
+  (chunk → source), `references` (chunk → entity/concept matched by name).
+- Broken wikilinks become `stub` nodes; stubs are upgraded when real pages appear.
+- The graph is updated incrementally on ingest and can be fully rebuilt from disk
+  (chunk nodes and reference edges survive rebuilds).
+
+Graph capabilities:
+
+- **Graph-aware query** — `WikiManager.query()` ranks pages via seed matching + 1-hop
+  neighborhood expansion + degree, replacing the naive keyword filter.
+- **Path** — shortest path between two concepts.
+- **Explain** — a node's attributes plus inbound/outbound connections.
+- **Subgraph query** — ranked nodes/edges for a question.
+- **Hubs** — most-connected nodes.
+- **Visualization** — export an interactive `graph.html` via pyvis.
+
 ### CLI Commands (Legacy)
 
 ```bash
@@ -304,9 +330,13 @@ uv run libby-cli wiki_query "What is the main topic?" --collection_name my_colle
 uv run libby-cli wiki_lint --collection_name my_collection --auto_fix
 uv run libby-cli wiki_status --collection_name my_collection
 uv run libby-cli wiki_consolidate --collection_name my_collection
+uv run libby-cli wiki_graph --collection_name my_collection
+uv run libby-cli wiki_path "Alice" "Bob" --collection_name my_collection
+uv run libby-cli wiki_explain "Alice" --collection_name my_collection
+uv run libby-cli wiki_graph_export --collection_name my_collection
 ```
 
-In the TUI, use the Wiki Browser screen (`Ctrl+W`) and the Ingest button.
+In the TUI, use the Wiki Browser screen (`Ctrl+W`) and the Ingest and Graph buttons.
 
 ### REST API Endpoints
 
@@ -315,6 +345,12 @@ In the TUI, use the Wiki Browser screen (`Ctrl+W`) and the Ingest button.
 - `POST /api/wiki/consolidate` — merge per-part source pages into one collective page per document
 - `POST /api/wiki/query` — query the wiki
 - `POST /api/wiki/lint` — lint the wiki
-- `GET /api/wiki/status/{collection_name}` — wiki statistics
+- `GET /api/wiki/status/{collection_name}` — wiki statistics (includes graph stats)
 - `GET /api/wiki/pages/{collection_name}` — list all wiki pages grouped by category
 - `GET /api/wiki/page/{collection_name}` — read a single wiki page (`?category=...&page=...`)
+- `POST /api/wiki/graph/rebuild` — rebuild the knowledge graph
+- `GET /api/wiki/graph/{collection_name}` — knowledge graph statistics
+- `GET /api/wiki/graph/{collection_name}/viz` — serve the interactive `graph.html` visualization (rebuilt fresh on each request)
+- `POST /api/wiki/graph/path` — shortest path between two nodes
+- `POST /api/wiki/graph/explain` — explain a node
+- `POST /api/wiki/graph/query` — ranked subgraph for a question

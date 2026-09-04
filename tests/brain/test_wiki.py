@@ -24,6 +24,7 @@ def temp_wiki():
             collection_name="test_collection",
             wiki_base=tmpdir,
             model="llama3.2",
+            graph_enabled=False,
         )
         # Replace the LLM with a mock to avoid real API calls
         wiki._llm = MagicMock()

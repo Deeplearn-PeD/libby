@@ -28,6 +28,7 @@ class WikiBrowserScreen(Screen):
             yield Button("Refresh", id="btn-refresh", variant="primary")
             yield Button("Ingest", id="btn-ingest", variant="success")
             yield Button("Lint", id="btn-lint", variant="warning")
+            yield Button("Graph", id="btn-graph", variant="primary")
         with Horizontal(id="wiki-container"):
             yield Tree("Wiki", id="wiki-tree")
             yield Markdown("Select a page to view.", id="wiki-viewer")
@@ -88,6 +89,8 @@ class WikiBrowserScreen(Screen):
             self.app.push_screen("wiki_ingest")
         elif btn_id == "btn-lint":
             self._run_lint()
+        elif btn_id == "btn-graph":
+            self._run_graph()
 
     def action_refresh(self):
         self._load_wiki_tree()
@@ -95,6 +98,31 @@ class WikiBrowserScreen(Screen):
     def _run_lint(self):
         self.notify("Running wiki lint...")
         self.run_worker(self._lint_worker, thread=True)
+
+    def _run_graph(self):
+        self.notify("Rebuilding knowledge graph...")
+        self.run_worker(self._graph_worker, thread=True)
+
+    def _graph_worker(self):
+        try:
+            from libbydbot.brain.wiki import WikiManager
+
+            wiki = WikiManager(
+                collection_name=self.app.current_collection,
+                wiki_base=self.app._settings.wiki_base_path if self.app._settings else "",
+                model=self.app.current_model,
+            )
+            status = wiki.graph_rebuild()
+            html_path = wiki.graph_export_html()
+            msg = (
+                f"Knowledge graph rebuilt:\n"
+                f"  Nodes: {status['total_nodes']}\n"
+                f"  Edges: {status['total_edges']}\n"
+                f"Visualization: {html_path}"
+            )
+            self._safe_call(self.app.notify, msg)
+        except Exception as e:
+            self._safe_call(self.app.notify, f"Graph rebuild failed: {e}", severity="error")
 
     def _safe_call(self, fn, *args, **kwargs):
         """Call fn directly if on the main thread, otherwise via call_from_thread."""

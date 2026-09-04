@@ -316,6 +316,7 @@ def test_get_embedded_documents_postgres():
     assert all(col == "test_collection" for col in collection_names)
 
 
+
 class TestReconstructDocuments:
     def test_single_doc_single_chunk(self):
         rows = [(1, "col_a", "doc1", 0, "hash1", "Hello world")]
@@ -476,4 +477,63 @@ def test_reembed_without_rechunk_no_rechunk_stats(tmp_path):
     assert stats["updated"] == 2
     assert "total_old_chunks" not in stats
     assert "shadow_collection" not in stats
+
+def test_get_document_chunks_sqlite(tmp_path):
+    db_path = tmp_path / "chunks.db"
+    embedder = DocEmbedder(
+        "test_collection", dburl=f"sqlite:///{db_path}", embedding_model="mxbai-embed-large"
+    )
+    embedder.embed_text("First chunk of the report", "report.pdf", 0)
+    embedder.embed_text("Second chunk of the report", "report.pdf", 1)
+    embedder.embed_text("Unrelated document text", "other.pdf", 0)
+
+    chunks = embedder.get_document_chunks("report.pdf")
+    assert len(chunks) == 2
+    assert [c["page_number"] for c in chunks] == [0, 1]
+    assert all(c["doc_name"] == "report.pdf" for c in chunks)
+    assert all(set(c.keys()) == {"doc_hash", "doc_name", "page_number", "content"} for c in chunks)
+
+    # Collection filter
+    chunks = embedder.get_document_chunks("report.pdf", collection="test_collection")
+    assert len(chunks) == 2
+    chunks = embedder.get_document_chunks("report.pdf", collection="other_collection")
+    assert len(chunks) == 0
+
+    # Unknown document returns empty list
+    assert embedder.get_document_chunks("missing.pdf") == []
+
+
+def test_get_document_chunks_duckdb(tmp_path):
+    db_path = tmp_path / "chunks.duckdb"
+    embedder = DocEmbedder(
+        "test_collection", dburl=f"duckdb:///{db_path}", embedding_model="mxbai-embed-large"
+    )
+    embedder.embed_text("First chunk of the report", "report.pdf", 0)
+    embedder.embed_text("Second chunk of the report", "report.pdf", 1)
+    embedder.embed_text("Unrelated document text", "other.pdf", 0)
+
+    chunks = embedder.get_document_chunks("report.pdf")
+    assert len(chunks) == 2
+    assert [c["page_number"] for c in chunks] == [0, 1]
+    assert all(c["doc_name"] == "report.pdf" for c in chunks)
+
+    # Collection filter
+    chunks = embedder.get_document_chunks("report.pdf", collection="test_collection")
+    assert len(chunks) == 2
+    chunks = embedder.get_document_chunks("report.pdf", collection="other_collection")
+    assert len(chunks) == 0
+
+    # Unknown document returns empty list
+    assert embedder.get_document_chunks("missing.pdf") == []
+
+
+@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL not available")
+def test_get_document_chunks_postgres():
+    embedder = DocEmbedder("test_collection", embedding_model="mxbai-embed-large")
+    embedder.embed_text("First chunk of the pg report", "pg_report.pdf", 0)
+    embedder.embed_text("Second chunk of the pg report", "pg_report.pdf", 1)
+
+    chunks = embedder.get_document_chunks("pg_report.pdf")
+    assert len(chunks) == 2
+    assert [c["page_number"] for c in chunks] == [0, 1]
 

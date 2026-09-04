@@ -21,6 +21,7 @@ Libby the librarian. AI agent specialized in creating and querying embeddings fo
 - **Rechunk & Re-embed** — Switch embedding models or chunk sizes without downtime. Shadow collections keep the original data queryable during re-embedding, then a single finalize step cuts over.
 - **Textual TUI** (`libby`) — A rich interactive terminal interface with screens for chat, embedding, wiki browsing, wiki ingest, and settings.
 - **LLM Wiki** (`libby-cli wiki_*`) — A persistent markdown knowledge base that accumulates insights from your documents over time, with entity/concept extraction, synthesis, and automated health-checks.
+- **Knowledge Graph** — A NetworkX graph over wiki pages and embedded chunks with path/explain/subgraph queries, graph-aware wiki answers, and an interactive `graph.html` visualization (also served by the REST API).
 - **Legacy CLI** (`libby-cli`) — The original Fire-based command-line interface preserved for scripting.
 
 ## Installation
@@ -79,7 +80,7 @@ Navigate your collection's markdown wiki as a tree:
 - `concepts/` — Topics, theories, ideas
 - `synthesis/` — Overviews, analyses, answers
 
-Select any page to render it as Markdown. Use **Refresh** to reload, **Ingest** to add documents, or **Lint** to health-check the wiki.
+Select any page to render it as Markdown. Use **Refresh** to reload, **Ingest** to add documents, **Lint** to health-check the wiki, or **Graph** to rebuild the knowledge graph and export its `graph.html` visualization.
 
 #### Wiki Ingest Screen
 
@@ -207,6 +208,8 @@ Each collection gets its own wiki under `~/.libby/wikis/<collection_name>/`:
 <collection_name>/
 ├── index.md          # Content-oriented catalog of all pages
 ├── log.md            # Chronological append-only record of operations
+├── graph.json        # Knowledge graph (NetworkX node-link format)
+├── graph.html        # Interactive graph visualization (on export)
 ├── sources/          # One page per ingested source document
 ├── entities/         # Pages for people, organizations, objects
 ├── concepts/         # Pages for topics, theories, ideas
@@ -240,6 +243,18 @@ libby-cli wiki_lint --collection_name my_collection --auto_fix
 
 # Show wiki statistics
 libby-cli wiki_status --collection_name my_collection
+
+# Rebuild and inspect the knowledge graph
+libby-cli wiki_graph --collection_name my_collection
+
+# Trace the connection between two concepts
+libby-cli wiki_path "Alice" "Bob" --collection_name my_collection
+
+# Explain a concept's connections
+libby-cli wiki_explain "Alice" --collection_name my_collection
+
+# Export an interactive graph.html visualization
+libby-cli wiki_graph_export --collection_name my_collection
 ```
 
 ### Wiki Workflows
@@ -249,9 +264,10 @@ libby-cli wiki_status --collection_name my_collection
 2. Plans which wiki pages to create/update
 3. Writes/updates source, entity, concept, and synthesis pages
 4. Updates `index.md` and appends to `log.md`
+5. Updates the knowledge graph (nodes, edges, and chunk references)
 
 **Query** — When you ask a question:
-1. Reads `index.md` to identify relevant pages
+1. Ranks wiki pages using the knowledge graph (seed matching + neighborhood expansion; falls back to keyword scoring when no graph exists)
 2. Reads the most relevant pages (up to 15)
 3. Synthesizes a cited answer using `[[Page Name]]` citations
 4. Optionally files the answer back into `synthesis/`
@@ -264,6 +280,25 @@ libby-cli wiki_status --collection_name my_collection
 - **Missing pages** — important terms lacking dedicated pages
 
 Auto-fix creates stub pages for broken links with `status: stub` frontmatter.
+
+### Knowledge Graph
+
+Libby maintains a NetworkX knowledge graph over each collection's wiki pages and
+embedded chunks, persisted as `graph.json` inside the wiki directory.
+
+- **Page nodes** for sources/entities/concepts/synthesis; **chunk nodes** for embedded chunks.
+- **Typed edges**: `mentions`, `mentioned_in`, `related_to`, `links_to`, `chunk_of`, `references`.
+- The graph is updated incrementally during ingest and can be rebuilt from disk
+  (`wiki_graph`). Chunk reference edges survive rebuilds.
+- **Graph-aware query**: `wiki_query` ranks pages via seed matching + neighborhood
+  expansion + degree, so multi-hop questions ("how does X relate to Y?") work.
+- **Navigation**: `wiki_path` (shortest path), `wiki_explain` (connections),
+  `wiki_graph_export` (interactive `graph.html`).
+- **Visualization**: `graph.html` is also served by the REST API at
+  `GET /api/wiki/graph/{collection}/viz` (see the API endpoints table below), and
+  can be rebuilt/exported from the TUI Wiki Browser's **Graph** button.
+
+Control with `WIKI_GRAPH_ENABLED` (default `True`).
 
 ## REST API Server
 
@@ -375,6 +410,16 @@ Once the server is running, access the interactive API documentation at:
 | `POST` | `/api/wiki/query` | Query the wiki |
 | `POST` | `/api/wiki/lint` | Lint the wiki |
 | `GET`  | `/api/wiki/status/{collection_name}` | Wiki statistics |
+| `POST` | `/api/wiki/ingest-from-embeddings` | Build/update the wiki from the embedding table |
+| `POST` | `/api/wiki/consolidate` | Merge per-part source pages into one page per document |
+| `GET`  | `/api/wiki/pages/{collection_name}` | List all wiki pages grouped by category |
+| `GET`  | `/api/wiki/page/{collection_name}` | Read a single wiki page (`?category=...&page=...`) |
+| `POST` | `/api/wiki/graph/rebuild` | Rebuild the knowledge graph |
+| `GET`  | `/api/wiki/graph/{collection_name}` | Knowledge graph statistics |
+| `GET`  | `/api/wiki/graph/{collection_name}/viz` | Serve interactive `graph.html` visualization |
+| `POST` | `/api/wiki/graph/path` | Shortest path between two nodes |
+| `POST` | `/api/wiki/graph/explain` | Explain a node's connections |
+| `POST` | `/api/wiki/graph/query` | Ranked subgraph for a question |
 
 #### System
 
@@ -560,6 +605,7 @@ curl -X POST "http://localhost:8001/api/reassign/collection" \
 | `OPENAI_API_KEY` | OpenAI API key | - |
 | `WIKI_BASE_PATH` | Base directory for LLM wikis | `~/.libby/wikis` |
 | `WIKI_AUTO_INGEST` | Auto-ingest into wiki after embedding | `False` |
+| `WIKI_GRAPH_ENABLED` | Maintain knowledge graph over wiki + chunks | `True` |
 | `BACKUP_RETENTION_DAYS` | Days to keep PostgreSQL backups | `7` |
 | `BACKUP_SCHEDULE` | Backup schedule (cron format) | `0 2 * * *` |
 

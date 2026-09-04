@@ -357,6 +357,9 @@ class WikiStatusResponse(BaseModel):
     orphan_pages: int = Field(..., description="Number of orphan pages")
     broken_links: int = Field(..., description="Number of broken links")
     last_operation: str = Field("", description="Most recent log entry")
+    graph: dict | None = Field(
+        None, description="Knowledge graph statistics, if a graph exists"
+    )
 
 
 class WikiBrowseResponse(BaseModel):
@@ -430,3 +433,62 @@ class VerifyResponse(BaseModel):
     summary: dict[str, int] = Field(default_factory=dict, description="Summary counts")
     errors: list[str] = Field(default_factory=list, description="Errors during verification")
     finalized: list[dict] = Field(default_factory=list, description="Results of auto_finalize operations")
+
+
+# ── Wiki knowledge graph schemas ──
+
+
+class WikiGraphRebuildRequest(BaseModel):
+    collection_name: str = Field("main", description="Collection wiki to rebuild the graph for")
+
+
+class WikiGraphStatusResponse(BaseModel):
+    collection: str = Field(..., description="Collection name")
+    graph_path: str = Field(..., description="Filesystem path to graph.json")
+    total_nodes: int = Field(..., description="Total number of nodes")
+    total_edges: int = Field(..., description="Total number of edges")
+    node_counts: dict[str, int] = Field(..., description="Node counts by type")
+    edge_counts: dict[str, int] = Field(..., description="Edge counts by type")
+    hubs: list[dict] = Field(default_factory=list, description="Most-connected nodes")
+
+
+class WikiPathRequest(BaseModel):
+    source: str = Field(..., description="Starting node name")
+    target: str = Field(..., description="Ending node name")
+    collection_name: str = Field("main", description="Collection wiki to query")
+
+
+class WikiPathResponse(BaseModel):
+    found: bool = Field(..., description="Whether a path was found")
+    length: int = Field(0, description="Number of hops in the path")
+    nodes: list[dict] = Field(default_factory=list, description="Nodes along the path")
+    edges: list[dict] = Field(default_factory=list, description="Edges along the path")
+    error: str | None = Field(None, description="Error message if not found")
+
+
+class WikiExplainRequest(BaseModel):
+    name: str = Field(..., description="Node name to explain")
+    collection_name: str = Field("main", description="Collection wiki to query")
+
+
+class WikiExplainResponse(BaseModel):
+    found: bool = Field(..., description="Whether the node was found")
+    id: str = Field("", description="Node id")
+    title: str = Field("", description="Node title")
+    node_type: str = Field("", description="Node type")
+    degree: int = Field(0, description="Node degree")
+    outbound: list[dict] = Field(default_factory=list, description="Outbound connections")
+    inbound: list[dict] = Field(default_factory=list, description="Inbound connections")
+    error: str | None = Field(None, description="Error message if not found")
+
+
+class WikiGraphQueryRequest(BaseModel):
+    question: str = Field(..., description="Question to scope the subgraph")
+    collection_name: str = Field("main", description="Collection wiki to query")
+    max_nodes: int = Field(15, ge=1, le=100, description="Maximum number of nodes")
+
+
+class WikiGraphQueryResponse(BaseModel):
+    question: str = Field(..., description="The original question")
+    nodes: list[dict] = Field(default_factory=list, description="Ranked nodes")
+    edges: list[dict] = Field(default_factory=list, description="Edges between ranked nodes")

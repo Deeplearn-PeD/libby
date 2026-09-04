@@ -57,6 +57,22 @@ Provides:
 - Structured article summarization
 - Key information extraction (research question, results, conclusions)
 
+#### 6. WikiManager (`brain/wiki.py`)
+
+Maintains the LLM Wiki:
+- LLM-driven ingest (source summaries, entity/concept extraction)
+- Obsidian-compatible markdown pages with `[[wikilinks]]`
+- Graph-aware query synthesis with citations
+- Wiki health-checks (lint) with auto-fix
+
+#### 7. WikiKnowledgeGraph (`brain/graph.py`)
+
+Maintains a NetworkX knowledge graph over wiki pages and embedded chunks:
+- Typed edges (`mentions`, `related_to`, `chunk_of`, `references`, ...)
+- Persistent `graph.json`, incremental updates, safe rebuilds
+- Path/explain/subgraph queries and hub analysis
+- Interactive `graph.html` visualization (pyvis), also served by the REST API
+
 ## Features
 
 ### Multi-Database Support
@@ -104,6 +120,26 @@ FastAPI-based REST API with:
 - Health check endpoint
 - Docker-ready deployment
 
+### LLM Wiki
+
+A persistent, compounding markdown knowledge base per collection. Ingest extracts
+entities, concepts, and synthesis into interlinked pages; queries synthesize cited
+answers; lint detects orphans, broken links, contradictions, and stale claims.
+
+### Knowledge Graph
+
+Every collection's wiki is backed by a NetworkX knowledge graph connecting pages
+and embedded chunks:
+
+- **Graph-aware queries** — page ranking via seed matching + neighborhood expansion
+  + degree, enabling multi-hop questions ("how does X relate to Y?")
+- **Navigation** — shortest path between concepts, node explanations, ranked
+  subgraphs, hub detection
+- **Visualization** — interactive `graph.html` (pyvis), exportable from the CLI/TUI
+  and served by the REST API at `GET /api/wiki/graph/{collection}/viz`
+
+Controlled by `WIKI_GRAPH_ENABLED` (default `True`).
+
 ## Configuration
 
 ### Settings (`settings.py`)
@@ -149,6 +185,9 @@ Key dependencies include:
 - **pgvector/sqlite-vec/DuckDB VSS**: Vector storage
 - **Ollama**: Local LLM inference
 - **FastAPI/Uvicorn**: REST API
+- **Textual**: Terminal user interface
+- **NetworkX**: Knowledge graph data structure and algorithms
+- **pyvis**: Interactive graph visualization
 - **pydantic-settings**: Configuration management
 - **base-ai-agent**: LLM abstraction layer
 

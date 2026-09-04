@@ -1483,6 +1483,85 @@ class DocEmbedder:
                     ).fetchall()
             return [tuple(r) for r in rows]
 
+    def get_document_chunks(self, doc_name: str, collection: str = "") -> list[dict]:
+        """
+        Get all embedded chunks of a document, ordered by page/chunk number.
+
+        Robust to multi-table stores (a base table plus dimension-specific
+        tables): it tries the active table first, then falls back to every
+        other data table, returning the rows from the first table that
+        actually holds the requested document. This mirrors
+        :meth:`get_document_texts`.
+
+        :param doc_name: name of the document
+        :param collection: optional collection filter
+        :return: list of dicts with doc_hash, doc_name, page_number, content
+        """
+        for tbl in self._candidate_text_tables():
+            try:
+                rows = self._fetch_chunk_rows(tbl, doc_name, collection)
+            except Exception as e:
+                logger.debug(f"get_document_chunks: skipping table '{tbl}': {e}")
+                continue
+            if rows:
+                return [
+                    {"doc_hash": r[0], "doc_name": r[1], "page_number": r[2], "content": r[3]}
+                    for r in rows
+                ]
+        return []
+
+    def _fetch_chunk_rows(
+        self, tbl: str, doc_name: str, collection: str
+    ) -> list[tuple]:
+        """Return ``(doc_hash, doc_name, page_number, document)`` rows for one table."""
+        if self.dburl.startswith("sqlite"):
+            with self.connection as conn:
+                cursor = conn.cursor()
+                if collection:
+                    return cursor.execute(
+                        f"SELECT doc_hash, doc_name, page_number, document FROM {tbl} "
+                        f"WHERE doc_name = ? AND collection_name = ? ORDER BY page_number",
+                        (doc_name, collection),
+                    ).fetchall()
+                return cursor.execute(
+                    f"SELECT doc_hash, doc_name, page_number, document FROM {tbl} "
+                    f"WHERE doc_name = ? ORDER BY page_number",
+                    (doc_name,),
+                ).fetchall()
+        elif self.dburl.startswith("duckdb"):
+            conn = self.connection
+            if collection:
+                return conn.sql(
+                    f"SELECT doc_hash, doc_name, page_number, document FROM {tbl} "
+                    f"WHERE doc_name = ? AND collection_name = ? ORDER BY page_number",
+                    params=[doc_name, collection],
+                ).fetchall()
+            return conn.sql(
+                f"SELECT doc_hash, doc_name, page_number, document FROM {tbl} "
+                f"WHERE doc_name = ? ORDER BY page_number",
+                params=[doc_name],
+            ).fetchall()
+        else:
+            with Session(self.engine) as session:
+                if collection:
+                    rows = session.execute(
+                        text(
+                            f"SELECT doc_hash, doc_name, page_number, document FROM {tbl} "
+                            "WHERE doc_name=:doc AND collection_name=:col "
+                            "ORDER BY page_number"
+                        ),
+                        {"doc": doc_name, "col": collection},
+                    ).fetchall()
+                else:
+                    rows = session.execute(
+                        text(
+                            f"SELECT doc_hash, doc_name, page_number, document FROM {tbl} "
+                            "WHERE doc_name=:doc ORDER BY page_number"
+                        ),
+                        {"doc": doc_name},
+                    ).fetchall()
+            return [tuple(r) for r in rows]
+
     def _migrate_add_embedding_model(self):
         """
         Add embedding_model column to existing tables if it doesn't exist.

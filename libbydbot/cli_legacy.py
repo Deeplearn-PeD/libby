@@ -286,6 +286,11 @@ class LibbyInterface(LibbyDBot):
         print(f"  Broken links: {status['broken_links']}")
         if status["last_operation"]:
             print(f"  Last operation: {status['last_operation']}")
+        graph = status.get("graph")
+        if graph:
+            print(f"  Knowledge graph: {graph['total_nodes']} nodes, {graph['total_edges']} edges")
+            for hub in graph.get("hubs", []):
+                print(f"    hub: {hub['title']} ({hub['node_type']}, degree {hub['degree']})")
         return status
 
     def list_backends(self):
@@ -376,6 +381,66 @@ class LibbyInterface(LibbyDBot):
                 print(f"  - {err}")
 
         return stats
+
+    def wiki_graph(self, collection_name: str = "main"):
+        """Rebuild the wiki knowledge graph and show statistics."""
+        wiki = self._get_wiki(collection_name)
+        status = wiki.graph_rebuild()
+
+        print(f"Knowledge Graph for '{collection_name}':")
+        print(f"  Path: {status['graph_path']}")
+        print(f"  Nodes: {status['total_nodes']}")
+        for node_type, count in status["node_counts"].items():
+            print(f"    {node_type}: {count}")
+        print(f"  Edges: {status['total_edges']}")
+        for edge_type, count in status["edge_counts"].items():
+            print(f"    {edge_type}: {count}")
+        if status["hubs"]:
+            print("  Hubs:")
+            for hub in status["hubs"]:
+                print(f"    {hub['title']} ({hub['node_type']}, degree {hub['degree']})")
+        return status
+
+    def wiki_path(self, a: str, b: str, collection_name: str = "main"):
+        """Show the shortest path between two wiki concepts."""
+        wiki = self._get_wiki(collection_name)
+        result = wiki.graph_path(a, b)
+
+        if not result["found"]:
+            print(result["error"])
+            return result
+        titles = [n["title"] for n in result["nodes"]]
+        print(f"Shortest path ({result['length']} hops):")
+        print("  " + " --> ".join(titles))
+        for edge in result["edges"]:
+            print(f"  {edge['from']} --{edge['edge_type']}--> {edge['to']}")
+        return result
+
+    def wiki_explain(self, name: str, collection_name: str = "main"):
+        """Explain a wiki concept: its connections and metadata."""
+        wiki = self._get_wiki(collection_name)
+        result = wiki.graph_explain(name)
+
+        if not result["found"]:
+            print(result["error"])
+            return result
+        print(f"{result['title']} [{result['node_type']}] degree={result['degree']}")
+        if result["outbound"]:
+            print("  Outbound:")
+            for edge in result["outbound"]:
+                print(f"    --{edge['edge_type']}--> {edge['title']}")
+        if result["inbound"]:
+            print("  Inbound:")
+            for edge in result["inbound"]:
+                print(f"    <--{edge['edge_type']}-- {edge['title']}")
+        return result
+
+    def wiki_graph_export(self, collection_name: str = "main", output: str = ""):
+        """Export the wiki knowledge graph to an interactive HTML visualization."""
+        wiki = self._get_wiki(collection_name)
+        path = wiki.graph_export_html(output or None)
+        print(f"Graph visualization exported to: {path}")
+        return str(path)
 
 
 def main(corpus_path="."):

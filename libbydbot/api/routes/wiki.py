@@ -2,12 +2,19 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import FileResponse
 from loguru import logger
 
 from libbydbot.api.schemas import (
     WikiBrowseResponse,
     WikiConsolidateRequest,
     WikiConsolidateResponse,
+    WikiExplainRequest,
+    WikiExplainResponse,
+    WikiGraphQueryRequest,
+    WikiGraphQueryResponse,
+    WikiGraphRebuildRequest,
+    WikiGraphStatusResponse,
     WikiIngestFromEmbeddingsRequest,
     WikiIngestFromEmbeddingsResponse,
     WikiIngestRequest,
@@ -15,6 +22,8 @@ from libbydbot.api.schemas import (
     WikiLintRequest,
     WikiLintResponse,
     WikiPageResponse,
+    WikiPathRequest,
+    WikiPathResponse,
     WikiQueryRequest,
     WikiQueryResponse,
     WikiStatusResponse,
@@ -236,6 +245,7 @@ def wiki_status(collection_name: str = "main"):
             orphan_pages=status["orphan_pages"],
             broken_links=status["broken_links"],
             last_operation=status["last_operation"],
+            graph=status.get("graph"),
         )
     except Exception as e:
         logger.error(f"Error getting wiki status: {e}")
@@ -354,4 +364,119 @@ def wiki_page(
         raise
     except Exception as e:
         logger.error(f"Error reading wiki page: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/graph/rebuild", response_model=WikiGraphStatusResponse)
+def wiki_graph_rebuild(request: WikiGraphRebuildRequest):
+    """
+    Rebuild the wiki knowledge graph from the pages on disk.
+
+    Chunk nodes and their reference edges are preserved across rebuilds.
+    """
+    try:
+        wiki = get_wiki_manager(request.collection_name)
+        status = wiki.graph_rebuild()
+        return WikiGraphStatusResponse(**status)
+    except Exception as e:
+        logger.error(f"Error rebuilding wiki graph: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/graph/{collection_name}", response_model=WikiGraphStatusResponse)
+def wiki_graph_status(collection_name: str = "main"):
+    """
+    Get statistics about a collection's knowledge graph.
+    """
+    try:
+        wiki = get_wiki_manager(collection_name)
+        status = wiki.graph_status()
+        return WikiGraphStatusResponse(**status)
+    except Exception as e:
+        logger.error(f"Error getting wiki graph status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/graph/{collection_name}/viz")
+def wiki_graph_viz(collection_name: str = "main"):
+    """
+    Serve the interactive knowledge graph visualization (graph.html).
+
+    The graph is rebuilt from the wiki pages on disk before exporting so
+    the visualization always reflects the current wiki state. Chunk nodes
+    and their reference edges are preserved across rebuilds.
+    """
+    try:
+        wiki = get_wiki_manager(collection_name)
+        kg = wiki._get_knowledge_graph()
+        kg.rebuild()
+        html_path = kg.export_html()
+        # content_disposition inline so browsers render the visualization
+        # instead of downloading it
+        return FileResponse(
+            html_path, media_type="text/html", content_disposition_type="inline"
+        )
+    except Exception as e:
+        logger.error(f"Error serving wiki graph visualization: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/graph/path", response_model=WikiPathResponse)
+def wiki_graph_path(request: WikiPathRequest):
+    """
+    Find the shortest path between two nodes in the knowledge graph.
+    """
+    try:
+        wiki = get_wiki_manager(request.collection_name)
+        result = wiki.graph_path(request.source, request.target)
+        return WikiPathResponse(
+            found=result["found"],
+            length=result.get("length", 0),
+            nodes=result.get("nodes", []),
+            edges=result.get("edges", []),
+            error=result.get("error"),
+        )
+    except Exception as e:
+        logger.error(f"Error finding wiki graph path: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/graph/explain", response_model=WikiExplainResponse)
+def wiki_graph_explain(request: WikiExplainRequest):
+    """
+    Explain a node in the knowledge graph (attributes + connections).
+    """
+    try:
+        wiki = get_wiki_manager(request.collection_name)
+        result = wiki.graph_explain(request.name)
+        return WikiExplainResponse(
+            found=result["found"],
+            id=result.get("id", ""),
+            title=result.get("title", ""),
+            node_type=result.get("node_type", ""),
+            degree=result.get("degree", 0),
+            outbound=result.get("outbound", []),
+            inbound=result.get("inbound", []),
+            error=result.get("error"),
+        )
+    except Exception as e:
+        logger.error(f"Error explaining wiki graph node: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/graph/query", response_model=WikiGraphQueryResponse)
+def wiki_graph_query(request: WikiGraphQueryRequest):
+    """
+    Return the ranked subgraph relevant to a question.
+    """
+    try:
+        wiki = get_wiki_manager(request.collection_name)
+        result = wiki.graph_query(request.question, max_nodes=request.max_nodes)
+        return WikiGraphQueryResponse(
+            question=result["question"],
+            nodes=result["nodes"],
+            edges=result["edges"],
+        )
+    except Exception as e:
+        logger.error(f"Error querying wiki graph: {e}")
         raise HTTPException(status_code=500, detail=str(e))

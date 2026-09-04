@@ -5,7 +5,9 @@ These tests verify that the API module can be imported and the FastAPI app
 can be created successfully.
 """
 
+
 import os
+
 from pathlib import Path
 
 import pytest
@@ -311,6 +313,7 @@ class TestSchemaModels:
         assert response.error == "ValueError"
         assert response.message == "Invalid input"
         assert response.detail == "Text cannot be empty"
+
 
 
 class TestUploadEmbed:
@@ -676,3 +679,118 @@ class TestWikiModelConfig:
         monkeypatch.delenv("WIKI_MODEL", raising=False)
         wiki = get_wiki_manager("main")
         assert wiki.model == Settings().wiki_model
+
+class TestGraphSchemaModels:
+    """Test Pydantic schema models for the knowledge graph endpoints."""
+
+    def test_graph_status_response(self):
+        from libbydbot.api.schemas import WikiGraphStatusResponse
+
+        response = WikiGraphStatusResponse(
+            collection="main",
+            graph_path="/tmp/graph.json",
+            total_nodes=3,
+            total_edges=4,
+            node_counts={"entity": 1, "source": 1, "concept": 1},
+            edge_counts={"mentions": 2},
+            hubs=[],
+        )
+        assert response.total_nodes == 3
+        assert response.node_counts["entity"] == 1
+
+    def test_path_request_and_response(self):
+        from libbydbot.api.schemas import WikiPathRequest, WikiPathResponse
+
+        request = WikiPathRequest(source="Alice", target="Bob")
+        assert request.collection_name == "main"
+
+        response = WikiPathResponse(found=True, length=1, nodes=[], edges=[])
+        assert response.found is True
+        assert response.error is None
+
+    def test_explain_request_and_response(self):
+        from libbydbot.api.schemas import WikiExplainRequest, WikiExplainResponse
+
+        request = WikiExplainRequest(name="Alice")
+        assert request.collection_name == "main"
+
+        response = WikiExplainResponse(found=True, id="entities/alice.md",
+                                       title="Alice", node_type="entity", degree=2)
+        assert response.node_type == "entity"
+
+    def test_graph_query_request(self):
+        from libbydbot.api.schemas import WikiGraphQueryRequest
+
+        request = WikiGraphQueryRequest(question="What connects A to B?")
+        assert request.max_nodes == 15
+        assert request.collection_name == "main"
+
+
+class TestGraphRoutes:
+    """Test that knowledge graph routes are registered."""
+
+    def test_graph_routes_registered(self):
+        from libbydbot.api.main import create_app
+
+        test_app = create_app()
+        route_paths = [r.path for r in test_app.routes if hasattr(r, "path")]
+
+        assert "/api/wiki/graph/rebuild" in route_paths
+        assert "/api/wiki/graph/{collection_name}" in route_paths
+        assert "/api/wiki/graph/{collection_name}/viz" in route_paths
+        assert "/api/wiki/graph/path" in route_paths
+        assert "/api/wiki/graph/explain" in route_paths
+        assert "/api/wiki/graph/query" in route_paths
+
+
+class TestGraphVizEndpoint:
+    """Integration tests for the graph visualization endpoint."""
+
+    def _seed_wiki(self, wiki_base: Path, collection: str = "vizcoll"):
+        wiki = wiki_base / collection
+        for sub in ("sources", "entities", "concepts", "synthesis"):
+            (wiki / sub).mkdir(parents=True)
+        (wiki / "sources" / "doc_a.md").write_text(
+            "---\ntitle: Doc A\n---\n\n# Doc A\n\nAbout [[Alice]].\n",
+            encoding="utf-8",
+        )
+        (wiki / "entities" / "alice.md").write_text(
+            "---\ntitle: Alice\n---\n\n# Alice\n\nIn [[doc_a|Doc A]].\n",
+            encoding="utf-8",
+        )
+
+    def test_viz_endpoint_serves_html(self, tmp_path, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        from libbydbot.api.main import create_app
+
+        self._seed_wiki(tmp_path)
+        monkeypatch.setenv("WIKI_BASE_PATH", str(tmp_path))
+        monkeypatch.setenv("EMBED_DB", f"sqlite:///{tmp_path / 'embed.db'}")
+
+        with TestClient(create_app()) as client:
+            response = client.get("/api/wiki/graph/vizcoll/viz")
+
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/html")
+        assert "<html" in response.text.lower()
+        # Inline disposition so browsers render the visualization directly
+        assert "attachment" not in response.headers.get("content-disposition", "")
+        # The graph.html artifact is written into the wiki directory
+        assert (tmp_path / "vizcoll" / "graph.html").exists()
+
+    def test_viz_endpoint_empty_wiki_rebuilds(self, tmp_path, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        from libbydbot.api.main import create_app
+
+        # Empty wiki (no pages) - should still succeed with an empty graph
+        (tmp_path / "emptycoll").mkdir(parents=True)
+        monkeypatch.setenv("WIKI_BASE_PATH", str(tmp_path))
+        monkeypatch.setenv("EMBED_DB", f"sqlite:///{tmp_path / 'embed.db'}")
+
+        with TestClient(create_app()) as client:
+            response = client.get("/api/wiki/graph/emptycoll/viz")
+
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/html")

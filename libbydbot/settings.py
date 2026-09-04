@@ -52,6 +52,11 @@ class Settings(BaseSettings):
         ),
     )
 
+    wiki_graph_enabled: bool = Field(
+        default=True,
+        description="Maintain a knowledge graph over wiki pages and embedded chunks",
+    )
+
     db_url: str = Field(
         default_factory=lambda: f"sqlite:///{Path.home() / '.libby' / 'data' / 'libby.db'}",
         description="Database URL for chat history",

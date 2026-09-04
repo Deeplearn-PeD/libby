@@ -156,6 +156,7 @@ class WikiManager:
         collection_name: str,
         wiki_base: str | Path = "",
         model: str = "kimi-k2.5",
+        graph_enabled: bool | None = None,
     ):
         self.collection_name = collection_name
         self.wiki_base = Path(wiki_base) if wiki_base else DEFAULT_WIKI_BASE
@@ -164,7 +165,154 @@ class WikiManager:
         self._struct_llm = StructuredLangModel(model=model)
         self._llm = LangModel(model=model)
         self._structured_output_supported: bool | None = None
+        if graph_enabled is None:
+            try:
+                from libbydbot.settings import Settings
+
+                graph_enabled = Settings().wiki_graph_enabled
+            except Exception:
+                graph_enabled = True
+        self.graph_enabled = graph_enabled
+        self._kg = None
         self._ensure_structure()
+
+    # ────────────────────────── knowledge graph ─────────────────────
+
+    def _get_knowledge_graph(self):
+        """Return the cached WikiKnowledgeGraph for this wiki."""
+        if self._kg is None:
+            from libbydbot.brain.graph import WikiKnowledgeGraph
+
+            self._kg = WikiKnowledgeGraph(self.wiki_dir, self.collection_name)
+        return self._kg
+
+    def _fetch_document_chunks(self, doc_name: str, doc_content: str) -> list[dict]:
+        """
+        Fetch embedded chunks for a document from the embedding database.
+
+        Also gathers chunks stored under per-part names when the document was
+        merged from parts at ingest time (e.g. ``report`` built from
+        ``report_part1``/``report_part2``), so chunk references keep pointing
+        at the real embedded chunks. Falls back to chunking the raw content
+        when the document is not embedded at all.
+        """
+        try:
+            from libbydbot.brain.embed import DocEmbedder
+            from libbydbot.settings import Settings
+
+            # EMBED_DB is used by the API server and docker deployments;
+            # fall back to the settings embed_db_url otherwise.
+            dburl = os.getenv("EMBED_DB", "") or Settings().embed_db_url
+            embedder = DocEmbedder(col_name=self.collection_name, dburl=dburl)
+            chunks = embedder.get_document_chunks(doc_name)
+            if chunks:
+                return chunks
+
+            # Document may have been merged from parts; collect the chunks of
+            # every part that reduces to this base name.
+            part_chunks = self._fetch_part_chunks(embedder, doc_name)
+            if part_chunks:
+                return part_chunks
+        except Exception as e:
+            logger.warning(f"Could not fetch embedded chunks for '{doc_name}': {e}")
+
+        from hashlib import sha256
+
+        from libbydbot.brain.ingest import TextSplitter
+
+        splitter = TextSplitter()
+        return [
+            {
+                "doc_hash": sha256(chunk.encode()).hexdigest(),
+                "doc_name": doc_name,
+                "page_number": i,
+                "content": chunk,
+            }
+            for i, chunk in enumerate(splitter.split_text(doc_content))
+        ]
+
+    def _fetch_part_chunks(self, embedder, doc_name: str) -> list[dict]:
+        """Collect chunks of all embedded parts that merge into *doc_name*."""
+        try:
+            embedded_names = {
+                name
+                for name, collection in embedder.get_embedded_documents()
+                if not collection or collection == self.collection_name
+            }
+        except Exception as e:
+            logger.warning(f"Could not list embedded documents: {e}")
+            return []
+
+        part_names = [
+            name
+            for name in embedded_names
+            if name != doc_name and self._doc_base_and_part(name)[0] == doc_name
+        ]
+        if not part_names:
+            return []
+
+        def part_sort_key(name: str):
+            part = self._doc_base_and_part(name)[1]
+            return (part if part is not None else float("inf"), name)
+
+        chunks: list[dict] = []
+        for name in sorted(part_names, key=part_sort_key):
+            chunks.extend(embedder.get_document_chunks(name))
+        return chunks
+
+    def _update_knowledge_graph(self, doc_name: str, summary, doc_content: str) -> None:
+        """Refresh the knowledge graph after an ingest, if enabled."""
+        if not self.graph_enabled:
+            return
+        try:
+            kg = self._get_knowledge_graph()
+            chunks = self._fetch_document_chunks(doc_name, doc_content)
+            kg.update_from_ingest(doc_name, summary, chunks)
+            # Re-scan pages so wikilinks inside page bodies (not just
+            # summary-derived edges) are captured. Chunks survive rebuilds.
+            kg.rebuild()
+        except Exception as e:
+            logger.warning(f"Knowledge graph update failed for '{doc_name}': {e}")
+
+    def graph_rebuild(self) -> dict:
+        """Rebuild the knowledge graph from the wiki pages on disk."""
+        kg = self._get_knowledge_graph()
+        kg.rebuild()
+        self._append_log("graph", "rebuilt knowledge graph", kg.graph.number_of_nodes())
+        return kg.status()
+
+    def graph_status(self) -> dict:
+        """Return knowledge graph statistics."""
+        return self._get_knowledge_graph().status()
+
+    def graph_path(self, a: str, b: str) -> dict:
+        """Find the shortest path between two nodes in the knowledge graph."""
+        return self._get_knowledge_graph().shortest_path(a, b)
+
+    def graph_explain(self, name: str) -> dict:
+        """Explain a node in the knowledge graph (attributes + connections)."""
+        return self._get_knowledge_graph().explain(name)
+
+    def graph_query(self, question: str, max_nodes: int = 15) -> dict:
+        """Return the ranked subgraph relevant to a question."""
+        return self._get_knowledge_graph().subgraph_for_query(question, max_nodes=max_nodes)
+
+    def graph_export_html(self, path: str | Path | None = None) -> Path:
+        """Export an interactive HTML visualization of the knowledge graph."""
+        return self._get_knowledge_graph().export_html(path)
+
+    def _graph_rank_pages(self, question: str) -> list[str]:
+        """Rank wiki pages for a question using the knowledge graph."""
+        if not self.graph_enabled:
+            return []
+        try:
+            kg = self._get_knowledge_graph()
+            if kg.graph.number_of_nodes() == 0:
+                return []
+            return kg.score_pages(question)
+        except Exception as e:
+            logger.warning(f"Graph-based page ranking failed: {e}")
+            return []
 
     # ────────────────────────── properties ──────────────────────────
 
@@ -458,6 +606,9 @@ class WikiManager:
         # 4. Rebuild index and log
         self._write_index()
         self._append_log("ingest", doc_name, pages_touched)
+
+        # 5. Refresh the knowledge graph
+        self._update_knowledge_graph(doc_name, summary, doc_content)
 
         logger.success(f"Wiki ingest complete: {doc_name} ({pages_touched} pages touched)")
         return {
@@ -1135,7 +1286,6 @@ class WikiManager:
         index_content = self._read_page(self.index_path)
 
         # Gather relevant pages (simple heuristic: all non-index/log pages for now)
-        # Future: use embeddings or keyword matching to select pages
         page_contents: list[tuple[str, str]] = []
         for md_file in self.wiki_dir.rglob("*.md"):
             if md_file.name in ("index.md", "log.md"):
@@ -1145,8 +1295,16 @@ class WikiManager:
 
         # Limit context to avoid token overflow
         max_pages = 15
-        if len(page_contents) > max_pages:
-            # Simple keyword relevance filter
+        ranked_paths = self._graph_rank_pages(question)
+        if ranked_paths:
+            # Graph-guided selection: ranked pages first, remaining pages appended
+            by_rel = dict(page_contents)
+            ranked = [(rel, by_rel[rel]) for rel in ranked_paths if rel in by_rel]
+            seen = {rel for rel, _ in ranked}
+            remaining = [(rel, content) for rel, content in page_contents if rel not in seen]
+            page_contents = (ranked + remaining)[:max_pages]
+        elif len(page_contents) > max_pages:
+            # Fallback: simple keyword relevance filter
             keywords = set(question.lower().split())
             scored = []
             for rel, content in page_contents:
@@ -1281,7 +1439,7 @@ class WikiManager:
 
         self._append_log("lint", f"found {len(orphans)} orphans, {len(broken)} broken links", 0)
 
-        return {
+        result = {
             "orphan_pages": report.orphan_pages,
             "broken_links": report.broken_links,
             "contradictions": [c.model_dump() for c in report.contradictions],
@@ -1290,6 +1448,15 @@ class WikiManager:
             "suggestions": report.suggestions,
             "fixes_applied": fixes_applied,
         }
+
+        if self.graph_enabled:
+            try:
+                result["graph_hubs"] = self._get_knowledge_graph().hubs(5)
+            except Exception as e:
+                logger.warning(f"Could not compute graph hubs for lint: {e}")
+                result["graph_hubs"] = []
+
+        return result
 
     def _generate_lint_report(self, all_pages: dict[str, str]) -> LintReport:
         """Use the LLM to analyze pages for contradictions, stale claims, and gaps."""
@@ -1333,7 +1500,7 @@ class WikiManager:
             if log_lines:
                 last_log = log_lines[-1]
 
-        return {
+        result = {
             "collection": self.collection_name,
             "wiki_path": str(self.wiki_dir),
             "total_pages": total,
@@ -1342,3 +1509,14 @@ class WikiManager:
             "broken_links": len(broken),
             "last_operation": last_log,
         }
+
+        if self.graph_enabled and self._get_knowledge_graph().graph_path.exists():
+            try:
+                result["graph"] = self.graph_status()
+            except Exception as e:
+                logger.warning(f"Could not read graph status: {e}")
+                result["graph"] = None
+        else:
+            result["graph"] = None
+
+        return result
