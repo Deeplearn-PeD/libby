@@ -794,3 +794,27 @@ class TestGraphVizEndpoint:
 
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("text/html")
+
+    def test_viz_endpoint_serves_cached_and_rebuild_param(self, tmp_path, monkeypatch):
+        """A second view serves the cached graph.html; ?rebuild=true forces
+        a fresh export."""
+        from fastapi.testclient import TestClient
+
+        from libbydbot.api.main import create_app
+
+        self._seed_wiki(tmp_path)
+        monkeypatch.setenv("WIKI_BASE_PATH", str(tmp_path))
+        monkeypatch.setenv("EMBED_DB", f"sqlite:///{tmp_path / 'embed.db'}")
+
+        with TestClient(create_app()) as client:
+            client.get("/api/wiki/graph/vizcoll/viz")
+            html = tmp_path / "vizcoll" / "graph.html"
+            first_mtime = html.stat().st_mtime
+
+            cached = client.get("/api/wiki/graph/vizcoll/viz")
+            assert cached.status_code == 200
+            assert html.stat().st_mtime == first_mtime  # served from cache
+
+            forced = client.get("/api/wiki/graph/vizcoll/viz?rebuild=true")
+            assert forced.status_code == 200
+            assert html.stat().st_mtime > first_mtime  # regenerated

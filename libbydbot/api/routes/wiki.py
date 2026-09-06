@@ -405,19 +405,27 @@ def wiki_graph_status(collection_name: str = "main"):
 
 
 @router.get("/graph/{collection_name}/viz")
-def wiki_graph_viz(collection_name: str = "main"):
+def wiki_graph_viz(
+    collection_name: str = "main",
+    rebuild: bool = False,
+    include_chunks: bool = False,
+):
     """
     Serve the interactive knowledge graph visualization (graph.html).
 
-    The graph is rebuilt from the wiki pages on disk before exporting so
-    the visualization always reflects the current wiki state. Chunk nodes
-    and their reference edges are preserved across rebuilds.
+    The exported HTML is reused when it is still fresh relative to the
+    wiki pages and graph.json (kept up to date incrementally at ingest
+    time), so repeated views skip the expensive full rebuild. Pass
+    ``?rebuild=true`` to force one. Chunk nodes — one per embedded
+    document piece, typically the bulk of the graph — are excluded from
+    the visualization by default to keep the browser render fast; pass
+    ``?include_chunks=true`` for the full view.
     """
     try:
         wiki = get_wiki_manager(collection_name)
-        kg = wiki._get_knowledge_graph()
-        kg.rebuild()
-        html_path = kg.export_html()
+        html_path = wiki.graph_viz_html(
+            rebuild=rebuild, include_chunks=include_chunks
+        )
         # content_disposition inline so browsers render the visualization
         # instead of downloading it
         return FileResponse(

@@ -301,6 +301,45 @@ class WikiManager:
         """Export an interactive HTML visualization of the knowledge graph."""
         return self._get_knowledge_graph().export_html(path)
 
+    def graph_viz_html(
+        self,
+        rebuild: bool = False,
+        include_chunks: bool = False,
+    ) -> Path:
+        """Return the interactive graph visualization, refreshing if stale.
+
+        The exported ``graph.html`` is reused when it is newer than every
+        wiki page and than ``graph.json`` (which ingest keeps up to date
+        incrementally), so repeated views skip the full rebuild. Pass
+        ``rebuild=True`` to force a fresh build.
+        """
+        kg = self._get_knowledge_graph()
+        html_path = kg.wiki_dir / "graph.html"
+
+        if rebuild or self._viz_cache_stale(kg, html_path):
+            kg.rebuild()
+            html_path = kg.export_html(include_chunks=include_chunks)
+        else:
+            logger.debug("Serving cached knowledge-graph visualization")
+        return html_path
+
+    @staticmethod
+    def _viz_cache_stale(kg, html_path: Path) -> bool:
+        """True when graph.html is missing or older than the wiki state."""
+        if not html_path.exists():
+            return True
+        try:
+            html_mtime = html_path.stat().st_mtime
+            if kg.graph_path.exists() and kg.graph_path.stat().st_mtime > html_mtime:
+                return True
+            for md_file in kg.wiki_dir.rglob("*.md"):
+                if md_file.stat().st_mtime > html_mtime:
+                    return True
+        except OSError as e:
+            logger.warning(f"Could not stat graph cache files: {e}")
+            return True
+        return False
+
     def _graph_rank_pages(self, question: str) -> list[str]:
         """Rank wiki pages for a question using the knowledge graph."""
         if not self.graph_enabled:

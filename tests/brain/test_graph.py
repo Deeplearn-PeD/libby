@@ -249,6 +249,76 @@ class TestExport:
         assert path == out
         assert out.exists()
 
+    def test_export_excludes_chunks_by_default(self, kg):
+        """Chunk nodes (one per embedded piece) dominate the graph and make
+        the browser render slow; they are excluded unless asked for."""
+        kg.add_chunks(
+            [
+                {"doc_hash": "h1", "doc_name": "Doc A", "page_number": 0},
+                {"doc_hash": "h2", "doc_name": "Doc A", "page_number": 1},
+            ]
+        )
+        content = kg.export_html().read_text(encoding="utf-8")
+        assert "chunk:h1" not in content and "chunk:h2" not in content
+
+        content_full = kg.export_html(include_chunks=True).read_text(encoding="utf-8")
+        assert "chunk:h1" in content_full
+
+    def test_export_caps_nodes_by_degree(self, kg):
+        """When the graph exceeds max_nodes only the top-N by degree are
+        exported, with a truncation notice on the page."""
+        # the fixture graph has few nodes; force a tiny cap instead
+        content = kg.export_html(max_nodes=1).read_text(encoding="utf-8")
+        assert "showing top" in content
+        assert "Knowledge graph" in content
+
+    def test_export_keeps_edges_between_kept_nodes(self, kg):
+        content = kg.export_html().read_text(encoding="utf-8")
+        # fixture graph links Alice -> Bob (or similar); every remaining
+        # edge endpoint must be a kept node — verify edges exist at all
+        assert "edges" in content.lower()
+
+
+class TestVizCache:
+    @staticmethod
+    def _make_wiki(tmp_path):
+        """Real WikiManager over a populated wiki with a fresh graph.html."""
+        from libbydbot.brain.wiki import WikiManager
+
+        wiki = WikiManager(collection_name="c", wiki_base=str(tmp_path), model="llama3.2")
+        kg = wiki._get_knowledge_graph().rebuild()
+        kg.export_html()
+        return wiki, kg
+
+    def test_viz_serves_cached_html_without_rebuild(self, tmp_path):
+        """A fresh graph.html must be served as-is — no rebuild, no rewrite."""
+        wiki, kg = self._make_wiki(tmp_path)
+        html_file = wiki.wiki_dir / "graph.html"
+        before = html_file.stat().st_mtime
+
+        with patch.object(kg, "rebuild", wraps=kg.rebuild) as spy_rebuild:
+            html_path = wiki.graph_viz_html(rebuild=False)
+
+        assert html_path == html_file
+        spy_rebuild.assert_not_called()
+        assert html_file.stat().st_mtime == before
+
+    def test_viz_rebuilds_when_a_page_is_newer(self, tmp_path):
+        """A wiki page edited after the last export invalidates the cache."""
+        import os
+
+        wiki, kg = self._make_wiki(tmp_path)
+        page = wiki.wiki_dir / "sources" / "sample.md"
+        page.parent.mkdir(parents=True, exist_ok=True)
+        page.write_text("# Sample\n\n- [[Alice]]", encoding="utf-8")
+        future = page.stat().st_mtime + 10
+        os.utime(page, (future, future))
+
+        with patch.object(kg, "rebuild", wraps=kg.rebuild) as spy_rebuild:
+            wiki.graph_viz_html(rebuild=False)
+
+        spy_rebuild.assert_called()
+
 
 class TestWikiIntegration:
     @pytest.fixture

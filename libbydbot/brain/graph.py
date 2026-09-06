@@ -575,11 +575,45 @@ class WikiKnowledgeGraph:
 
     # ────────────────────────── visualization ───────────────────────
 
-    def export_html(self, path: str | Path | None = None) -> Path:
-        """Export an interactive pyvis HTML visualization of the graph."""
+    #: Nodes above this degree are most useful in a crowded view; when the
+    #: filtered graph still exceeds max_nodes, only the top-N by degree are
+    #: exported so the browser-side physics simulation stays responsive.
+    DEFAULT_MAX_VIZ_NODES = 1500
+
+    def export_html(
+        self,
+        path: str | Path | None = None,
+        include_chunks: bool = False,
+        max_nodes: int = DEFAULT_MAX_VIZ_NODES,
+    ) -> Path:
+        """Export an interactive pyvis HTML visualization of the graph.
+
+        Chunk nodes (one per embedded document piece) are excluded by
+        default — they dominate the node count and make the browser-side
+        physics simulation slow and memory-hungry. Pass
+        ``include_chunks=True`` for a full view.
+
+        When the graph still exceeds ``max_nodes`` nodes after filtering,
+        only the top-N most connected nodes are exported and the page
+        title notes the truncation.
+        """
         from pyvis.network import Network
 
         out_path = Path(path) if path else self.wiki_dir / "graph.html"
+
+        viz_nodes = [
+            (node, data)
+            for node, data in self.graph.nodes(data=True)
+            if include_chunks or data.get("node_type", "unknown") != "chunk"
+        ]
+        truncated = False
+        if len(viz_nodes) > max_nodes:
+            viz_nodes.sort(
+                key=lambda nd: self.graph.degree(nd[0]), reverse=True
+            )
+            viz_nodes = viz_nodes[:max_nodes]
+            truncated = True
+        viz_node_ids = {node for node, _ in viz_nodes}
 
         net = Network(
             height="900px",
@@ -590,7 +624,15 @@ class WikiKnowledgeGraph:
         )
         net.barnes_hut(gravity=-3000, central_gravity=0.3, spring_length=95)
 
-        for node, data in self.graph.nodes(data=True):
+        total_nodes = self.graph.number_of_nodes()
+        heading = (
+            f"Knowledge graph ({total_nodes:,} nodes total — "
+            f"showing top {len(viz_nodes):,} by connectivity)"
+            if truncated
+            else None
+        )
+
+        for node, data in viz_nodes:
             node_type = data.get("node_type", "unknown")
             degree = self.graph.degree(node)
             net.add_node(
@@ -602,9 +644,26 @@ class WikiKnowledgeGraph:
                 shape="dot" if node_type != "chunk" else "box",
             )
         for u, v, data in self.graph.edges(data=True):
+            if u not in viz_node_ids or v not in viz_node_ids:
+                continue
             edge_type = data.get("edge_type", "links_to")
             net.add_edge(u, v, title=edge_type, color=EDGE_COLORS.get(edge_type, "#9AA1B0"))
 
         net.write_html(str(out_path))
+        if truncated:
+            # Inject the truncation notice into the generated page so the
+            # reader knows the view is a connectivity-ranked subset.
+            try:
+                html = out_path.read_text(encoding="utf-8")
+                notice = (
+                    f'<div style="position:fixed;top:8px;left:50%;transform:'
+                    f'translateX(-50%);background:#1e293b;color:#e2e8f0;'
+                    f'padding:6px 14px;border-radius:6px;font:13px sans-serif;'
+                    f'z-index:10;opacity:.92">{heading}</div>'
+                )
+                html = html.replace("<body>", "<body>" + notice, 1)
+                out_path.write_text(html, encoding="utf-8")
+            except OSError as e:
+                logger.warning(f"Could not annotate truncated graph HTML: {e}")
         logger.info(f"Exported graph visualization -> {out_path}")
         return out_path
