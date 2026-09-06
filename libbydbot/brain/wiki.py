@@ -650,8 +650,20 @@ class WikiManager:
         collection = collection or self.collection_name
         texts = embedder.get_document_texts(collection=collection, doc_name=doc_name)
         if not texts:
-            logger.warning(f"No embedded documents found for '{collection}'")
+            reason = (
+                f"No embedded documents found for collection '{collection}' — "
+                "either the collection has no embeddings, or the embedding "
+                "table holding it is not visible to this Libby build "
+                "(upgrade if the store was migrated across backends)."
+            )
+            logger.warning(
+                f"ingest_from_embeddings: {reason} "
+                f"(tables checked: {embedder.candidate_text_tables()})"
+            )
             return {
+                "success": False,
+                "reason": reason,
+                "tables_checked": embedder.candidate_text_tables(),
                 "collection": collection,
                 "documents_ingested": 0,
                 "pages_touched": 0,

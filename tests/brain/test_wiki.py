@@ -252,6 +252,39 @@ class TestIngest:
         assert (wiki.sources_dir / "alpha_doc.md").exists()
         assert (wiki.sources_dir / "beta_doc.md").exists()
 
+    def test_ingest_from_embeddings_empty_store_is_explicit_failure(self, tmp_path):
+        """An empty/mismatched embedding store must be reported as a failure
+        with a reason — not as a silent successful no-op."""
+        import numpy as np
+        from libbydbot.brain.embed import DocEmbedder
+
+        with patch(
+            "libbydbot.brain.embed.DocEmbedder._generate_embedding"
+        ) as mocked, patch(
+            "libbydbot.brain.embed.DocEmbedder._get_embedding_dimension",
+            return_value=1024,
+        ):
+            mocked.return_value = np.zeros(1024).tolist()
+            db_path = tmp_path / "empty.db"
+            embedder = DocEmbedder(
+                "test_collection",
+                dburl=f"sqlite:///{db_path}",
+                embedding_model="mxbai-embed-large",
+            )
+
+        wiki = WikiManager(
+            collection_name="test_collection",
+            wiki_base=str(tmp_path / "wiki"),
+            model="llama3.2",
+        )
+
+        result = wiki.ingest_from_embeddings(embedder, collection="test_collection")
+
+        assert result["success"] is False
+        assert result["documents_ingested"] == 0
+        assert "test_collection" in result["reason"]
+        assert result["tables_checked"]  # diagnostics for the operator
+
     def test_ingest_updates_entity_page(self, temp_wiki):
         # First ingest
         temp_wiki._generate_source_summary = MagicMock(

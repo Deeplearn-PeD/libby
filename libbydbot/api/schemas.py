@@ -202,6 +202,7 @@ class WikiIngestFromEmbeddingsResponse(BaseModel):
     pages_touched: int = Field(..., description="Number of wiki pages created/updated")
     results: list[WikiIngestResponse] = Field(default_factory=list, description="Per-document ingest results")
     errors: list[dict] = Field(default_factory=list, description="Per-document errors (source + error)")
+    reason: str | None = Field(None, description="Why nothing was ingested (when success is False)")
     message: str = Field(..., description="Status message")
 
 

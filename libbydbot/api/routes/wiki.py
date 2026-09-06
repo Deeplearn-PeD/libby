@@ -117,6 +117,7 @@ def wiki_ingest_from_embeddings(request: WikiIngestFromEmbeddingsRequest):
             doc_name=request.doc_name,
         )
 
+        docs_ingested = result.get("documents_ingested", 0)
         per_doc = [
             WikiIngestResponse(
                 success=True,
@@ -131,15 +132,21 @@ def wiki_ingest_from_embeddings(request: WikiIngestFromEmbeddingsRequest):
         ]
 
         return WikiIngestFromEmbeddingsResponse(
-            success=True,
+            # a run that finds no embedded documents is reported as a
+            # failure (with reason) so callers do not mistake it for a
+            # successful no-op
+            success=docs_ingested > 0,
             collection=result["collection"],
-            documents_ingested=result["documents_ingested"],
-            pages_touched=result["pages_touched"],
+            documents_ingested=docs_ingested,
+            pages_touched=result.get("pages_touched", 0),
             results=per_doc,
             errors=result.get("errors", []),
+            reason=result.get("reason"),
             message=(
-                f"Ingested {result['documents_ingested']} document(s) "
-                f"({result['pages_touched']} pages touched) from embeddings"
+                f"Ingested {docs_ingested} document(s) "
+                f"({result.get('pages_touched', 0)} pages touched) from embeddings"
+                if docs_ingested
+                else result.get("reason", "No embedded documents found")
             ),
         )
     except HTTPException:

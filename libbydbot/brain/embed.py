@@ -1413,6 +1413,10 @@ class DocEmbedder:
         )
         return {}
 
+    def candidate_text_tables(self) -> list[str]:
+        """Public alias of :meth:`_candidate_text_tables` for diagnostics."""
+        return self._candidate_text_tables()
+
     def _candidate_text_tables(self) -> list[str]:
         """Ordered list of tables to try when reading document text.
 
