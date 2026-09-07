@@ -169,6 +169,93 @@ def test_get_document_texts_finds_collection_across_tables(tmp_path):
         assert texts["alpha"] == "alpha from A."
 
 
+def test_get_document_texts_merges_collection_split_across_tables(tmp_path):
+    """Regression (production): a collection whose chunks are split across
+    embedding tables — e.g. a model switch mid-document or a partial
+    migration — must merge rows from EVERY table. The previous
+    first-table-wins read silently dropped chunks stored outside the first
+    matching table, so later collections produced no wiki pages."""
+    db_path = tmp_path / "emb.db"
+
+    # "alpha" page 0 at 1024-dim -> base table.
+    with patch("libbydbot.brain.embed.DocEmbedder._generate_embedding") as mocked, patch(
+        "libbydbot.brain.embed.DocEmbedder._get_embedding_dimension",
+        return_value=1024,
+    ), patch(
+        "libbydbot.brain.embed.DocEmbedder._detect_embedding_model_from_db",
+        return_value=None,
+    ):
+        mocked.return_value = np.zeros(1024).tolist()
+        w = DocEmbedder(
+            "c", dburl=f"sqlite:///{db_path}", embedding_model="mxbai-embed-large"
+        )
+        w.embed_text("alpha page 0.", "alpha", 0)
+
+    # "alpha" page 1 re-embedded at 768-dim -> dim-specific table
+    # (simulates a model switch splitting one document across tables).
+    with patch("libbydbot.brain.embed.DocEmbedder._generate_embedding") as mocked, patch(
+        "libbydbot.brain.embed.DocEmbedder._get_embedding_dimension",
+        return_value=768,
+    ), patch(
+        "libbydbot.brain.embed.DocEmbedder._detect_embedding_model_from_db",
+        return_value=None,
+    ):
+        mocked.return_value = np.zeros(768).tolist()
+        w2 = DocEmbedder(
+            "c", dburl=f"sqlite:///{db_path}", embedding_model="embeddinggemma"
+        )
+        w2.embed_text("alpha page 1.", "alpha", 1)
+
+    reader = DocEmbedder(
+        "c", dburl=f"sqlite:///{db_path}", embedding_model="embeddinggemma"
+    )
+    texts = reader.get_document_texts(collection="c", doc_name="alpha")
+    assert texts["alpha"] == "alpha page 0.\nalpha page 1."
+
+
+def test_get_document_chunks_merges_collection_split_across_tables(tmp_path):
+    """get_document_chunks must also merge across tables, deduplicating by
+    doc_hash (graph chunk nodes come from this method)."""
+    db_path = tmp_path / "emb.db"
+
+    with patch("libbydbot.brain.embed.DocEmbedder._generate_embedding") as mocked, patch(
+        "libbydbot.brain.embed.DocEmbedder._get_embedding_dimension",
+        return_value=1024,
+    ), patch(
+        "libbydbot.brain.embed.DocEmbedder._detect_embedding_model_from_db",
+        return_value=None,
+    ):
+        mocked.return_value = np.zeros(1024).tolist()
+        w = DocEmbedder(
+            "c", dburl=f"sqlite:///{db_path}", embedding_model="mxbai-embed-large"
+        )
+        w.embed_text("alpha chunk A.", "alpha", 0)
+
+    with patch("libbydbot.brain.embed.DocEmbedder._generate_embedding") as mocked, patch(
+        "libbydbot.brain.embed.DocEmbedder._get_embedding_dimension",
+        return_value=768,
+    ), patch(
+        "libbydbot.brain.embed.DocEmbedder._detect_embedding_model_from_db",
+        return_value=None,
+    ):
+        mocked.return_value = np.zeros(768).tolist()
+        w2 = DocEmbedder(
+            "c", dburl=f"sqlite:///{db_path}", embedding_model="embeddinggemma"
+        )
+        w2.embed_text("alpha chunk B.", "alpha", 1)
+
+    reader = DocEmbedder(
+        "c", dburl=f"sqlite:///{db_path}", embedding_model="embeddinggemma"
+    )
+    chunks = reader.get_document_chunks("alpha", collection="c")
+    contents = [c["content"] for c in chunks]
+    assert contents == ["alpha chunk A.", "alpha chunk B."]
+
+    # Re-reading must not duplicate chunks already seen (stable dedupe).
+    again = reader.get_document_chunks("alpha", collection="c")
+    assert [c["doc_hash"] for c in again] == [c["doc_hash"] for c in chunks]
+
+
 @pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL not available")
 def test_embed_text_postgres():
     embedder = DocEmbedder("test_collection", embedding_model='mxbai-embed-large')

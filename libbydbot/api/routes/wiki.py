@@ -156,6 +156,72 @@ def wiki_ingest_from_embeddings(request: WikiIngestFromEmbeddingsRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/ingest-diagnosis/{collection_name}")
+def wiki_ingest_diagnosis(collection_name: str = "main"):
+    """
+    Diagnose why (or whether) a collection can build wiki pages.
+
+    Reports, per embedding table: how many rows of this collection it
+    holds; the document count after cross-table merge; how many wiki
+    pages exist on disk; and the knowledge-graph size. Read-only.
+    """
+    try:
+        from libbydbot.api.main import app_state
+
+        embedder = app_state.embedder
+        if embedder is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Embedder not initialized; cannot read embedding table.",
+            )
+
+        wiki = get_wiki_manager(collection_name)
+        kg = wiki._get_knowledge_graph()
+
+        tables = []
+        docs_by_name: set[str] = set()
+        for tbl in embedder.candidate_text_tables():
+            try:
+                rows = embedder._fetch_doc_rows(tbl, collection_name, "")
+            except Exception as e:
+                tables.append({"table": tbl, "error": str(e)})
+                continue
+            names = {r[0] for r in rows}
+            docs_by_name.update(names)
+            tables.append(
+                {
+                    "table": tbl,
+                    "rows": len(rows),
+                    "documents": len(names),
+                }
+            )
+
+        pages_on_disk = [
+            str(p.relative_to(wiki.wiki_dir))
+            for p in wiki.wiki_dir.rglob("*.md")
+            if p.name not in ("index.md", "log.md")
+        ]
+
+        return {
+            "collection": collection_name,
+            "embedding_tables": tables,
+            "merged_documents": len(docs_by_name),
+            "document_names": sorted(docs_by_name),
+            "wiki_dir": str(wiki.wiki_dir),
+            "wiki_pages_on_disk": len(pages_on_disk),
+            "wiki_pages": sorted(pages_on_disk),
+            "graph": {
+                "nodes": kg.graph.number_of_nodes(),
+                "edges": kg.graph.number_of_edges(),
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error diagnosing wiki ingest for '{collection_name}': {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/consolidate", response_model=WikiConsolidateResponse)
 def wiki_consolidate(request: WikiConsolidateRequest):
     """

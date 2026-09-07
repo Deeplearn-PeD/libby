@@ -1378,16 +1378,20 @@ class DocEmbedder:
         ordered by ``page_number``. Optionally filtered by *collection* and/or
         *doc_name*.
 
-        Robust to multi-table stores: it tries the active table first, then
-        falls back to every other data table, returning the rows from the
-        first table that actually holds the requested collection. This matters
-        when vectors of different dimensions live in different tables (e.g. a
-        base table plus dimension-specific tables) — the "active" table may
-        hold a *different* collection, so naively reading it would silently
-        return nothing.
+        Robust to multi-table stores: rows are read from EVERY data table
+        holding the collection and merged, deduplicating by
+        ``(doc_name, page_number)``. This matters when a collection's chunks
+        are split across tables (partial backend migrations, re-embeddings
+        under different models creating dimension-specific tables) — the
+        previous first-table-wins read silently dropped every chunk that
+        lived outside the first matching table.
         """
         collection = collection or self.collection_name
         candidates = self._candidate_text_tables()
+        docs: dict[str, list[tuple[int, str]]] = {}
+        seen: set[tuple[str, int]] = set()
+        tables_used: list[str] = []
+
         for tbl in candidates:
             try:
                 rows = self._fetch_doc_rows(tbl, collection, doc_name)
@@ -1398,20 +1402,37 @@ class DocEmbedder:
                 continue
             if not rows:
                 continue
-            docs: dict[str, list[str]] = {}
-            for name, _page, document in rows:
-                docs.setdefault(name, []).append(document or "")
-            logger.info(
-                f"get_document_texts: read {len(rows)} row(s) for "
-                f"'{collection}' from table '{tbl}'"
-            )
-            return {name: "\n".join(parts) for name, parts in docs.items()}
+            tables_used.append(tbl)
+            new_rows = 0
+            for name, page, document in rows:
+                key = (name, page)
+                if key in seen:
+                    continue  # same chunk already read from another table
+                seen.add(key)
+                docs.setdefault(name, []).append((page, document or ""))
+                new_rows += 1
+            if new_rows:
+                logger.info(
+                    f"get_document_texts: read {new_rows} new row(s) for "
+                    f"'{collection}' from table '{tbl}'"
+                )
 
-        logger.warning(
-            f"get_document_texts: no rows for collection '{collection}' "
-            f"(tried tables {candidates})"
+        if not docs:
+            logger.warning(
+                f"get_document_texts: no rows for collection '{collection}' "
+                f"(tried tables {candidates})"
+            )
+            return {}
+
+        merged = {
+            name: "\n".join(text for _, text in sorted(parts, key=lambda t: t[0]))
+            for name, parts in docs.items()
+        }
+        logger.info(
+            f"get_document_texts: {len(merged)} document(s) for '{collection}' "
+            f"from tables {tables_used}"
         )
-        return {}
+        return merged
 
     def candidate_text_tables(self) -> list[str]:
         """Public alias of :meth:`_candidate_text_tables` for diagnostics."""
@@ -1491,28 +1512,31 @@ class DocEmbedder:
         """
         Get all embedded chunks of a document, ordered by page/chunk number.
 
-        Robust to multi-table stores (a base table plus dimension-specific
-        tables): it tries the active table first, then falls back to every
-        other data table, returning the rows from the first table that
-        actually holds the requested document. This mirrors
-        :meth:`get_document_texts`.
+        Robust to multi-table stores: rows are read from EVERY data table
+        holding the document and merged, deduplicating by ``doc_hash``
+        (mirrors :meth:`get_document_texts`).
 
         :param doc_name: name of the document
         :param collection: optional collection filter
         :return: list of dicts with doc_hash, doc_name, page_number, content
         """
+        chunks_by_hash: dict[str, dict] = {}
         for tbl in self._candidate_text_tables():
             try:
                 rows = self._fetch_chunk_rows(tbl, doc_name, collection)
             except Exception as e:
                 logger.debug(f"get_document_chunks: skipping table '{tbl}': {e}")
                 continue
-            if rows:
-                return [
-                    {"doc_hash": r[0], "doc_name": r[1], "page_number": r[2], "content": r[3]}
-                    for r in rows
-                ]
-        return []
+            for doc_hash, name, page, content in rows:
+                if doc_hash and doc_hash in chunks_by_hash:
+                    continue
+                chunks_by_hash[doc_hash or f"{name}:{page}"] = {
+                    "doc_hash": doc_hash,
+                    "doc_name": name,
+                    "page_number": page,
+                    "content": content,
+                }
+        return sorted(chunks_by_hash.values(), key=lambda c: c["page_number"])
 
     def _fetch_chunk_rows(
         self, tbl: str, doc_name: str, collection: str

@@ -9,6 +9,7 @@ can be created successfully.
 import os
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -818,3 +819,61 @@ class TestGraphVizEndpoint:
             forced = client.get("/api/wiki/graph/vizcoll/viz?rebuild=true")
             assert forced.status_code == 200
             assert html.stat().st_mtime > first_mtime  # regenerated
+
+
+class TestIngestDiagnosisEndpoint:
+    """GET /api/wiki/ingest-diagnosis/{collection}: per-table row counts,
+    merged doc names, wiki pages on disk and graph size — read-only."""
+
+    def test_diagnosis_reports_tables_docs_and_graph(self, tmp_path, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        from libbydbot.api.main import create_app
+        import numpy as np
+
+        # seed a small wiki (same layout as TestGraphVizEndpoint._seed_wiki)
+        wiki = tmp_path / "vizcoll"
+        for sub in ("sources", "entities", "concepts", "synthesis"):
+            (wiki / sub).mkdir(parents=True)
+        (wiki / "sources" / "doc_a.md").write_text(
+            "---\ntitle: Doc A\n---\n\n# Doc A\n", encoding="utf-8"
+        )
+        (wiki / "entities" / "alice.md").write_text(
+            "---\ntitle: Alice\n---\n\n# Alice\n", encoding="utf-8"
+        )
+        monkeypatch.setenv("WIKI_BASE_PATH", str(tmp_path))
+        monkeypatch.setenv("EMBED_DB", f"sqlite:///{tmp_path / 'embed.db'}")
+
+        # embed two docs into the collection so the diagnosis has rows
+        with patch(
+            "libbydbot.brain.embed.DocEmbedder._generate_embedding"
+        ) as mocked, patch(
+            "libbydbot.brain.embed.DocEmbedder._get_embedding_dimension",
+            return_value=1024,
+        ), patch(
+            "libbydbot.brain.embed.DocEmbedder._detect_embedding_model_from_db",
+            return_value=None,
+        ):
+            mocked.return_value = np.zeros(1024).tolist()
+            from libbydbot.brain.embed import DocEmbedder
+
+            w = DocEmbedder(
+                "vizcoll",
+                dburl=f"sqlite:///{tmp_path / 'embed.db'}",
+                embedding_model="mxbai-embed-large",
+            )
+            w.embed_text("doc a text.", "doc_a", 0)
+            w.embed_text("doc b text.", "doc_b", 0)
+
+        with TestClient(create_app()) as client:
+            response = client.get("/api/wiki/ingest-diagnosis/vizcoll")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["collection"] == "vizcoll"
+        assert body["merged_documents"] == 2
+        assert set(body["document_names"]) == {"doc_a", "doc_b"}
+        assert body["wiki_pages_on_disk"] >= 2
+        assert "graph" in body and "nodes" in body["graph"]
+        assert isinstance(body["embedding_tables"], list)
+        assert any(t.get("rows", 0) > 0 for t in body["embedding_tables"])
