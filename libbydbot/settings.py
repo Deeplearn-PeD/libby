@@ -6,6 +6,18 @@ from pydantic import Field, PostgresDsn
 from typing import Dict, List, Any
 
 
+def _default_wiki_base_path() -> str:
+    """Prefer the persistent /data volume in container deployments.
+
+    The default home-directory path lives inside the container filesystem,
+    which is wiped on every image rebuild — losing all wiki pages and
+    knowledge graphs. Standard deployments mount a volume at /data.
+    """
+    if Path("/data").is_dir():
+        return "/data/wikis"
+    return str(Path.home() / ".libby" / "wikis")
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", extra="allow"
@@ -32,8 +44,12 @@ class Settings(BaseSettings):
     }
 
     wiki_base_path: str = Field(
-        default_factory=lambda: str(Path.home() / ".libby" / "wikis"),
-        description="Base directory for LLM wikis",
+        default_factory=lambda: _default_wiki_base_path(),
+        description=(
+            "Base directory for LLM wikis. Defaults to /data/wikis when a "
+            "/data volume exists (container deployments) so wikis survive "
+            "container recreation; otherwise ~/.libby/wikis."
+        ),
     )
 
     wiki_auto_ingest: bool = Field(
