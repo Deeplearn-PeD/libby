@@ -20,6 +20,7 @@ from typing import Any
 import loguru
 import yaml
 
+from libbydbot.brain.graph import is_shell_html
 from libbydbot.brain.wiki_models import (
     LintReport,
     SourceSummary,
@@ -444,6 +445,15 @@ class WikiManager:
             cursor, limit, include_chunks=include_chunks
         )
 
+    def graph_neighbors_html(
+        self, name: str, depth: int = 1, include_chunks: bool = False
+    ) -> dict:
+        """Render the ego-centered neighborhood page for a node."""
+        kg = self._get_knowledge_graph()
+        if kg.graph.number_of_nodes() == 0:
+            kg.rebuild()
+        return kg.neighbors_html(name, depth=depth, include_chunks=include_chunks)
+
     def flush_graph_updates(self) -> dict:
         """Apply queued ingest updates and rebuild synchronously.
 
@@ -475,7 +485,9 @@ class WikiManager:
         kg = self._get_knowledge_graph()
         html_path = kg.wiki_dir / "graph.html"
 
-        if not html_path.exists():
+        if not html_path.exists() or not is_shell_html(html_path):
+            # missing, or a legacy pyvis export from before the shell viz:
+            # export the shell synchronously (fast — no full rebuild needed)
             if kg.graph.number_of_nodes() == 0:
                 kg.rebuild()
             kg.export_shell()

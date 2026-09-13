@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse
 from loguru import logger
 
 from libbydbot.brain import wiki as wiki_brain
@@ -523,6 +523,35 @@ def wiki_graph_viz(
     except Exception as e:
         logger.error(f"Error serving wiki graph visualization: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/graph/{collection_name}/neighbors")
+def wiki_graph_neighbors(
+    collection_name: str = "main",
+    node: str = Query(..., description="Page/node name to center the view on"),
+    depth: int = Query(1, ge=1, le=2, description="Neighborhood radius"),
+    include_chunks: bool = Query(False, description="Include chunk nodes"),
+):
+    """
+    Serve a small ego-centered visualization page for one node.
+
+    The selected page sits at the center, the camera zooms to it, and only
+    ``depth`` hops of neighbors are included — instant rendering regardless
+    of the collection's graph size.
+    """
+    try:
+        wiki = get_wiki_manager(collection_name)
+        result = wiki.graph_neighbors_html(
+            node, depth=depth, include_chunks=include_chunks
+        )
+    except Exception as e:
+        logger.error(f"Error serving wiki graph neighbors: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    if not result.get("found"):
+        raise HTTPException(
+            status_code=404, detail=result.get("error", "Node not found")
+        )
+    return HTMLResponse(result["html"])
 
 
 @router.get("/graph/{collection_name}/data")

@@ -915,6 +915,86 @@ class TestGraphDataEndpoint:
         assert response.status_code == 404
 
 
+class TestGraphNeighborsEndpoint:
+    """Integration tests for the ego-centered neighbors viz endpoint."""
+
+    def _seed_wiki(self, wiki_base: Path, collection: str = "vizcoll"):
+        wiki = wiki_base / collection
+        for sub in ("sources", "entities", "concepts", "synthesis"):
+            (wiki / sub).mkdir(parents=True, exist_ok=True)
+        (wiki / "sources" / "doc_a.md").write_text(
+            "---\ntitle: Doc A\n---\n\n# Doc A\n\nAbout [[Alice]].\n",
+            encoding="utf-8",
+        )
+        (wiki / "entities" / "alice.md").write_text(
+            "---\ntitle: Alice\n---\n\n# Alice\n\nIn [[doc_a|Doc A]].\n",
+            encoding="utf-8",
+        )
+
+    def test_neighbors_serves_zoomed_ego_page(self, tmp_path, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        from libbydbot.api.main import create_app
+
+        self._seed_wiki(tmp_path)
+        monkeypatch.setenv("WIKI_BASE_PATH", str(tmp_path))
+        monkeypatch.setenv("EMBED_DB", f"sqlite:///{tmp_path / 'embed.db'}")
+
+        with TestClient(create_app()) as client:
+            response = client.get("/api/wiki/graph/vizcoll/neighbors?node=Alice")
+
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/html")
+        assert "__GRAPH_BOOT__" in response.text
+        assert "focusNode" in response.text
+        assert "network.focus(" in response.text
+        assert "Neighborhood of" in response.text
+
+    def test_neighbors_unknown_node_404(self, tmp_path, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        from libbydbot.api.main import create_app
+
+        self._seed_wiki(tmp_path)
+        monkeypatch.setenv("WIKI_BASE_PATH", str(tmp_path))
+        monkeypatch.setenv("EMBED_DB", f"sqlite:///{tmp_path / 'embed.db'}")
+
+        with TestClient(create_app()) as client:
+            response = client.get("/api/wiki/graph/vizcoll/neighbors?node=Ghost")
+
+        assert response.status_code == 404
+
+    def test_viz_migrates_legacy_pyvis_html(self, tmp_path, monkeypatch):
+        """A pre-shell pyvis graph.html on disk is replaced by a shell."""
+        import os
+        import time
+
+        from fastapi.testclient import TestClient
+
+        from libbydbot.api.main import create_app
+
+        self._seed_wiki(tmp_path)
+        monkeypatch.setenv("WIKI_BASE_PATH", str(tmp_path))
+        monkeypatch.setenv("EMBED_DB", f"sqlite:///{tmp_path / 'embed.db'}")
+
+        html = tmp_path / "vizcoll" / "graph.html"
+        html.write_text(
+            "<html><script>function neighbourhoodHighlight(){}</script>"
+            + "x" * 200000
+            + "</html>",
+            encoding="utf-8",
+        )
+        future = time.time() + 60
+        os.utime(html, (future, future))
+
+        with TestClient(create_app()) as client:
+            response = client.get("/api/wiki/graph/vizcoll/viz")
+
+        assert response.status_code == 200
+        assert "__GRAPH_BOOT__" in response.text
+        assert "neighbourhoodHighlight" not in response.text
+
+
 class TestIngestDiagnosisEndpoint:
     """GET /api/wiki/ingest-diagnosis/{collection}: per-table row counts,
     merged doc names, wiki pages on disk and graph size — read-only."""

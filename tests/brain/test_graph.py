@@ -288,7 +288,7 @@ class TestVizCache:
 
         wiki = WikiManager(collection_name="c", wiki_base=str(tmp_path), model="llama3.2")
         kg = wiki._get_knowledge_graph().rebuild()
-        kg.export_html()
+        kg.export_shell()
         return wiki, kg
 
     def test_viz_serves_cached_html_without_rebuild(self, tmp_path):
@@ -528,6 +528,82 @@ class TestIncrementalViz:
         assert status["total_nodes"] > 0
         kg = wiki._get_knowledge_graph()
         assert "sources/doc_b.md" in kg.graph
+
+
+class TestShellMigration:
+    def test_non_shell_html_is_replaced_in_place(self, tmp_path):
+        """A legacy pyvis graph.html that looks 'fresh' (newer mtime) must be
+        replaced by an incremental shell on the next view — this is what
+        pre-shell deployments still have on disk."""
+        import os
+
+        from libbydbot.brain.graph import is_shell_html
+        from libbydbot.brain.wiki import WikiManager
+
+        wiki = WikiManager(collection_name="migt", wiki_base=str(tmp_path), model="llama3.2")
+        for sub in ("sources", "entities", "concepts", "synthesis"):
+            (wiki.wiki_dir / sub).mkdir(parents=True, exist_ok=True)
+        (wiki.wiki_dir / "sources" / "doc_a.md").write_text(
+            "---\ntitle: Doc A\n---\n\n# Doc A\n\nAbout [[Alice]].\n",
+            encoding="utf-8",
+        )
+        wiki._get_knowledge_graph().rebuild()
+        html_file = wiki.wiki_dir / "graph.html"
+        html_file.write_text(
+            "<html><script>function neighbourhoodHighlight(){}</script>"
+            + "x" * 200000
+            + "</html>",
+            encoding="utf-8",
+        )
+        future = time.time() + 60
+        os.utime(html_file, (future, future))
+        assert not is_shell_html(html_file)
+
+        result = wiki.graph_viz_html()
+
+        assert result["path"] == html_file
+        assert is_shell_html(html_file)
+        assert "neighbourhoodHighlight" not in html_file.read_text(encoding="utf-8")
+
+
+class TestNeighborsView:
+    """Ego-centered, zoomed-to-selection neighborhood pages."""
+
+    def test_neighbors_found_focused_on_center(self, kg):
+        out = kg.neighbors_html("Alice")
+        assert out["found"]
+        assert out["center"] == "entities/alice.md"
+        html = out["html"]
+        assert "network.focus(" in html
+        assert '"focusNode": "entities/alice.md"' in html
+        assert '"initialNodes"' in html
+
+    def test_neighbors_center_at_origin(self, kg):
+        import json
+        import re
+
+        html = kg.neighbors_html("Alice")["html"]
+        boot = json.loads(
+            re.search(
+                r"window\.__GRAPH_BOOT__ = (.*?);\n", html, re.S
+            ).group(1).replace("<\\/", "</")
+        )
+        center = next(
+            n for n in boot["initialNodes"] if n["id"] == "entities/alice.md"
+        )
+        assert center["x"] == 0.0 and center["y"] == 0.0
+
+    def test_neighbors_missing_node(self, kg):
+        out = kg.neighbors_html("Nobody")
+        assert not out["found"]
+        assert "Nobody" in out["error"]
+
+    def test_neighbors_exclude_chunks_by_default(self, kg):
+        kg.add_chunks(
+            [{"doc_hash": "h1", "doc_name": "Doc A", "page_number": 0}]
+        )
+        html = kg.neighbors_html("Alice")["html"]
+        assert "chunk:h1" not in html
 
 
 class TestWikiIntegration:

@@ -87,6 +87,36 @@ _VIZ_COORD_RANGE = 1000.0
 VIZ_LIB_URL = "/api/v1/kb/graph-lib/vis-network.min.js"
 
 
+def is_shell_html(path: Path) -> bool:
+    """True when *path* is an incremental shell page (not a legacy pyvis export).
+
+    Deployments upgraded from the pyvis viz keep the old self-contained
+    graph.html on disk; its mtime can look fresh, so callers must check the
+    content marker before trusting the cache.
+    """
+    try:
+        if path.stat().st_size > 2_000_000:
+            return False
+        return b"__GRAPH_BOOT__" in path.read_bytes()
+    except OSError:
+        return False
+
+
+def render_shell_html(
+    boot: dict,
+    notice_html: str = "",
+    title: str = "Knowledge graph",
+) -> str:
+    """Render the shell page for a given boot payload."""
+    boot_json = json.dumps(boot, ensure_ascii=False).replace("</", "<\\/")
+    return _SHELL_TEMPLATE.format(
+        title=title,
+        notice_js=notice_html,
+        lib_url=VIZ_LIB_URL,
+        boot=boot_json,
+    )
+
+
 class WikiKnowledgeGraph:
     """
     Knowledge graph over a single collection's wiki and embedded chunks.
@@ -900,7 +930,6 @@ class WikiKnowledgeGraph:
             "initialNodes": inline,
             "initialEdges": inline_edges,
         }
-        boot_json = json.dumps(boot, ensure_ascii=False).replace("</", "<\\/")
 
         notice = (
             f"Knowledge graph ({total_nodes:,} nodes total — showing top "
@@ -909,11 +938,10 @@ class WikiKnowledgeGraph:
             else ""
         )
         notice_html = f'<div class="kg-notice">{notice}</div>' if notice else ""
-        html = _SHELL_TEMPLATE.format(
+        html = render_shell_html(
+            boot,
+            notice_html=notice_html,
             title=f"Knowledge graph — {self.collection_name}",
-            notice_js=notice_html,
-            lib_url=VIZ_LIB_URL,
-            boot=boot_json,
         )
         _atomic_write_text(out_path, html)
         logger.info(
@@ -921,6 +949,109 @@ class WikiKnowledgeGraph:
             f"{total_nodes} total) -> {out_path}"
         )
         return out_path
+
+    def neighbors_html(
+        self,
+        name: str,
+        depth: int = 1,
+        include_chunks: bool = False,
+        max_nodes: int = DEFAULT_MAX_VIZ_NODES,
+    ) -> dict[str, Any]:
+        """
+        Render a small page with the ego-centered neighborhood of *name*.
+
+        The center node sits at the origin, the camera is focused on it, and
+        only one hop of neighbors (by default) is included, so the page
+        renders instantly regardless of the collection's graph size.
+
+        Returns ``{"found": True, "center", "title", "html"}`` or
+        ``{"found": False, "error"}``.
+        """
+        center = self._resolve_fuzzy(name)
+        if center is None:
+            return {"found": False, "error": f"Node not found: {name}"}
+
+        selected = {center}
+        frontier = {center}
+        for _ in range(max(1, min(int(depth), 2))):
+            nxt: set[str] = set()
+            for node in frontier:
+                nxt.update(self.graph.successors(node))
+                nxt.update(self.graph.predecessors(node))
+            frontier = nxt - selected
+            selected |= frontier
+        selected = {
+            node
+            for node in selected
+            if include_chunks
+            or self.graph.nodes[node].get("node_type", "unknown") != "chunk"
+        }
+
+        # center plus the most connected neighbors, capped for readability
+        others = sorted(
+            (node for node in selected if node != center),
+            key=lambda n: (-self.graph.degree(n), n),
+        )[: max(0, int(max_nodes) - 1)]
+        ids = [center] + others
+        id_set = set(ids)
+
+        sub = self.graph.subgraph(ids)
+        positions: dict[str, tuple[float, float]] = {}
+        if len(ids) > 1:
+            pos = nx.spring_layout(sub, seed=42, iterations=50)
+            cx, cy = pos[center]
+            scale = max(
+                (max(abs(px - cx), abs(py - cy)) for px, py in pos.values()),
+                default=1.0,
+            ) or 1.0
+            positions = {
+                node: (
+                    (px - cx) / scale * _VIZ_COORD_RANGE,
+                    (py - cy) / scale * _VIZ_COORD_RANGE,
+                )
+                for node, (px, py) in pos.items()
+            }
+
+        nodes = [
+            self._viz_node_dict(
+                node,
+                self.graph.degree(node),
+                positions.get(node, (0.0, 0.0))[0],
+                positions.get(node, (0.0, 0.0))[1],
+            )
+            for node in ids
+        ]
+        edges = []
+        for u, v, data in self.graph.edges(data=True):
+            if u in id_set and v in id_set:
+                edge_type = data.get("edge_type", "links_to")
+                edges.append({
+                    "id": f"{u}=>{v}", "from": u, "to": v,
+                    "title": edge_type,
+                    "color": EDGE_COLORS.get(edge_type, "#9AA1B0"),
+                })
+
+        title = self.graph.nodes[center].get("title", center)
+        boot = {
+            "collection": self.collection_name,
+            "snapshotId": self.snapshot_id,
+            "totalNodes": len(ids),
+            "totalEdges": len(edges),
+            "vizNodes": len(ids),
+            "truncated": False,
+            "initialNodes": nodes,
+            "initialEdges": edges,
+            # zoom in on the selected page
+            "focusNode": center,
+            "focusScale": 1,
+        }
+        notice = f'Neighborhood of "{title}" ({len(ids)} nodes)'
+        html = render_shell_html(
+            boot,
+            notice_html=f'<div class="kg-notice">{notice}</div>',
+            title=f"{title} — knowledge graph",
+        )
+        return {"found": True, "center": center, "title": title, "html": html}
 
 
 _SHELL_TEMPLATE = """<!DOCTYPE html>
@@ -958,6 +1089,12 @@ window.__GRAPH_BOOT__ = {boot};
       edges: {{ arrows: {{ to: {{ enabled: true, scaleFactor: 0.4 }} }} }}
     }}
   );
+  if (boot.focusNode) {{
+    network.focus(boot.focusNode, {{
+      scale: boot.focusScale || 1,
+      offset: {{ x: 0, y: 0 }}
+    }});
+  }}
   window.__GRAPH_API__ = {{
     snapshotId: boot.snapshotId,
     network: network,
