@@ -1,4 +1,5 @@
 import tempfile
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -297,14 +298,16 @@ class TestVizCache:
         before = html_file.stat().st_mtime
 
         with patch.object(kg, "rebuild", wraps=kg.rebuild) as spy_rebuild:
-            html_path = wiki.graph_viz_html(rebuild=False)
+            result = wiki.graph_viz_html(rebuild=False)
 
-        assert html_path == html_file
+        assert result["path"] == html_file
+        assert result["rebuilding"] is False
         spy_rebuild.assert_not_called()
         assert html_file.stat().st_mtime == before
 
-    def test_viz_rebuilds_when_a_page_is_newer(self, tmp_path):
-        """A wiki page edited after the last export invalidates the cache."""
+    def test_viz_stale_schedules_background_rebuild_and_serves_old_html(self, tmp_path):
+        """A wiki page edited after the last export schedules a background
+        rebuild but keeps serving the previous shell (stale-while-revalidate)."""
         import os
 
         wiki, kg = self._make_wiki(tmp_path)
@@ -313,11 +316,218 @@ class TestVizCache:
         page.write_text("# Sample\n\n- [[Alice]]", encoding="utf-8")
         future = page.stat().st_mtime + 10
         os.utime(page, (future, future))
+        html_file = wiki.wiki_dir / "graph.html"
+        before = html_file.stat().st_mtime
 
-        with patch.object(kg, "rebuild", wraps=kg.rebuild) as spy_rebuild:
-            wiki.graph_viz_html(rebuild=False)
+        with patch(
+            "libbydbot.brain.wiki.schedule_graph_rebuild", return_value=True
+        ) as spy_schedule:
+            result = wiki.graph_viz_html(rebuild=False)
 
-        spy_rebuild.assert_called()
+        spy_schedule.assert_called_once_with(wiki.wiki_dir, wiki.collection_name)
+        assert result["path"] == html_file
+        # previous shell is still served while the rebuild runs
+        assert html_file.stat().st_mtime == before
+
+    def test_viz_rebuild_true_marks_dirty_and_schedules(self, tmp_path):
+        """?rebuild=true forces an async rebuild of the current snapshot."""
+        wiki, kg = self._make_wiki(tmp_path)
+
+        with patch(
+            "libbydbot.brain.wiki.schedule_graph_rebuild", return_value=True
+        ) as spy_schedule:
+            result = wiki.graph_viz_html(rebuild=True)
+
+        spy_schedule.assert_called_once()
+        from libbydbot.brain.wiki import _graph_entry
+
+        assert _graph_entry(wiki.wiki_dir).dirty is True
+        assert result["path"] == (wiki.wiki_dir / "graph.html")
+
+
+class TestGraphCache:
+    """Shared per-collection graph cache: reuse, invalidation, single-flight."""
+
+    def test_cached_kg_reused_while_graph_json_unchanged(self, tmp_path):
+        from libbydbot.brain.wiki import get_cached_kg
+
+        kg1 = get_cached_kg(tmp_path, "c")
+        kg2 = get_cached_kg(tmp_path, "c")
+        assert kg1 is kg2
+
+    def test_cached_kg_reloads_after_external_change(self, tmp_path):
+        """When another process rewrites graph.json the next read reloads."""
+        import os
+        import time
+
+        from libbydbot.brain.wiki import get_cached_kg
+
+        kg1 = get_cached_kg(tmp_path, "c")
+        # simulate an external rebuild writing a new graph.json
+        time.sleep(0.01)
+        kg1.rebuild()
+        os.utime(kg1.graph_path, ns=(time.time_ns() + 10**7, time.time_ns() + 10**7))
+        kg2 = get_cached_kg(tmp_path, "c")
+        assert kg2 is not kg1
+
+    def test_single_flight_schedule(self, tmp_path):
+        """Scheduling while a rebuild is in flight records dirty and does
+        not start a second worker."""
+        from libbydbot.brain import wiki as wiki_mod
+
+        entry = wiki_mod._graph_entry(tmp_path)
+        entry.rebuilding = True
+        try:
+            with patch.object(wiki_mod.threading, "Thread") as mock_thread:
+                assert wiki_mod.schedule_graph_rebuild(tmp_path, "c") is False
+                mock_thread.assert_not_called()
+            assert entry.dirty is True
+        finally:
+            entry.rebuilding = False
+            entry.dirty = False
+
+    def test_rebuild_worker_applies_pending_ingests(self, tmp_path):
+        """Queued ingest updates are applied to the graph by the rebuild."""
+        from libbydbot.brain import wiki as wiki_mod
+        from libbydbot.brain.wiki import run_graph_rebuild
+
+        for sub in ("sources", "entities", "concepts", "synthesis"):
+            (tmp_path / sub).mkdir(parents=True, exist_ok=True)
+        (tmp_path / "sources" / "doc_a.md").write_text(
+            "---\ntitle: Doc A\n---\n\n# Doc A\n\nAbout [[Alice]].\n",
+            encoding="utf-8",
+        )
+        summary = SourceSummary(
+            title="Doc B",
+            summary="s",
+            key_takeaways=[],
+            entities=[
+                KeyEntity(name="Carol", entity_type="person", description="d",
+                          related_entities=[])
+            ],
+            concepts=[],
+            contradictions=[],
+            questions_raised=[],
+        )
+        entry = wiki_mod._graph_entry(tmp_path)
+        with entry.lock:
+            entry.pending.append(("Doc B", summary, []))
+        # WikiManager writes the pages before queueing the graph update
+        (tmp_path / "sources" / "doc_b.md").write_text(
+            "---\ntitle: Doc B\n---\n\n# Doc B\n\n[[Carol]]\n", encoding="utf-8"
+        )
+        (tmp_path / "entities" / "carol.md").write_text(
+            "---\ntitle: Carol\n---\n\n# Carol\n", encoding="utf-8"
+        )
+        kg = run_graph_rebuild(tmp_path, "c")
+        assert "sources/doc_b.md" in kg.graph
+        assert kg.resolve_node("Carol") is not None
+        assert not entry.pending
+
+    def test_rebuilding_flag_lifecycle(self, tmp_path):
+        """The entry flag is only True while a worker is running."""
+        from libbydbot.brain import wiki as wiki_mod
+
+        for sub in ("sources", "entities", "concepts", "synthesis"):
+            (tmp_path / sub).mkdir(parents=True, exist_ok=True)
+        (tmp_path / "sources" / "doc_a.md").write_text(
+            "---\ntitle: Doc A\n---\n\n# Doc A\n", encoding="utf-8"
+        )
+        assert wiki_mod.graph_rebuilding(tmp_path) is False
+        assert wiki_mod.schedule_graph_rebuild(tmp_path, "c") is True
+        deadline = time.time() + 10
+        while wiki_mod.graph_rebuilding(tmp_path) and time.time() < deadline:
+            time.sleep(0.05)
+        assert wiki_mod.graph_rebuilding(tmp_path) is False
+        assert (tmp_path / "graph.html").exists()
+
+
+class TestIncrementalViz:
+    """Shell export + batched data pages for the incremental visualization."""
+
+    def test_shell_contains_boot_api_and_lib(self, kg):
+        html = kg.export_shell().read_text(encoding="utf-8")
+        assert "window.__GRAPH_BOOT__" in html
+        assert "appendBatch" in html
+        assert "__GRAPH_READY__" in html
+        assert "/api/v1/kb/graph-lib/vis-network.min.js" in html
+        # physics are disabled: positions are precomputed server-side
+        assert "physics" in html
+
+    def test_batch_walk_delivers_every_node_once(self, kg):
+        delivered, seen_edges, snapshot = [], set(), None
+        cursor, pages = 0, 0
+        while True:
+            page = kg.viz_data_page(cursor, limit=2)
+            if snapshot is None:
+                snapshot = page["snapshot_id"]
+            assert page["snapshot_id"] == snapshot
+            delivered += [n["id"] for n in page["nodes"]]
+            ids = set(delivered)
+            for edge in page["edges"]:
+                assert edge["from"] in ids and edge["to"] in ids
+                seen_edges.add(edge["id"])
+            pages += 1
+            if page["complete"]:
+                break
+            cursor = page["next_cursor"]
+        assert pages > 1
+        assert len(delivered) == len(set(delivered))
+        assert len(seen_edges) == kg.graph.number_of_edges()
+
+    def test_batch_positions_present(self, kg):
+        page = kg.viz_data_page(0, limit=10)
+        assert all("x" in n and "y" in n for n in page["nodes"])
+
+    def test_batch_excludes_chunks_by_default(self, kg):
+        kg.add_chunks(
+            [{"doc_hash": "h1", "doc_name": "Doc A", "page_number": 0}]
+        )
+        page = kg.viz_data_page(0, limit=1000, include_chunks=False)
+        assert all(not n["id"].startswith("chunk:") for n in page["nodes"])
+        full = kg.viz_data_page(0, limit=1000, include_chunks=True)
+        assert any(n["id"] == "chunk:h1" for n in full["nodes"])
+
+    def test_batch_limit_clamped(self, kg):
+        page = kg.viz_data_page(0, limit=5000)
+        assert page["complete"]
+        assert page["next_cursor"] is None
+
+    def test_small_graph_shell_has_no_truncation_notice(self, kg):
+        """A graph that fits under max_nodes exports a shell without notice."""
+        html = kg.export_shell().read_text(encoding="utf-8")
+        assert '<div class="kg-notice">' not in html
+
+    def test_flush_graph_updates_drains_pending(self, tmp_path):
+        """WikiManager.flush_graph_updates applies queued ingests synchronously."""
+        from libbydbot.brain.wiki import WikiManager
+
+        wiki = WikiManager(collection_name="flushc", wiki_base=str(tmp_path), model="llama3.2")
+        for sub in ("sources", "entities", "concepts", "synthesis"):
+            (wiki.wiki_dir / sub).mkdir(parents=True, exist_ok=True)
+        (wiki.wiki_dir / "sources" / "doc_a.md").write_text(
+            "---\ntitle: Doc A\n---\n\n# Doc A\n\nAbout [[Alice]].\n",
+            encoding="utf-8",
+        )
+        summary = SourceSummary(
+            title="Doc B", summary="s", key_takeaways=[],
+            entities=[KeyEntity(name="Carol", entity_type="person",
+                                description="d", related_entities=[])],
+            concepts=[], contradictions=[], questions_raised=[],
+        )
+        with patch.object(wiki, "_fetch_document_chunks", return_value=[]):
+            wiki._update_knowledge_graph("Doc B", summary, "content")
+        # ingest writes pages before queueing the graph update
+        (wiki.wiki_dir / "sources" / "doc_b.md").write_text(
+            "---\ntitle: Doc B\n---\n\n# Doc B\n\n[[Carol]]\n", encoding="utf-8"
+        )
+        (wiki.wiki_dir / "entities" / "carol.md").write_text(
+            "---\ntitle: Carol\n---\n\n# Carol\n", encoding="utf-8"
+        )
+        status = wiki.flush_graph_updates()
+        assert status["total_nodes"] > 0
+        kg = wiki._get_knowledge_graph()
+        assert "sources/doc_b.md" in kg.graph
 
 
 class TestWikiIntegration:
@@ -331,7 +541,14 @@ class TestWikiIntegration:
                 graph_enabled=True,
             )
             wiki._llm = MagicMock()
-            yield wiki
+            # keep graph updates deterministic: ingest queues the update and
+            # tests flush it explicitly instead of relying on the worker thread
+            with patch("libbydbot.brain.wiki.schedule_graph_rebuild", return_value=True):
+                yield wiki
+
+    @staticmethod
+    def _flush(wiki):
+        return wiki.flush_graph_updates()
 
     def _mock_ingest(self, wiki):
         wiki._generate_source_summary = MagicMock(return_value=make_summary())
@@ -349,6 +566,7 @@ class TestWikiIntegration:
         with patch("libbydbot.brain.embed.DocEmbedder") as mock_de:
             mock_de.return_value.get_document_chunks.return_value = CHUNKS
             result = graph_wiki.ingest_source("Doc B", "Carol talks about Testing here.")
+        self._flush(graph_wiki)
 
         assert result["source"] == "Doc B"
         kg = graph_wiki._get_knowledge_graph()
@@ -370,6 +588,7 @@ class TestWikiIntegration:
         with patch("libbydbot.brain.embed.DocEmbedder") as mock_de:
             mock_de.return_value.get_document_chunks.return_value = []
             graph_wiki.ingest_source("Doc B", "Carol talks about Testing. " * 50)
+        self._flush(graph_wiki)
 
         kg = graph_wiki._get_knowledge_graph()
         # Fallback chunking should still create chunk nodes
@@ -406,6 +625,7 @@ class TestWikiIntegration:
         with patch("libbydbot.brain.embed.DocEmbedder") as mock_de:
             mock_de.return_value.get_document_chunks.return_value = []
             graph_wiki.ingest_source("Doc 1", "Alice content.")
+        self._flush(graph_wiki)
 
         # Second ingest: Bob is related to Alice (written as wikilink in Bob's page)
         graph_wiki._generate_source_summary = MagicMock(
@@ -423,6 +643,7 @@ class TestWikiIntegration:
         with patch("libbydbot.brain.embed.DocEmbedder") as mock_de:
             mock_de.return_value.get_document_chunks.return_value = []
             graph_wiki.ingest_source("Doc 2", "Bob content.")
+        self._flush(graph_wiki)
 
         kg = graph_wiki._get_knowledge_graph()
         assert kg.graph.has_edge("entities/bob.md", "entities/alice.md")
@@ -447,6 +668,7 @@ class TestWikiIntegration:
         with patch("libbydbot.brain.embed.DocEmbedder") as mock_de:
             mock_de.return_value.get_document_chunks.return_value = CHUNKS
             graph_wiki.ingest_source("Doc B", "Carol talks about Testing here.")
+        self._flush(graph_wiki)
 
         result = graph_wiki.graph_path("Carol", "Testing")
         assert result["found"]
@@ -459,6 +681,7 @@ class TestWikiIntegration:
         with patch("libbydbot.brain.embed.DocEmbedder") as mock_de:
             mock_de.return_value.get_document_chunks.return_value = CHUNKS
             graph_wiki.ingest_source("Doc B", "Carol talks about Testing here.")
+        self._flush(graph_wiki)
 
         sub = graph_wiki.graph_query("What does Carol know about Testing?")
         assert sub["nodes"]
@@ -470,6 +693,7 @@ class TestWikiIntegration:
         with patch("libbydbot.brain.embed.DocEmbedder") as mock_de:
             mock_de.return_value.get_document_chunks.return_value = CHUNKS
             graph_wiki.ingest_source("Doc B", "Carol talks about Testing here.")
+        self._flush(graph_wiki)
 
         graph_wiki._generate_answer = MagicMock(
             return_value=WikiQueryAnswer(
@@ -488,6 +712,7 @@ class TestWikiIntegration:
         with patch("libbydbot.brain.embed.DocEmbedder") as mock_de:
             mock_de.return_value.get_document_chunks.return_value = CHUNKS
             graph_wiki.ingest_source("Doc B", "Carol talks about Testing here.")
+        self._flush(graph_wiki)
 
         status = graph_wiki.status()
         assert status["graph"] is not None
@@ -500,6 +725,7 @@ class TestWikiIntegration:
         with patch("libbydbot.brain.embed.DocEmbedder") as mock_de:
             mock_de.return_value.get_document_chunks.return_value = CHUNKS
             graph_wiki.ingest_source("Doc B", "Carol talks about Testing here.")
+        self._flush(graph_wiki)
 
         graph_wiki._generate_lint_report = MagicMock(return_value=LintReport())
         report = graph_wiki.lint(auto_fix=False)

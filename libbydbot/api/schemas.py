@@ -451,6 +451,10 @@ class WikiGraphStatusResponse(BaseModel):
     node_counts: dict[str, int] = Field(..., description="Node counts by type")
     edge_counts: dict[str, int] = Field(..., description="Edge counts by type")
     hubs: list[dict] = Field(default_factory=list, description="Most-connected nodes")
+    rebuilding: bool = Field(
+        False,
+        description="True while a background rebuild is in flight (the served graph is the previous snapshot)",
+    )
 
 
 class WikiPathRequest(BaseModel):

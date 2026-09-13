@@ -1,9 +1,12 @@
+import threading
 from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from loguru import logger
+
+from libbydbot.brain import wiki as wiki_brain
 
 from libbydbot.api.schemas import (
     WikiBrowseResponse,
@@ -36,9 +39,15 @@ router = APIRouter(prefix="/wiki", tags=["wiki"])
 # pseudo-category used for index.md / log.md.
 WIKI_CATEGORIES = ("sources", "entities", "concepts", "synthesis")
 
+#: Per-collection WikiManager cache. WikiManager.__init__ builds LLM clients
+#: and (via the shared graph cache) is the unit of reuse, so graph endpoints
+#: don't reconstruct managers — or LLM clients — on every request.
+_WIKI_MANAGERS: dict[tuple[str, str], WikiManager] = {}
+_WIKI_MANAGERS_LOCK = threading.Lock()
+
 
 def get_wiki_manager(collection_name: str = "main") -> WikiManager:
-    """Factory to create a WikiManager for a given collection."""
+    """Return a cached WikiManager for a given collection."""
     from libbydbot.settings import Settings
 
     try:
@@ -52,11 +61,17 @@ def get_wiki_manager(collection_name: str = "main") -> WikiManager:
     if settings:
         model = settings.wiki_model or settings.default_model or model
 
-    return WikiManager(
-        collection_name=collection_name,
-        wiki_base=wiki_base,
-        model=model,
-    )
+    key = (str(wiki_base), collection_name)
+    with _WIKI_MANAGERS_LOCK:
+        manager = _WIKI_MANAGERS.get(key)
+        if manager is None:
+            manager = WikiManager(
+                collection_name=collection_name,
+                wiki_base=wiki_base,
+                model=model,
+            )
+            _WIKI_MANAGERS[key] = manager
+        return manager
 
 
 @router.post("/ingest", response_model=WikiIngestResponse)
@@ -460,10 +475,14 @@ def wiki_graph_rebuild(request: WikiGraphRebuildRequest):
 def wiki_graph_status(collection_name: str = "main"):
     """
     Get statistics about a collection's knowledge graph.
+
+    ``rebuilding`` is true while a background rebuild is in flight; the
+    statistics describe the previous (still-served) snapshot.
     """
     try:
         wiki = get_wiki_manager(collection_name)
         status = wiki.graph_status()
+        status["rebuilding"] = wiki_brain.graph_rebuilding(wiki.wiki_dir)
         return WikiGraphStatusResponse(**status)
     except Exception as e:
         logger.error(f"Error getting wiki graph status: {e}")
@@ -477,29 +496,102 @@ def wiki_graph_viz(
     include_chunks: bool = False,
 ):
     """
-    Serve the interactive knowledge graph visualization (graph.html).
+    Serve the interactive knowledge graph visualization (graph.html shell).
 
-    The exported HTML is reused when it is still fresh relative to the
-    wiki pages and graph.json (kept up to date incrementally at ingest
-    time), so repeated views skip the expensive full rebuild. Pass
-    ``?rebuild=true`` to force one. Chunk nodes — one per embedded
-    document piece, typically the bulk of the graph — are excluded from
-    the visualization by default to keep the browser render fast; pass
-    ``?include_chunks=true`` for the full view.
+    The shell is a small document that renders the top hubs immediately;
+    the remaining nodes/edges stream in via ``/graph/{c}/data`` batches.
+    When the export is stale relative to the wiki, a single-flight
+    background rebuild refreshes it while the previous shell keeps being
+    served (``X-Graph-Rebuilding: 1`` response header). Pass
+    ``?rebuild=true`` to force an async rebuild. Chunk nodes — one per
+    embedded document piece, typically the bulk of the graph — are
+    excluded from batches by default; pass ``include_chunks=true`` to the
+    data endpoint to restore them.
     """
     try:
         wiki = get_wiki_manager(collection_name)
-        html_path = wiki.graph_viz_html(
-            rebuild=rebuild, include_chunks=include_chunks
-        )
-        # content_disposition inline so browsers render the visualization
-        # instead of downloading it
+        viz = wiki.graph_viz_html(rebuild=rebuild, include_chunks=include_chunks)
+        headers = {}
+        if viz.get("rebuilding"):
+            headers["X-Graph-Rebuilding"] = "1"
         return FileResponse(
-            html_path, media_type="text/html", content_disposition_type="inline"
+            viz["path"],
+            media_type="text/html",
+            headers=headers or None,
+            content_disposition_type="inline",
         )
     except Exception as e:
         logger.error(f"Error serving wiki graph visualization: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/graph/{collection_name}/data")
+def wiki_graph_data(
+    collection_name: str = "main",
+    cursor: int = Query(0, ge=0, description="Offset into the degree-ranked node list"),
+    limit: int = Query(250, ge=1, le=1000, description="Max nodes per page"),
+    include_chunks: bool = Query(False, description="Include chunk nodes in batches"),
+):
+    """
+    Return one page of visualization data for incremental rendering.
+
+    Nodes arrive degree-ranked (hubs first) with precomputed positions so
+    the browser places them without a physics simulation. Every edge is
+    delivered exactly once, with the batch in which its later endpoint
+    arrives. All batches of a walk carry the same ``snapshot_id``; when it
+    changes (a background rebuild swapped the graph), clients restart the
+    walk from cursor 0.
+    """
+    try:
+        wiki = get_wiki_manager(collection_name)
+        page = wiki.graph_data_page(
+            cursor=cursor, limit=limit, include_chunks=include_chunks
+        )
+        page["rebuilding"] = wiki_brain.graph_rebuilding(wiki.wiki_dir)
+        return page
+    except Exception as e:
+        logger.error(f"Error serving wiki graph data page: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/graph-lib/{filename}")
+def wiki_graph_lib(filename: str):
+    """
+    Serve a static visualization library asset (no auth, inert JS).
+
+    These files are large and version-stable, so they are served with
+    immutable caching — clients fetch them once instead of re-downloading
+    them embedded in every graph export.
+    """
+    allowed = {
+        "vis-network.min.js": ("pyvis", "lib", "vis-9.1.2", "vis-network.min.js"),
+    }
+    if filename not in allowed:
+        raise HTTPException(status_code=404, detail="Unknown graph library asset")
+    import importlib
+    import importlib.resources
+
+    parts = allowed[filename]
+    try:
+        import importlib
+
+        mod = importlib.import_module(parts[0])
+        mod_file = getattr(mod, "__file__", None)
+        if not mod_file:
+            raise FileNotFoundError(parts[0])
+        lib_path = Path(mod_file).parent.joinpath(*parts[1:])
+        if not lib_path.is_file():
+            raise FileNotFoundError(lib_path)
+    except Exception as e:
+        logger.error(f"Graph library asset missing: {e}")
+        raise HTTPException(status_code=404, detail="Graph library asset unavailable")
+    return FileResponse(
+        lib_path,
+        media_type="application/javascript",
+        headers={
+            "Cache-Control": "public, max-age=31536000, immutable",
+        },
+    )
 
 
 @router.post("/graph/path", response_model=WikiPathResponse)

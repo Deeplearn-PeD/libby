@@ -657,29 +657,42 @@ class TestWikiModelConfig:
         assert s.wiki_model == "deepseek-v4-pro"
 
     def test_get_wiki_manager_prefers_wiki_model(self, monkeypatch):
-        from libbydbot.api.routes.wiki import get_wiki_manager
+        from libbydbot.api.routes.wiki import _WIKI_MANAGERS, get_wiki_manager
 
+        _WIKI_MANAGERS.clear()
         monkeypatch.setenv("WIKI_MODEL", "deepseek-v4-pro")
         wiki = get_wiki_manager("main")
         assert wiki.model == "deepseek-v4-pro"
 
     def test_get_wiki_manager_falls_back_to_default(self, monkeypatch):
-        from libbydbot.api.routes.wiki import get_wiki_manager
+        from libbydbot.api.routes.wiki import _WIKI_MANAGERS, get_wiki_manager
         from libbydbot.settings import Settings
 
         # An explicitly-empty WIKI_MODEL falls back to the default chat model.
+        _WIKI_MANAGERS.clear()
         monkeypatch.setenv("WIKI_MODEL", "")
         wiki = get_wiki_manager("main")
         assert wiki.model == Settings().default_model
 
     def test_get_wiki_manager_uses_wiki_model_default(self, monkeypatch):
         # With WIKI_MODEL unset, the Settings default wiki_model is used.
-        from libbydbot.api.routes.wiki import get_wiki_manager
+        from libbydbot.api.routes.wiki import _WIKI_MANAGERS, get_wiki_manager
         from libbydbot.settings import Settings
 
+        _WIKI_MANAGERS.clear()
         monkeypatch.delenv("WIKI_MODEL", raising=False)
         wiki = get_wiki_manager("main")
         assert wiki.model == Settings().wiki_model
+
+    def test_get_wiki_manager_is_cached_per_collection(self):
+        """Managers are cached so LLM clients aren't rebuilt per request."""
+        from libbydbot.api.routes.wiki import get_wiki_manager
+
+        # unique collection name avoids cache entries from other tests
+        a = get_wiki_manager("cache-probe-coll")
+        b = get_wiki_manager("cache-probe-coll")
+        assert a is b
+
 
 class TestGraphSchemaModels:
     """Test Pydantic schema models for the knowledge graph endpoints."""
@@ -797,8 +810,11 @@ class TestGraphVizEndpoint:
         assert response.headers["content-type"].startswith("text/html")
 
     def test_viz_endpoint_serves_cached_and_rebuild_param(self, tmp_path, monkeypatch):
-        """A second view serves the cached graph.html; ?rebuild=true forces
-        a fresh export."""
+        """A second view serves the cached shell; ?rebuild=true schedules an
+        async rebuild (previous shell keeps being served until the worker
+        swaps in a fresh export)."""
+        import time
+
         from fastapi.testclient import TestClient
 
         from libbydbot.api.main import create_app
@@ -815,10 +831,88 @@ class TestGraphVizEndpoint:
             cached = client.get("/api/wiki/graph/vizcoll/viz")
             assert cached.status_code == 200
             assert html.stat().st_mtime == first_mtime  # served from cache
+            assert "X-Graph-Rebuilding" not in cached.headers
 
             forced = client.get("/api/wiki/graph/vizcoll/viz?rebuild=true")
             assert forced.status_code == 200
-            assert html.stat().st_mtime > first_mtime  # regenerated
+            assert forced.headers.get("X-Graph-Rebuilding") == "1"
+            # previous shell is served immediately; the worker swaps it in
+            assert html.stat().st_mtime == first_mtime
+
+            deadline = time.time() + 10
+            while html.stat().st_mtime == first_mtime and time.time() < deadline:
+                time.sleep(0.05)
+            assert html.stat().st_mtime > first_mtime  # async rebuild landed
+
+
+class TestGraphDataEndpoint:
+    """Integration tests for the incremental viz data + lib routes."""
+
+    def _seed_wiki(self, wiki_base: Path, collection: str = "vizcoll"):
+        wiki = wiki_base / collection
+        for sub in ("sources", "entities", "concepts", "synthesis"):
+            (wiki / sub).mkdir(parents=True, exist_ok=True)
+        (wiki / "sources" / "doc_a.md").write_text(
+            "---\ntitle: Doc A\n---\n\n# Doc A\n\nAbout [[Alice]] and [[Bob]].\n",
+            encoding="utf-8",
+        )
+        (wiki / "entities" / "alice.md").write_text(
+            "---\ntitle: Alice\n---\n\n# Alice\n\nIn [[doc_a|Doc A]]. Knows [[Bob]].\n",
+            encoding="utf-8",
+        )
+        (wiki / "entities" / "bob.md").write_text(
+            "---\ntitle: Bob\n---\n\n# Bob\n\nFriend of [[Alice]].\n",
+            encoding="utf-8",
+        )
+
+    def _client(self, tmp_path, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        from libbydbot.api.main import create_app
+
+        monkeypatch.setenv("WIKI_BASE_PATH", str(tmp_path))
+        monkeypatch.setenv("EMBED_DB", f"sqlite:///{tmp_path / 'embed.db'}")
+        return TestClient(create_app())
+
+    def test_data_endpoint_paginates_all_nodes(self, tmp_path, monkeypatch):
+        self._seed_wiki(tmp_path)
+        with self._client(tmp_path, monkeypatch) as client:
+            # first request also triggers the initial shell export
+            client.get("/api/wiki/graph/vizcoll/viz")
+
+            delivered, edge_ids, snapshot = [], set(), None
+            cursor = 0
+            for _ in range(50):
+                page = client.get(
+                    f"/api/wiki/graph/vizcoll/data?cursor={cursor}&limit=2"
+                ).json()
+                if snapshot is None:
+                    snapshot = page["snapshot_id"]
+                assert page["snapshot_id"] == snapshot
+                assert page["rebuilding"] in (True, False)
+                delivered += [n["id"] for n in page["nodes"]]
+                ids = set(delivered)
+                for edge in page["edges"]:
+                    assert edge["from"] in ids and edge["to"] in ids
+                    edge_ids.add(edge["id"])
+                if page["complete"]:
+                    break
+                cursor = page["next_cursor"]
+
+            assert len(delivered) == len(set(delivered)) == 3  # doc_a + alice + bob
+            assert edge_ids
+
+    def test_lib_endpoint_serves_vis_network(self, tmp_path, monkeypatch):
+        with self._client(tmp_path, monkeypatch) as client:
+            response = client.get("/api/wiki/graph-lib/vis-network.min.js")
+        assert response.status_code == 200
+        assert "javascript" in response.headers["content-type"]
+        assert "immutable" in response.headers["cache-control"]
+
+    def test_lib_endpoint_rejects_unknown_assets(self, tmp_path, monkeypatch):
+        with self._client(tmp_path, monkeypatch) as client:
+            response = client.get("/api/wiki/graph-lib/../../etc/passwd")
+        assert response.status_code == 404
 
 
 class TestIngestDiagnosisEndpoint:

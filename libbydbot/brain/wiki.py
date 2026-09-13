@@ -11,6 +11,8 @@ and [[wikilink]] cross-references.
 
 import os
 import re
+import threading
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -29,6 +31,144 @@ from base_agent.llminterface import LangModel, StructuredLangModel
 logger = loguru.logger
 
 DEFAULT_WIKI_BASE = Path.home() / ".libby" / "wikis"
+
+
+# ───────────────────────── knowledge-graph cache ─────────────────────────
+#
+# One shared entry per wiki directory: the parsed WikiKnowledgeGraph
+# survives across requests instead of being re-read from graph.json on
+# every API call. The cached instance is treated as read-only — ingest
+# work and rebuilds happen on private instances that atomically replace
+# the cached one — so API readers never observe in-place mutation or
+# half-written state. Rebuilds are single-flight per collection and run
+# in a background thread; readers keep using the previous (stale) graph
+# until the worker swaps in the fresh one (stale-while-revalidate).
+
+
+@dataclass
+class _GraphCacheEntry:
+    """Shared per-collection knowledge-graph state."""
+
+    kg: Any = None
+    graph_mtime_ns: int = 0
+    rebuilding: bool = False
+    dirty: bool = False
+    #: queued (doc_name, summary, chunks) ingests applied by the rebuild worker
+    pending: list = field(default_factory=list)
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+_GRAPH_CACHE: dict[str, _GraphCacheEntry] = {}
+_GRAPH_CACHE_GUARD = threading.Lock()
+
+
+def _graph_entry(wiki_dir: str | Path) -> _GraphCacheEntry:
+    key = str(wiki_dir)
+    with _GRAPH_CACHE_GUARD:
+        entry = _GRAPH_CACHE.get(key)
+        if entry is None:
+            entry = _GraphCacheEntry()
+            _GRAPH_CACHE[key] = entry
+        return entry
+
+
+def _graph_json_mtime(kg) -> int:
+    try:
+        return kg.graph_path.stat().st_mtime_ns
+    except OSError:
+        return 0
+
+
+def get_cached_kg(wiki_dir: str | Path, collection_name: str):
+    """Return the cached WikiKnowledgeGraph, reloading when graph.json changed."""
+    from libbydbot.brain.graph import WikiKnowledgeGraph
+
+    entry = _graph_entry(wiki_dir)
+    with entry.lock:
+        kg = entry.kg
+        if kg is not None and _graph_json_mtime(kg) == entry.graph_mtime_ns:
+            return kg
+        kg = WikiKnowledgeGraph(wiki_dir, collection_name)
+        entry.kg = kg
+        entry.graph_mtime_ns = _graph_json_mtime(kg)
+        return kg
+
+
+def run_graph_rebuild(wiki_dir: str | Path, collection_name: str):
+    """Rebuild body shared by the background worker and the admin sync path.
+
+    Builds a fresh private instance (loading the latest graph.json), applies
+    queued ingest updates, rescans the pages, refreshes the shell export,
+    and swaps the result into the cache.
+    """
+    from libbydbot.brain.graph import WikiKnowledgeGraph
+
+    entry = _graph_entry(wiki_dir)
+    with entry.lock:
+        entry.dirty = False
+        pending, entry.pending = entry.pending, []
+
+    kg = WikiKnowledgeGraph(wiki_dir, collection_name)
+    for doc_name, summary, chunks in pending:
+        try:
+            kg.update_from_ingest(doc_name, summary, chunks)
+        except Exception as e:
+            logger.warning(f"Queued graph ingest failed for '{doc_name}': {e}")
+    kg.rebuild()
+    kg.export_shell()
+    with entry.lock:
+        entry.kg = kg
+        entry.graph_mtime_ns = _graph_json_mtime(kg)
+    return kg
+
+
+def _rebuild_worker(wiki_dir: str, collection_name: str) -> None:
+    entry = _graph_entry(wiki_dir)
+    try:
+        while True:
+            kg = run_graph_rebuild(wiki_dir, collection_name)
+            logger.info(
+                f"Background graph rebuild done for '{collection_name}' "
+                f"({kg.graph.number_of_nodes()} nodes, "
+                f"{kg.graph.number_of_edges()} edges)"
+            )
+            with entry.lock:
+                again = entry.dirty
+                if not again:
+                    entry.rebuilding = False
+                    return
+    except Exception as e:
+        logger.error(f"Background graph rebuild failed for '{collection_name}': {e}")
+        with entry.lock:
+            entry.rebuilding = False
+
+
+def schedule_graph_rebuild(wiki_dir: str | Path, collection_name: str) -> bool:
+    """Start a background rebuild unless one is already running (single-flight).
+
+    Returns True when a new worker was started; when one is already running
+    the request is recorded (``dirty``) and the worker repeats after finishing.
+    """
+    entry = _graph_entry(wiki_dir)
+    with entry.lock:
+        if entry.rebuilding:
+            entry.dirty = True
+            return False
+        entry.rebuilding = True
+    threading.Thread(
+        target=_rebuild_worker,
+        args=(str(wiki_dir), collection_name),
+        name=f"kg-rebuild-{collection_name}",
+        daemon=True,
+    ).start()
+    return True
+
+
+def graph_rebuilding(wiki_dir: str | Path) -> bool:
+    """True while a background rebuild for this wiki is in flight."""
+    entry = _graph_entry(wiki_dir)
+    with entry.lock:
+        return entry.rebuilding
 
 INDEX_TEMPLATE = """# Wiki Index
 
@@ -173,18 +313,13 @@ class WikiManager:
             except Exception:
                 graph_enabled = True
         self.graph_enabled = graph_enabled
-        self._kg = None
         self._ensure_structure()
 
     # ────────────────────────── knowledge graph ─────────────────────
 
     def _get_knowledge_graph(self):
-        """Return the cached WikiKnowledgeGraph for this wiki."""
-        if self._kg is None:
-            from libbydbot.brain.graph import WikiKnowledgeGraph
-
-            self._kg = WikiKnowledgeGraph(self.wiki_dir, self.collection_name)
-        return self._kg
+        """Return the shared cached WikiKnowledgeGraph for this wiki."""
+        return get_cached_kg(self.wiki_dir, self.collection_name)
 
     def _fetch_document_chunks(self, doc_name: str, doc_content: str) -> list[dict]:
         """
@@ -261,23 +396,27 @@ class WikiManager:
         return chunks
 
     def _update_knowledge_graph(self, doc_name: str, summary, doc_content: str) -> None:
-        """Refresh the knowledge graph after an ingest, if enabled."""
+        """Queue a knowledge-graph refresh after an ingest (applied async).
+
+        Chunks are fetched immediately (the embedding DB state matches the
+        ingest) while the incremental update and full page rescan run in the
+        background rebuild worker; readers keep using the previous graph
+        until the worker swaps in the fresh one.
+        """
         if not self.graph_enabled:
             return
         try:
-            kg = self._get_knowledge_graph()
             chunks = self._fetch_document_chunks(doc_name, doc_content)
-            kg.update_from_ingest(doc_name, summary, chunks)
-            # Re-scan pages so wikilinks inside page bodies (not just
-            # summary-derived edges) are captured. Chunks survive rebuilds.
-            kg.rebuild()
+            entry = _graph_entry(self.wiki_dir)
+            with entry.lock:
+                entry.pending.append((doc_name, summary, chunks))
+            schedule_graph_rebuild(self.wiki_dir, self.collection_name)
         except Exception as e:
             logger.warning(f"Knowledge graph update failed for '{doc_name}': {e}")
 
     def graph_rebuild(self) -> dict:
-        """Rebuild the knowledge graph from the wiki pages on disk."""
-        kg = self._get_knowledge_graph()
-        kg.rebuild()
+        """Rebuild the knowledge graph from the wiki pages on disk (synchronous)."""
+        kg = run_graph_rebuild(self.wiki_dir, self.collection_name)
         self._append_log("graph", "rebuilt knowledge graph", kg.graph.number_of_nodes())
         return kg.status()
 
@@ -297,6 +436,23 @@ class WikiManager:
         """Return the ranked subgraph relevant to a question."""
         return self._get_knowledge_graph().subgraph_for_query(question, max_nodes=max_nodes)
 
+    def graph_data_page(
+        self, cursor: int, limit: int, include_chunks: bool = False
+    ) -> dict:
+        """Return one page of incremental viz data from the cached snapshot."""
+        return self._get_knowledge_graph().viz_data_page(
+            cursor, limit, include_chunks=include_chunks
+        )
+
+    def flush_graph_updates(self) -> dict:
+        """Apply queued ingest updates and rebuild synchronously.
+
+        The background worker normally does this; tests and admin tools use
+        this to force the graph up to date without waiting on the thread.
+        """
+        kg = run_graph_rebuild(self.wiki_dir, self.collection_name)
+        return kg.status()
+
     def graph_export_html(self, path: str | Path | None = None) -> Path:
         """Export an interactive HTML visualization of the knowledge graph."""
         return self._get_knowledge_graph().export_html(path)
@@ -305,23 +461,41 @@ class WikiManager:
         self,
         rebuild: bool = False,
         include_chunks: bool = False,
-    ) -> Path:
-        """Return the interactive graph visualization, refreshing if stale.
+    ) -> dict:
+        """Return ``{"path", "rebuilding"}`` for the interactive visualization.
 
-        The exported ``graph.html`` is reused when it is newer than every
-        wiki page and than ``graph.json`` (which ingest keeps up to date
-        incrementally), so repeated views skip the full rebuild. Pass
-        ``rebuild=True`` to force a fresh build.
+        The shell page (``graph.html``) is reused while fresh; when stale —
+        or when ``rebuild=True`` forces a refresh — a single-flight
+        background rebuild is scheduled and the previous shell keeps being
+        served until the worker swaps in the new one (stale-while-
+        revalidate). A missing shell is built synchronously once so the
+        endpoint always returns something renderable. ``include_chunks``
+        is honored by the ``/graph/{c}/data`` batch endpoint, not the shell.
         """
         kg = self._get_knowledge_graph()
         html_path = kg.wiki_dir / "graph.html"
 
-        if rebuild or self._viz_cache_stale(kg, html_path):
-            kg.rebuild()
-            html_path = kg.export_html(include_chunks=include_chunks)
+        if not html_path.exists():
+            if kg.graph.number_of_nodes() == 0:
+                kg.rebuild()
+            kg.export_shell()
+        elif rebuild or self._viz_cache_stale(kg, html_path):
+            if rebuild:
+                entry = _graph_entry(self.wiki_dir)
+                with entry.lock:
+                    entry.dirty = True
+            scheduled = schedule_graph_rebuild(self.wiki_dir, self.collection_name)
+            if scheduled or rebuild:
+                logger.debug(
+                    "Knowledge-graph visualization stale — background "
+                    "rebuild scheduled, serving previous shell"
+                )
         else:
             logger.debug("Serving cached knowledge-graph visualization")
-        return html_path
+        return {
+            "path": html_path,
+            "rebuilding": graph_rebuilding(self.wiki_dir),
+        }
 
     @staticmethod
     def _viz_cache_stale(kg, html_path: Path) -> bool:

@@ -13,6 +13,7 @@ visualization via pyvis.
 
 import itertools
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,25 @@ import loguru
 import networkx as nx
 
 logger = loguru.logger
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write *text* to *path* atomically.
+
+    Readers (API requests serving graph.html / reading graph.json) must
+    never observe a half-written file, so we write a temp file in the same
+    directory and ``os.replace`` it into place (atomic on POSIX).
+    """
+    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
 
 PAGE_NODE_TYPES = ("source", "entity", "concept", "synthesis")
 
@@ -55,6 +75,18 @@ def sanitize_name(name: str) -> str:
     return re.sub(r"[^\w\-]", "_", name).lower()
 
 
+#: Nodes embedded in the shell page so the visualization paints something
+#: immediately; the remaining nodes arrive via /graph/{c}/data batches.
+SHELL_INLINE_NODES = 100
+
+#: Coordinate range for precomputed layout positions shipped to the browser.
+_VIZ_COORD_RANGE = 1000.0
+
+#: Path (relative to the parent page origin) from which the shell loads the
+#: vis-network library. The epidbot proxy serves it with immutable caching.
+VIZ_LIB_URL = "/api/v1/kb/graph-lib/vis-network.min.js"
+
+
 class WikiKnowledgeGraph:
     """
     Knowledge graph over a single collection's wiki and embedded chunks.
@@ -67,6 +99,9 @@ class WikiKnowledgeGraph:
         self.wiki_dir = Path(wiki_dir)
         self.collection_name = collection_name
         self.graph = nx.DiGraph()
+        #: per-instance memo for viz pagination/layout (instances are only
+        #: mutated by the rebuild worker before being swapped into the cache)
+        self._viz_memo: dict[str, Any] = {}
         if self.graph_path.exists():
             try:
                 self.load()
@@ -83,10 +118,11 @@ class WikiKnowledgeGraph:
     # ────────────────────────── persistence ─────────────────────────
 
     def save(self) -> Path:
-        """Persist the graph to graph.json in node-link format."""
+        """Persist the graph to graph.json in node-link format (atomically)."""
         data = nx.node_link_data(self.graph, edges="edges")
-        self.graph_path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8"
+        _atomic_write_text(
+            self.graph_path,
+            json.dumps(data, ensure_ascii=False, indent=1),
         )
         logger.info(f"Saved knowledge graph: {self.graph.number_of_nodes()} nodes, "
                     f"{self.graph.number_of_edges()} edges -> {self.graph_path}")
@@ -662,8 +698,278 @@ class WikiKnowledgeGraph:
                     f'z-index:10;opacity:.92">{heading}</div>'
                 )
                 html = html.replace("<body>", "<body>" + notice, 1)
-                out_path.write_text(html, encoding="utf-8")
+                _atomic_write_text(out_path, html)
             except OSError as e:
                 logger.warning(f"Could not annotate truncated graph HTML: {e}")
         logger.info(f"Exported graph visualization -> {out_path}")
         return out_path
+
+    # ────────────────── incremental shell visualization ─────────────
+
+    @property
+    def snapshot_id(self) -> int:
+        """Identifier of the persisted snapshot backing this instance.
+
+        Uses graph.json's mtime_ns so clients can detect that the graph
+        changed mid-pagination and restart their batch walk.
+        """
+        try:
+            return self.graph_path.stat().st_mtime_ns
+        except OSError:
+            return 0
+
+    def _viz_node_dict(
+        self,
+        node: str,
+        degree: int,
+        x: float | None = None,
+        y: float | None = None,
+    ) -> dict[str, Any]:
+        """Serialize a node for the shell / batch payloads (vis-network style)."""
+        data = self.graph.nodes[node]
+        node_type = data.get("node_type", "unknown")
+        out: dict[str, Any] = {
+            "id": node,
+            "label": data.get("title", node),
+            "title": f"{data.get('title', node)} [{node_type}] degree={degree}",
+            "color": NODE_COLORS.get(node_type, "#666666"),
+            "size": 8 + min(degree * 2, 30),
+            "shape": "box" if node_type == "chunk" else "dot",
+        }
+        if x is not None and y is not None:
+            out["x"] = round(x, 2)
+            out["y"] = round(y, 2)
+        return out
+
+    def _viz_nodes_sorted(
+        self, include_chunks: bool, max_nodes: int
+    ) -> list[str]:
+        """Viz node ids ordered by degree desc (id asc as tiebreaker)."""
+        nodes = [
+            (node, self.graph.degree(node))
+            for node, data in self.graph.nodes(data=True)
+            if include_chunks or data.get("node_type", "unknown") != "chunk"
+        ]
+        nodes.sort(key=lambda nd: (-nd[1], nd[0]))
+        return [node for node, _ in nodes[:max_nodes]]
+
+    def _viz_ordered_ids(self, include_chunks: bool, max_nodes: int) -> list[str]:
+        """Memoized degree-ranked viz node ids for this snapshot."""
+        memo = self._viz_memo.setdefault("ordered", {})
+        key = (bool(include_chunks), int(max_nodes))
+        if key not in memo:
+            memo[key] = self._viz_nodes_sorted(include_chunks, max_nodes)
+        return memo[key]
+
+    def _viz_layout(self, include_chunks: bool, max_nodes: int) -> dict[str, tuple[float, float]]:
+        """Memoized precomputed positions for the viz nodes of this snapshot.
+
+        Layout is computed once per snapshot (in the rebuild worker or on
+        first batch request) so the browser can place every node instantly
+        without running a physics simulation, and so batches shipped at
+        different times share one consistent coordinate space.
+        """
+        memo = self._viz_memo.setdefault("layout", {})
+        key = (bool(include_chunks), int(max_nodes))
+        if key not in memo:
+            ids = self._viz_ordered_ids(include_chunks, max_nodes)
+            sub = self.graph.subgraph(ids)
+            if ids:
+                pos = nx.spring_layout(sub, seed=42, iterations=50)
+                scale = max(
+                    (max(abs(c) for c in p) for p in pos.values()), default=1.0
+                ) or 1.0
+                memo[key] = {
+                    node: (pos[node][0] / scale * _VIZ_COORD_RANGE,
+                           pos[node][1] / scale * _VIZ_COORD_RANGE)
+                    for node in ids
+                }
+            else:
+                memo[key] = {}
+        return memo[key]
+
+    def viz_data_page(
+        self,
+        cursor: int,
+        limit: int,
+        include_chunks: bool = False,
+        max_nodes: int = DEFAULT_MAX_VIZ_NODES,
+    ) -> dict[str, Any]:
+        """
+        Return one page of viz data for incremental rendering.
+
+        Nodes are delivered degree-ranked (hubs first); each edge is
+        delivered exactly once, with the batch in which its later endpoint
+        arrives, and only when both endpoints have been delivered. Serve
+        all pages from the same WikiKnowledgeGraph instance (the cache
+        entry snapshot) so batches are consistent; clients compare
+        ``snapshot_id`` across batches and restart the walk when it moves.
+        """
+        limit = max(1, min(int(limit), 1000))
+        cursor = max(0, int(cursor))
+        ordered = self._viz_ordered_ids(include_chunks, max_nodes)
+        layout = self._viz_layout(include_chunks, max_nodes)
+        page_ids = ordered[cursor:cursor + limit]
+        end = cursor + len(page_ids)
+
+        prefix = set(ordered[:end])
+        new_ids = set(page_ids)
+        degrees = {node: self.graph.degree(node) for node in page_ids}
+        nodes = [
+            self._viz_node_dict(
+                node, degrees[node],
+                layout.get(node, (0.0, 0.0))[0],
+                layout.get(node, (0.0, 0.0))[1],
+            )
+            for node in page_ids
+        ]
+        edges = []
+        for u, v, data in self.graph.edges(data=True):
+            if u not in prefix or v not in prefix:
+                continue
+            if u in new_ids or v in new_ids:
+                edge_type = data.get("edge_type", "links_to")
+                edges.append({
+                    "id": f"{u}=>{v}",
+                    "from": u,
+                    "to": v,
+                    "title": edge_type,
+                    "color": EDGE_COLORS.get(edge_type, "#9AA1B0"),
+                })
+        complete = end >= len(ordered)
+        return {
+            "collection": self.collection_name,
+            "snapshot_id": self.snapshot_id,
+            "cursor": cursor,
+            "next_cursor": None if complete else end,
+            "complete": complete,
+            "total_nodes": len(ordered),
+            "total_edges": self.graph.number_of_edges(),
+            "nodes": nodes,
+            "edges": edges,
+        }
+
+    def export_shell(
+        self,
+        path: str | Path | None = None,
+        max_nodes: int = DEFAULT_MAX_VIZ_NODES,
+    ) -> Path:
+        """
+        Export the incremental-visualization shell page (graph.html).
+
+        The shell is a small document that renders immediately: it loads
+        vis-network from the (cacheable) graph-lib route, embeds the top
+        ``SHELL_INLINE_NODES`` hubs with precomputed positions, and exposes
+        ``window.__GRAPH_API__.appendBatch`` so the host page can stream in
+        the remaining nodes via ``/graph/{collection}/data`` batches.
+        """
+        out_path = Path(path) if path else self.wiki_dir / "graph.html"
+        total_nodes = self.graph.number_of_nodes()
+
+        ordered = self._viz_ordered_ids(False, max_nodes)
+        layout = self._viz_layout(False, max_nodes)
+        truncated = total_nodes > len(ordered)
+
+        degrees = {node: self.graph.degree(node) for node in ordered}
+        inline = [
+            self._viz_node_dict(
+                node, degrees[node],
+                layout.get(node, (0.0, 0.0))[0],
+                layout.get(node, (0.0, 0.0))[1],
+            )
+            for node in ordered[:SHELL_INLINE_NODES]
+        ]
+        inline_ids = {node["id"] for node in inline}
+        inline_edges = []
+        for u, v, data in self.graph.edges(data=True):
+            if u in inline_ids and v in inline_ids:
+                edge_type = data.get("edge_type", "links_to")
+                inline_edges.append({
+                    "id": f"{u}=>{v}", "from": u, "to": v,
+                    "title": edge_type,
+                    "color": EDGE_COLORS.get(edge_type, "#9AA1B0"),
+                })
+
+        boot = {
+            "collection": self.collection_name,
+            "snapshotId": self.snapshot_id,
+            "totalNodes": total_nodes,
+            "totalEdges": self.graph.number_of_edges(),
+            "vizNodes": len(ordered),
+            "truncated": truncated,
+            "initialNodes": inline,
+            "initialEdges": inline_edges,
+        }
+        boot_json = json.dumps(boot, ensure_ascii=False).replace("</", "<\\/")
+
+        notice = (
+            f"Knowledge graph ({total_nodes:,} nodes total — showing top "
+            f"{len(ordered):,} by connectivity)"
+            if truncated
+            else ""
+        )
+        notice_html = f'<div class="kg-notice">{notice}</div>' if notice else ""
+        html = _SHELL_TEMPLATE.format(
+            title=f"Knowledge graph — {self.collection_name}",
+            notice_js=notice_html,
+            lib_url=VIZ_LIB_URL,
+            boot=boot_json,
+        )
+        _atomic_write_text(out_path, html)
+        logger.info(
+            f"Exported graph shell ({len(inline)} inline nodes, "
+            f"{total_nodes} total) -> {out_path}"
+        )
+        return out_path
+
+
+_SHELL_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{title}</title>
+<style>
+  html, body {{ margin: 0; padding: 0; height: 100%; background: #ffffff; }}
+  #viz {{ width: 100%; height: 100vh; }}
+  .kg-notice {{
+    position: fixed; top: 8px; left: 50%; transform: translateX(-50%);
+    background: #1e293b; color: #e2e8f0; padding: 6px 14px;
+    border-radius: 6px; font: 13px sans-serif; z-index: 10; opacity: .92;
+  }}
+</style>
+<script src="{lib_url}"></script>
+</head>
+<body>
+<div id="viz"></div>
+{notice_js}
+<script>
+window.__GRAPH_BOOT__ = {boot};
+(function () {{
+  var boot = window.__GRAPH_BOOT__;
+  var nodes = new vis.DataSet(boot.initialNodes);
+  var edges = new vis.DataSet(boot.initialEdges);
+  var network = new vis.Network(
+    document.getElementById('viz'),
+    {{ nodes: nodes, edges: edges }},
+    {{
+      physics: {{ enabled: false }},
+      interaction: {{ hover: true, tooltipDelay: 120, navigationButtons: true }},
+      nodes: {{ borderWidth: 0, font: {{ size: 12 }} }},
+      edges: {{ arrows: {{ to: {{ enabled: true, scaleFactor: 0.4 }} }} }}
+    }}
+  );
+  window.__GRAPH_API__ = {{
+    snapshotId: boot.snapshotId,
+    network: network,
+    appendBatch: function (batch) {{
+      if (batch.nodes && batch.nodes.length) nodes.add(batch.nodes);
+      if (batch.edges && batch.edges.length) edges.add(batch.edges);
+    }},
+    complete: function () {{ window.__GRAPH_COMPLETE__ = true; }}
+  }};
+  window.__GRAPH_READY__ = true;
+}})();
+</script>
+</body>
+</html>
+"""
