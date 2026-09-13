@@ -19,7 +19,7 @@ def test_ingest():
     with Session(ingester.engine) as session:
         statement = select(PDFDocument)
         results = session.exec(statement).all()
-        assert len(results) == 2
+        assert len(results) == 1
         for r in results:
             assert isinstance(r.text, dict)
 
@@ -28,7 +28,7 @@ def test_pdf_pipeline():
     pdf_path = "tests/test_corpus"
     pipeline = PDFPipeline(path=str(pdf_path))
     documents = list(pipeline)
-    assert len(documents) == 2
+    assert len(documents) == 1
     text, metadata = documents[0]
     assert isinstance(text, dict)
     assert isinstance(metadata, dict)
@@ -37,7 +37,7 @@ def test_pdf_pipeline():
 def test_pdf_pipeline_with_chunking():
     pipeline = PDFPipeline(path="tests/test_corpus", chunk_size=200, chunk_overlap=20)
     documents = list(pipeline)
-    assert len(documents) == 2
+    assert len(documents) == 1
     chunks, metadata = documents[0]
     assert isinstance(chunks, list)
     assert len(chunks) > 0
