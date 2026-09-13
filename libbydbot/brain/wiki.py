@@ -454,6 +454,21 @@ class WikiManager:
             kg.rebuild()
         return kg.neighbors_html(name, depth=depth, include_chunks=include_chunks)
 
+    def graph_neighbors_data(
+        self,
+        name: str,
+        depth: int = 1,
+        known: list[str] | None = None,
+        include_chunks: bool = False,
+    ) -> dict:
+        """JSON expansion payload for progressive ego-view growth."""
+        kg = self._get_knowledge_graph()
+        if kg.graph.number_of_nodes() == 0:
+            kg.rebuild()
+        return kg.neighbors_data(
+            name, depth=depth, known=known, include_chunks=include_chunks
+        )
+
     def flush_graph_updates(self) -> dict:
         """Apply queued ingest updates and rebuild synchronously.
 

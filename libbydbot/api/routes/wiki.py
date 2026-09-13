@@ -2,7 +2,7 @@ import threading
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import FileResponse, HTMLResponse
 from loguru import logger
 
@@ -552,6 +552,41 @@ def wiki_graph_neighbors(
             status_code=404, detail=result.get("error", "Node not found")
         )
     return HTMLResponse(result["html"])
+
+
+@router.post("/graph/{collection_name}/neighbors/data")
+def wiki_graph_neighbors_data(
+    collection_name: str = "main",
+    body: dict = Body(...),
+):
+    """
+    Progressive-expansion payload for the ego view: the unknown neighbors of
+    ``body["node"]`` positioned relative to it at the origin. The client
+    sends its current node ids in ``body["known"]`` so no node is delivered
+    twice and no edge dangles.
+    """
+    node = str(body.get("node", ""))
+    if not node:
+        raise HTTPException(status_code=400, detail="node is required")
+    try:
+        depth = int(body.get("depth", 1))
+    except (TypeError, ValueError):
+        depth = 1
+    known = [str(k) for k in (body.get("known") or [])][:5000]
+    include_chunks = bool(body.get("include_chunks", False))
+    try:
+        wiki = get_wiki_manager(collection_name)
+        result = wiki.graph_neighbors_data(
+            node, depth=depth, known=known, include_chunks=include_chunks
+        )
+    except Exception as e:
+        logger.error(f"Error expanding wiki graph neighbors: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    if not result.get("found"):
+        raise HTTPException(
+            status_code=404, detail=result.get("error", "Node not found")
+        )
+    return result
 
 
 @router.get("/graph/{collection_name}/data")

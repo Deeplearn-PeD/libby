@@ -765,6 +765,7 @@ class WikiKnowledgeGraph:
             "color": NODE_COLORS.get(node_type, "#666666"),
             "size": 8 + min(degree * 2, 30),
             "shape": "box" if node_type == "chunk" else "dot",
+            "degree": degree,
         }
         if x is not None and y is not None:
             out["x"] = round(x, 2)
@@ -929,6 +930,7 @@ class WikiKnowledgeGraph:
             "truncated": truncated,
             "initialNodes": inline,
             "initialEdges": inline_edges,
+            "ego": False,
         }
 
         notice = (
@@ -1044,6 +1046,8 @@ class WikiKnowledgeGraph:
             # zoom in on the selected page
             "focusNode": center,
             "focusScale": 1,
+            # progressive expansion (click / zoom-out) is wired in the shell
+            "ego": True,
         }
         notice = f'Neighborhood of "{title}" ({len(ids)} nodes)'
         html = render_shell_html(
@@ -1052,6 +1056,100 @@ class WikiKnowledgeGraph:
             title=f"{title} — knowledge graph",
         )
         return {"found": True, "center": center, "title": title, "html": html}
+
+    def neighbors_data(
+        self,
+        name: str,
+        depth: int = 1,
+        known: list[str] | None = None,
+        include_chunks: bool = False,
+        max_new: int = 200,
+    ) -> dict[str, Any]:
+        """
+        JSON payload expanding the ego view around *name*.
+
+        Delivers the not-yet-known neighbors of *name* (``depth`` hops),
+        positioned **relative to the anchor at the origin** so the client
+        can offset them onto the anchor's current on-screen position.
+        Edges are only included when both endpoints are within
+        (new ∪ known), so the client never receives a dangling edge.
+        """
+        anchor = self._resolve_fuzzy(name)
+        if anchor is None:
+            return {"found": False, "error": f"Node not found: {name}"}
+
+        known_set = {str(k) for k in (known or [])}
+        selected = {anchor}
+        frontier = {anchor}
+        for _ in range(max(1, min(int(depth), 2))):
+            nxt: set[str] = set()
+            for node in frontier:
+                nxt.update(self.graph.successors(node))
+                nxt.update(self.graph.predecessors(node))
+            frontier = nxt - selected
+            selected |= frontier
+        if not include_chunks:
+            selected = {
+                node
+                for node in selected
+                if self.graph.nodes[node].get("node_type", "unknown") != "chunk"
+            }
+        new_ids = selected - known_set
+        new_ids.discard(anchor)
+
+        ranked = sorted(
+            new_ids, key=lambda n: (-self.graph.degree(n), n)
+        )[: max(1, int(max_new))]
+        deliver = set(ranked)
+
+        positions: dict[str, tuple[float, float]] = {}
+        if ranked:
+            sub = self.graph.subgraph(deliver | {anchor})
+            pos = nx.spring_layout(sub, seed=42, iterations=30)
+            ax, ay = pos[anchor]
+            scale = max(
+                (max(abs(px - ax), abs(py - ay)) for px, py in pos.values()),
+                default=1.0,
+            ) or 1.0
+            positions = {
+                node: (
+                    (px - ax) / scale * _VIZ_COORD_RANGE,
+                    (py - ay) / scale * _VIZ_COORD_RANGE,
+                )
+                for node, (px, py) in pos.items()
+                if node != anchor
+            }
+
+        nodes = [
+            self._viz_node_dict(
+                node,
+                self.graph.degree(node),
+                positions.get(node, (0.0, 0.0))[0],
+                positions.get(node, (0.0, 0.0))[1],
+            )
+            for node in ranked
+        ]
+        edges = []
+        for u, v, data in self.graph.edges(data=True):
+            if u not in deliver and v not in deliver:
+                continue
+            if u in deliver or v in deliver:
+                # both endpoints must be visible client-side (new ∪ known)
+                if (u in deliver or u in known_set) and (
+                    v in deliver or v in known_set
+                ):
+                    edge_type = data.get("edge_type", "links_to")
+                    edges.append({
+                        "id": f"{u}=>{v}", "from": u, "to": v,
+                        "title": edge_type,
+                        "color": EDGE_COLORS.get(edge_type, "#9AA1B0"),
+                    })
+        return {
+            "found": True,
+            "anchor": anchor,
+            "nodes": nodes,
+            "edges": edges,
+        }
 
 
 _SHELL_TEMPLATE = """<!DOCTYPE html>
@@ -1079,6 +1177,8 @@ window.__GRAPH_BOOT__ = {boot};
   var boot = window.__GRAPH_BOOT__;
   var nodes = new vis.DataSet(boot.initialNodes);
   var edges = new vis.DataSet(boot.initialEdges);
+  var degrees = {{}};
+  (boot.initialNodes || []).forEach(function (n) {{ degrees[n.id] = n.degree || 0; }});
   var network = new vis.Network(
     document.getElementById('viz'),
     {{ nodes: nodes, edges: edges }},
@@ -1095,6 +1195,45 @@ window.__GRAPH_BOOT__ = {boot};
       offset: {{ x: 0, y: 0 }}
     }});
   }}
+
+  // progressive expansion (ego view): clicking a node pulls in its
+  // neighborhood; zooming out expands around the most-connected
+  // un-expanded node. Requests go through the parent page (auth) via
+  // window.__KG_BRIDGE__, which answers with __GRAPH_API__.expand().
+  var expanded = {{}};
+  var expandCount = 0;
+  var lastExpandAt = 0;
+
+  function requestExpand(anchor, depth) {{
+    if (!boot.ego || !anchor || expanded[anchor]) return;
+    if (expandCount >= 12 || nodes.length >= 1500) return;
+    var now = Date.now();
+    if (now - lastExpandAt < 500) return;
+    lastExpandAt = now;
+    expanded[anchor] = true;
+    expandCount += 1;
+    var bridge = (window.parent && window.parent.__KG_BRIDGE__) || null;
+    if (bridge && typeof bridge.expand === "function") {{
+      bridge.expand(anchor, depth || 1, nodes.getIds());
+    }}
+  }}
+
+  network.on("click", function (params) {{
+    if (params.nodes.length === 1) requestExpand(params.nodes[0], 1);
+  }});
+  network.on("zoom", function (params) {{
+    if (params.scale > 0.55) return;
+    var best = null;
+    var bestDeg = -1;
+    for (var id in degrees) {{
+      if (!expanded[id] && degrees[id] > bestDeg) {{
+        bestDeg = degrees[id];
+        best = id;
+      }}
+    }}
+    if (best) requestExpand(best, 2);
+  }});
+
   window.__GRAPH_API__ = {{
     snapshotId: boot.snapshotId,
     network: network,
@@ -1102,7 +1241,22 @@ window.__GRAPH_BOOT__ = {boot};
       if (batch.nodes && batch.nodes.length) nodes.add(batch.nodes);
       if (batch.edges && batch.edges.length) edges.add(batch.edges);
     }},
-    complete: function () {{ window.__GRAPH_COMPLETE__ = true; }}
+    complete: function () {{ window.__GRAPH_COMPLETE__ = true; }},
+    expand: function (payload) {{
+      if (!payload) return;
+      var pos = {{ x: 0, y: 0 }};
+      try {{
+        var p = network.getPositions([payload.anchor])[payload.anchor];
+        if (p) pos = p;
+      }} catch (err) {{ /* anchor may be gone after a snapshot swap */ }}
+      (payload.nodes || []).forEach(function (n) {{
+        n.x = (n.x || 0) + pos.x;
+        n.y = (n.y || 0) + pos.y;
+        degrees[n.id] = n.degree || 0;
+        nodes.update(n);
+      }});
+      (payload.edges || []).forEach(function (e) {{ edges.update(e); }});
+    }}
   }};
   window.__GRAPH_READY__ = true;
 }})();
