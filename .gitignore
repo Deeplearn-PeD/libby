@@ -163,3 +163,9 @@ cython_debug/
 # SSH keys for SFTP server (keep private!)
 ssh_keys/*
 !ssh_keys/README.md
+
+# local runtime artifacts
+data/
+*.db
+*.db-journal
+*.orig
