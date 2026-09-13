@@ -6,9 +6,15 @@ import numpy as np
 @pytest.fixture(autouse=True)
 def mock_embeddings():
     with patch("libbydbot.brain.embed.DocEmbedder._generate_embedding") as mocked:
-        with patch("libbydbot.brain.embed.DocEmbedder._get_embedding_dimension", return_value=1024):
-            mocked.return_value = np.zeros(1024).tolist()
-            yield mocked
+        with patch(
+            "libbydbot.brain.embed.DocEmbedder._generate_embeddings_batch"
+        ) as mocked_batch:
+            with patch("libbydbot.brain.embed.DocEmbedder._get_embedding_dimension", return_value=1024):
+                mocked.return_value = np.zeros(1024).tolist()
+                mocked_batch.side_effect = lambda texts: [
+                    np.zeros(1024).tolist() for _ in texts
+                ]
+                yield mocked
 
 
 @pytest.fixture(autouse=True, scope="session")

@@ -118,17 +118,13 @@ def _run_embed_job(
             doc_name = metadata.get("title") or filename or "Unknown"
             embedded_doc_names.add(doc_name)
             if isinstance(text, list) and text and isinstance(text[0], ChunkInfo):
-                for chunk in text:
-                    embedder.embed_text(chunk.text, doc_name, chunk.page_number)
-                    chunks_embedded += 1
+                jobs = [(chunk.text, chunk.page_number) for chunk in text]
             elif isinstance(text, list):
-                for i, chunk in enumerate(text):
-                    embedder.embed_text(chunk, doc_name, i)
-                    chunks_embedded += 1
+                jobs = [(chunk, i) for i, chunk in enumerate(text)]
             else:
-                for page_number, page_text in text.items():
-                    embedder.embed_text(page_text, doc_name, page_number)
-                    chunks_embedded += 1
+                jobs = [(page_text, page_number) for page_number, page_text in text.items()]
+            embedder.embed_chunks(jobs, doc_name)
+            chunks_embedded += len(jobs)
 
         with _jobs_lock:
             _jobs[job_id]["status"] = "completed"
@@ -341,17 +337,13 @@ async def upload_and_embed_sync(
             doc_name = metadata.get("title") or file.filename or "Unknown"
             embedded_doc_names.add(doc_name)
             if isinstance(text, list) and text and isinstance(text[0], ChunkInfo):
-                for chunk in text:
-                    embedder.embed_text(chunk.text, doc_name, chunk.page_number)
-                    chunks_embedded += 1
+                jobs = [(chunk.text, chunk.page_number) for chunk in text]
             elif isinstance(text, list):
-                for i, chunk in enumerate(text):
-                    embedder.embed_text(chunk, doc_name, i)
-                    chunks_embedded += 1
+                jobs = [(chunk, i) for i, chunk in enumerate(text)]
             else:
-                for page_number, page_text in text.items():
-                    embedder.embed_text(page_text, doc_name, page_number)
-                    chunks_embedded += 1
+                jobs = [(page_text, page_number) for page_number, page_text in text.items()]
+            embedder.embed_chunks(jobs, doc_name)
+            chunks_embedded += len(jobs)
 
         for name in embedded_doc_names:
             _maybe_auto_ingest_wiki(embedder, collection_name, name)

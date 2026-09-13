@@ -45,6 +45,9 @@ MODEL_MAX_CHARS: dict[str, int] = {
 
 DEFAULT_MAX_EMBED_CHARS = 800
 
+# Number of chunks per batched embedding request (Ollama /api/embed).
+EMBED_BATCH_SIZE = 32
+
 
 # engine = create_engine(os.getenv("PGURL"))
 # with Session(engine) as session:
@@ -795,6 +798,28 @@ class DocEmbedder:
             response = ollama.embeddings(model=self.embedding_model, prompt=text)
             return response["embedding"]
 
+    def _generate_embeddings_batch(self, texts: list[str]) -> list[list[float]]:
+        """
+        Generate embeddings for a batch of texts in a single request.
+        Uses Ollama's batch ``/api/embed`` endpoint (or Gemini batch embed).
+        :param texts: list of texts to embed
+        :return: list of embeddings, one per input text
+        """
+        if not texts:
+            return []
+        if self.embedding_model == "gemini-embedding-001":
+            result = self.client.models.embed_content(
+                model="gemini-embedding-001",
+                contents=texts,
+                config=types.EmbedContentConfig(
+                    output_dimensionality=self._get_embedding_dimension(),
+                    task_type="retrieval_document",
+                ),
+            )
+            return [e.values for e in result.embeddings]
+        response = ollama.embed(model=self.embedding_model, input=texts)
+        return response["embeddings"]
+
     def _check_vector_exists(self):
         """
         Check if the vector extension exists in the database
@@ -851,13 +876,13 @@ class DocEmbedder:
     def _max_embed_chars(self) -> int:
         return MODEL_MAX_CHARS.get(self.embedding_model, DEFAULT_MAX_EMBED_CHARS)
 
-    def embed_text(self, doctext: str, docname: str, page_number: int):
+    def _chunks_for_embedding(self, doctext: str, docname: str, page_number: int):
         """
-        Embed a page of a document.
+        Yield (text, page_number) pairs ready for embedding, auto-splitting
+        oversized text into smaller chunks.
         :param doctext: page of a document
         :param docname: name of the document
         :param page_number: page number
-        :return:
         """
         limit = self._max_embed_chars()
         if len(doctext) > limit:
@@ -868,11 +893,24 @@ class DocEmbedder:
             from libbydbot.brain.ingest import TextSplitter
 
             splitter = TextSplitter(chunk_size=self.chunk_size, chunk_overlap=self.chunk_overlap)
-            sub_chunks = splitter.split_text(doctext)
-            for ci, sub in enumerate(sub_chunks):
-                self._embed_single(sub, docname, page_number)
+            for sub in splitter.split_text(doctext):
+                yield sub, page_number
             return
-        self._embed_single(doctext, docname, page_number)
+        yield doctext, page_number
+
+    def embed_text(self, doctext: str, docname: str, page_number: int):
+        """
+        Embed a page of a document.
+        :param doctext: page of a document
+        :param docname: name of the document
+        :param page_number: page number
+        :return:
+        """
+        pairs = list(self._chunks_for_embedding(doctext, docname, page_number))
+        if len(pairs) == 1:
+            self._embed_single(pairs[0][0], docname, pairs[0][1])
+        else:
+            self._embed_many([t for t, _ in pairs], docname, [p for _, p in pairs])
 
     def _embed_single(self, doctext: str, docname: str, page_number: int):
         """Insert a single text chunk into the vector store."""
@@ -891,7 +929,81 @@ class DocEmbedder:
             return
         doctext = doctext.replace("\x00", "\ufffd")
         embedding = self._generate_embedding(doctext)
+        self._store_embedding(doctext, docname, page_number, document_hash, embedding)
 
+    def _embed_many(self, texts: list[str], docname: str, page_numbers: list[int]):
+        """
+        Embed multiple chunks using batched requests, skipping chunks that are
+        already stored. Falls back to single requests if a batch fails.
+        :param texts: chunk texts
+        :param docname: name of the document
+        :param page_numbers: page number for each chunk
+        """
+        limit = self._max_embed_chars()
+        prepared = []  # (text, page_number, document_hash)
+        for text, page_number in zip(texts, page_numbers):
+            if len(text) > limit:
+                logger.warning(
+                    f"Chunk for {docname} page {page_number} is still {len(text)} chars "
+                    f"(>{limit}); truncating to {limit}."
+                )
+                text = text[:limit]
+            document_hash = sha256(text.encode()).hexdigest()
+            if self._check_existing(document_hash):
+                logger.info(
+                    f"Document {docname} page {page_number} already exists in the database, skipping."
+                )
+                continue
+            prepared.append((text.replace("\x00", "\ufffd"), page_number, document_hash))
+
+        for i in range(0, len(prepared), EMBED_BATCH_SIZE):
+            group = prepared[i : i + EMBED_BATCH_SIZE]
+            try:
+                embeddings = self._generate_embeddings_batch([t for t, _, _ in group])
+            except Exception as e:
+                logger.error(
+                    f"Batch embedding failed for {docname}: {e}; "
+                    f"falling back to single requests."
+                )
+                for text, page_number, document_hash in group:
+                    embedding = self._generate_embedding(text)
+                    self._store_embedding(text, docname, page_number, document_hash, embedding)
+                continue
+            for (text, page_number, document_hash), embedding in zip(group, embeddings):
+                self._store_embedding(text, docname, page_number, document_hash, embedding)
+
+    def embed_chunks(
+        self, jobs: list[tuple[str, int]], docname: str, callback=None
+    ):
+        """
+        Embed a document's chunks in batches of EMBED_BATCH_SIZE.
+        :param jobs: list of (text, page_number) tuples
+        :param docname: name of the document
+        :param callback: optional callable(doc_name, chunk_index, total_chunks)
+        """
+        total = len(jobs)
+        buffer: list[tuple[int, str, int]] = []  # (job_index, text, page_number)
+
+        def _flush():
+            if not buffer:
+                return
+            self._embed_many([t for _, t, _ in buffer], docname, [pn for _, _, pn in buffer])
+            if callback:
+                for job_index, _, _ in buffer:
+                    callback(docname, job_index, total)
+            buffer.clear()
+
+        for job_index, (text, page_number) in enumerate(jobs):
+            for sub_text, pn in self._chunks_for_embedding(text, docname, page_number):
+                buffer.append((job_index, sub_text, pn))
+                if len(buffer) >= EMBED_BATCH_SIZE:
+                    _flush()
+        _flush()
+
+    def _store_embedding(
+        self, doctext: str, docname: str, page_number: int, document_hash: str, embedding
+    ):
+        """Insert one chunk with its embedding into the vector store."""
         if self.dburl.startswith("sqlite"):
             import struct
 
@@ -1013,23 +1125,13 @@ class DocEmbedder:
             )
 
             if isinstance(chunks_or_dict, list) and chunks_or_dict and isinstance(chunks_or_dict[0], ChunkInfo):
-                total = len(chunks_or_dict)
-                for ci, chunk_info in enumerate(chunks_or_dict):
-                    self.embed_text(chunk_info.text, docname, chunk_info.page_number)
-                    if callback:
-                        callback(docname, ci, total)
+                jobs = [(chunk_info.text, chunk_info.page_number) for chunk_info in chunks_or_dict]
             elif isinstance(chunks_or_dict, list):
-                total = len(chunks_or_dict)
-                for i, chunk in enumerate(chunks_or_dict):
-                    self.embed_text(chunk, docname, i)
-                    if callback:
-                        callback(docname, i, total)
+                jobs = [(chunk, i) for i, chunk in enumerate(chunks_or_dict)]
             else:
-                total = len(chunks_or_dict)
-                for idx, (page_number, page_text) in enumerate(chunks_or_dict.items()):
-                    self.embed_text(page_text, docname, page_number)
-                    if callback:
-                        callback(docname, idx, total)
+                jobs = [(page_text, page_number) for page_number, page_text in chunks_or_dict.items()]
+
+            self.embed_chunks(jobs, docname, callback=callback)
 
     def retrieve_docs(self, query: str, collection: str = "", num_docs: int = 5) -> str:
         """
