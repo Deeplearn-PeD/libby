@@ -451,8 +451,35 @@ class TestIncrementalViz:
         assert "appendBatch" in html
         assert "__GRAPH_READY__" in html
         assert "/api/v1/kb/graph-lib/vis-network.min.js" in html
-        # physics are disabled: positions are precomputed server-side
+        # Positions are precomputed server-side for an instant first paint,
+        # but physics stay enabled (barnesHut) and are reheated on every
+        # streamed batch / ego expansion so the layout keeps improving;
+        # the simulation parks itself when velocities settle.
         assert "physics" in html
+        assert "barnesHut" in html
+        assert "startSimulation" in html
+        assert "stabilized" in html
+        # the old all-off switch must be gone (stabilization: enabled false
+        # is fine — it only skips the initial freeze before first paint)
+        assert "physics: { enabled: false }" not in html
+
+    def test_shell_version_marker_and_staleness(self, kg, tmp_path):
+        """Deployed shells exported by an older template are detected so the
+        staleness check re-exports them once (keeps the live-physics rollout
+        seamless without waiting for a wiki change)."""
+        from libbydbot.brain.graph import SHELL_VERSION, shell_version_html
+
+        shell_path = kg.export_shell()
+        assert shell_version_html(shell_path) == SHELL_VERSION
+
+        # A first-generation shell (no version marker) reports 0
+        legacy = shell_path.read_text(encoding="utf-8")
+        marker = f"__GRAPH_SHELL_V{SHELL_VERSION}__"
+        assert marker in legacy
+        (tmp_path / "legacy.html").write_text(
+            legacy.replace(f"window.{marker} = true;", ""), encoding="utf-8"
+        )
+        assert shell_version_html(tmp_path / "legacy.html") == 0
 
     def test_batch_walk_delivers_every_node_once(self, kg):
         delivered, seen_edges, snapshot = [], set(), None

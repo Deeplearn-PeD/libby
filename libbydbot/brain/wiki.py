@@ -529,6 +529,11 @@ class WikiManager:
         """True when graph.html is missing or older than the wiki state."""
         if not html_path.exists():
             return True
+        # A shell exported by an older template (e.g. before the live-physics
+        # layout) refreshes once to pick up the current one.
+        from libbydbot.brain.graph import SHELL_VERSION, shell_version_html
+        if shell_version_html(html_path) < SHELL_VERSION:
+            return True
         try:
             html_mtime = html_path.stat().st_mtime
             if kg.graph_path.exists() and kg.graph_path.stat().st_mtime > html_mtime:

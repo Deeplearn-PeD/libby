@@ -82,9 +82,31 @@ SHELL_INLINE_NODES = 100
 #: Coordinate range for precomputed layout positions shipped to the browser.
 _VIZ_COORD_RANGE = 1000.0
 
+#: Bump when the shell template changes so previously exported shells are
+#: treated as stale and re-exported once (see wiki._viz_cache_stale).
+SHELL_VERSION = 2
+
 #: Path (relative to the parent page origin) from which the shell loads the
 #: vis-network library. The epidbot proxy serves it with immutable caching.
 VIZ_LIB_URL = "/api/v1/kb/graph-lib/vis-network.min.js"
+
+
+def shell_version_html(path: Path) -> int:
+    """Shell template version embedded in *path* (0 when missing/legacy).
+
+    Legacy pyvis exports and first-generation shells (no version marker)
+    report 0 so callers can refresh them to the current template.
+    """
+    try:
+        if path.stat().st_size > 2_000_000:
+            return 0
+        data = path.read_bytes()
+        if b"__GRAPH_BOOT__" not in data:
+            return 0
+        marker = f"__GRAPH_SHELL_V{SHELL_VERSION}__".encode()
+        return SHELL_VERSION if marker in data else 0
+    except OSError:
+        return 0
 
 
 def is_shell_html(path: Path) -> bool:
@@ -114,6 +136,7 @@ def render_shell_html(
         notice_js=notice_html,
         lib_url=VIZ_LIB_URL,
         boot=boot_json,
+        SHELL_VERSION=SHELL_VERSION,
     )
 
 
@@ -1172,6 +1195,7 @@ _SHELL_TEMPLATE = """<!DOCTYPE html>
 <div id="viz"></div>
 {notice_js}
 <script>
+window.__GRAPH_SHELL_V{SHELL_VERSION}__ = true;
 window.__GRAPH_BOOT__ = {boot};
 (function () {{
   var boot = window.__GRAPH_BOOT__;
@@ -1183,12 +1207,45 @@ window.__GRAPH_BOOT__ = {boot};
     document.getElementById('viz'),
     {{ nodes: nodes, edges: edges }},
     {{
-      physics: {{ enabled: false }},
+      // Layout starts from the precomputed server-side positions (fast
+      // first paint) and keeps improving: the barnesHut simulation is
+      // reheated on every streamed batch / ego expansion and parks
+      // itself when the layout settles (see "stabilized" below).
+      physics: {{
+        solver: "barnesHut",
+        barnesHut: {{
+          gravitationalConstant: -3500,
+          springConstant: 0.04,
+          springLength: 110,
+          damping: 0.35,
+          avoidOverlap: 0.1
+        }},
+        stabilization: {{ enabled: false }},
+        maxVelocity: 40,
+        minVelocity: 0.75,
+        timestep: 0.35
+      }},
       interaction: {{ hover: true, tooltipDelay: 120, navigationButtons: true }},
       nodes: {{ borderWidth: 0, font: {{ size: 12 }} }},
       edges: {{ arrows: {{ to: {{ enabled: true, scaleFactor: 0.4 }} }} }}
     }}
   );
+  // The simulation parks itself to save CPU: either when velocities
+  // settle (vis fires "stabilized") or after PARK_AFTER_MS following the
+  // last reheat — whichever comes first. New data reheats it via reheat().
+  var PARK_AFTER_MS = 12000;
+  var parkTimer = null;
+  network.on("stabilized", function () {{
+    if (parkTimer) {{ clearTimeout(parkTimer); parkTimer = null; }}
+    try {{ network.stopSimulation(); }} catch (err) {{ /* already stopped */ }}
+  }});
+  function reheat() {{
+    try {{ network.startSimulation(); }} catch (err) {{ /* not ready yet */ }}
+    if (parkTimer) clearTimeout(parkTimer);
+    parkTimer = setTimeout(function () {{
+      try {{ network.stopSimulation(); }} catch (err) {{ /* already stopped */ }}
+    }}, PARK_AFTER_MS);
+  }}
   if (boot.focusNode) {{
     network.focus(boot.focusNode, {{
       scale: boot.focusScale || 1,
@@ -1240,6 +1297,7 @@ window.__GRAPH_BOOT__ = {boot};
     appendBatch: function (batch) {{
       if (batch.nodes && batch.nodes.length) nodes.add(batch.nodes);
       if (batch.edges && batch.edges.length) edges.add(batch.edges);
+      reheat();
     }},
     complete: function () {{ window.__GRAPH_COMPLETE__ = true; }},
     expand: function (payload) {{
@@ -1256,6 +1314,7 @@ window.__GRAPH_BOOT__ = {boot};
         nodes.update(n);
       }});
       (payload.edges || []).forEach(function (e) {{ edges.update(e); }});
+      reheat();
     }}
   }};
   window.__GRAPH_READY__ = true;
