@@ -662,6 +662,35 @@ class WikiKnowledgeGraph:
             "hubs": self.hubs(5),
         }
 
+    def stubs(self, max_stubs: int = 500) -> list[dict[str, Any]]:
+        """Wikilink targets without a page (``node_type == 'stub'``).
+
+        Each stub is a topic the wiki acknowledges but doesn't cover yet —
+        EpidBot turns them into knowledge-gap source recommendations. The
+        ``inbound_count`` (how many pages link to the stub) doubles as a
+        priority signal: heavily referenced stubs are the most valuable to
+        fill. Most-referenced stubs come first.
+        """
+        result: list[dict[str, Any]] = []
+        for node, data in self.graph.nodes(data=True):
+            if data.get("node_type") != "stub":
+                continue
+            referrers = sorted(
+                set(self.graph.predecessors(node)),
+                key=lambda u: self.graph.degree(u),
+                reverse=True,
+            )
+            result.append({
+                "id": node,
+                "title": data.get("title", node),
+                "inbound_count": len(referrers),
+                "referenced_by": [
+                    self.graph.nodes[u].get("title", u) for u in referrers[:5]
+                ],
+            })
+        result.sort(key=lambda s: (-s["inbound_count"], s["title"]))
+        return result[:max(1, int(max_stubs))]
+
     # ────────────────────────── visualization ───────────────────────
 
     #: Nodes above this degree are most useful in a crowded view; when the

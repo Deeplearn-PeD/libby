@@ -235,6 +235,34 @@ class TestQueries:
         assert "entity" in status["node_counts"]
         assert "hubs" in status
 
+    def test_stubs_lists_unresolved_wikilinks(self, kg):
+        """Wiki references [[Bob]] from alice.md... but Bob has a page, so
+        the only stub is [[Code Review]] (referenced by testing.md)."""
+        stubs = kg.stubs()
+        titles = [s["title"] for s in stubs]
+        assert "Code Review" in titles
+        assert "Alice" not in titles  # has a page — not a stub
+        code_review = next(s for s in stubs if s["title"] == "Code Review")
+        assert code_review["inbound_count"] == 1
+        assert any("Testing" in ref for ref in code_review["referenced_by"])
+
+    def test_stubs_ordered_by_inbound_count(self, wiki_dir):
+        (wiki_dir / "entities" / "alice.md").write_text(
+            "---\ntitle: Alice\n---\n\n# Alice\nSee [[Ghost]] and [[Phantom]].\n",
+            encoding="utf-8",
+        )
+        (wiki_dir / "concepts" / "testing.md").write_text(
+            "---\ntitle: Testing\n---\n\n# Testing\nSee [[Ghost]] too.\n",
+            encoding="utf-8",
+        )
+        kg = WikiKnowledgeGraph(wiki_dir, "c").rebuild()
+        stubs = kg.stubs()
+        by_title = {s["title"]: s for s in stubs}
+        assert by_title["Ghost"]["inbound_count"] == 2
+        assert by_title["Phantom"]["inbound_count"] == 1
+        assert stubs[0]["title"] == "Ghost"  # most-referenced first
+        assert any("Testing" in ref for ref in by_title["Ghost"]["referenced_by"])
+
 
 class TestExport:
     def test_export_html(self, kg):

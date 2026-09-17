@@ -437,6 +437,10 @@ class WikiManager:
         """Return the ranked subgraph relevant to a question."""
         return self._get_knowledge_graph().subgraph_for_query(question, max_nodes=max_nodes)
 
+    def graph_stubs(self, max_stubs: int = 500) -> list[dict]:
+        """Wikilink targets without a page, most-referenced first."""
+        return self._get_knowledge_graph().stubs(max_stubs=max_stubs)
+
     def graph_data_page(
         self, cursor: int, limit: int, include_chunks: bool = False
     ) -> dict:

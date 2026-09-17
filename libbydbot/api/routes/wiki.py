@@ -489,6 +489,26 @@ def wiki_graph_status(collection_name: str = "main"):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/graph/{collection_name}/stubs")
+def wiki_graph_stubs(collection_name: str = "main", max_stubs: int = 500):
+    """
+    List knowledge-graph stubs: wikilink targets that have no page.
+
+    Each stub is a topic the wiki acknowledges but doesn't cover. Ordered
+    by inbound reference count (most-referenced first). EpidBot's admin
+    review pipeline turns these into knowledge-base source recommendations.
+    """
+    try:
+        wiki = get_wiki_manager(collection_name)
+        return {
+            "collection": collection_name,
+            "stubs": wiki.graph_stubs(max_stubs=max_stubs),
+        }
+    except Exception as e:
+        logger.error(f"Error listing wiki graph stubs: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/graph/{collection_name}/viz")
 def wiki_graph_viz(
     collection_name: str = "main",
