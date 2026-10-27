@@ -8,6 +8,15 @@ class EmbedTextRequest(BaseModel):
     collection_name: str = Field(
         "main", description="Collection to store the document in"
     )
+    auto_ingest: bool | None = Field(
+        None,
+        description=(
+            "Per-request override of wiki_auto_ingest. None follows the "
+            "server setting; False skips the post-embed wiki ingest so "
+            "bulk embedders (which ingest explicitly) don't pay one LLM "
+            "ingest per chunk."
+        ),
+    )
 
 
 class EmbedTextResponse(BaseModel):

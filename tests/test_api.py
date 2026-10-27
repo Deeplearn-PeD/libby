@@ -1051,3 +1051,64 @@ class TestIngestDiagnosisEndpoint:
         assert "graph" in body and "nodes" in body["graph"]
         assert isinstance(body["embedding_tables"], list)
         assert any(t.get("rows", 0) > 0 for t in body["embedding_tables"])
+
+
+class TestEmbedTextAutoIngestFlag:
+    """Per-request auto_ingest override on /api/embed/text.
+
+    Bulk embedders (epidbot usage-graph) embed ~100 chunks per document;
+    without the override each chunk triggered an LLM wiki ingest.
+    """
+
+    @pytest.fixture
+    def embed_client(self, tmp_path):
+        from fastapi.testclient import TestClient
+        from libbydbot.api.main import app_state, create_app
+
+        db_path = tmp_path / "test_auto_ingest.db"
+        embedder = DocEmbedder(
+            "usage-all",
+            dburl=f"sqlite:///{db_path}",
+            embedding_model="mxbai-embed-large",
+        )
+        app_state.embedder = embedder
+        test_app = create_app()
+        client = TestClient(test_app)
+        yield client
+        app_state.embedder = None
+
+    def test_auto_ingest_false_skips_wiki_ingest(self, embed_client, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            "libbydbot.api.routes.embed._maybe_auto_ingest_wiki",
+            lambda *a, **k: calls.append(a),
+        )
+        response = embed_client.post(
+            "/api/embed/text",
+            json={
+                "text": "chunk text",
+                "doc_name": "session-1_part1",
+                "collection_name": "usage-all",
+                "auto_ingest": False,
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["success"] is True
+        assert calls == []
+
+    def test_auto_ingest_default_triggers_wiki_ingest(self, embed_client, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            "libbydbot.api.routes.embed._maybe_auto_ingest_wiki",
+            lambda *a, **k: calls.append(a),
+        )
+        response = embed_client.post(
+            "/api/embed/text",
+            json={
+                "text": "chunk text",
+                "doc_name": "session-1_part1",
+                "collection_name": "usage-all",
+            },
+        )
+        assert response.status_code == 200
+        assert len(calls) == 1

@@ -27,6 +27,7 @@ from sqlalchemy import (
     Table,
     insert,
     func,
+    or_,
     UniqueConstraint,
 )
 from sqlalchemy.exc import IntegrityError, NoSuchModuleError
@@ -3066,9 +3067,20 @@ class DocEmbedder:
 
         return stats
 
+    @staticmethod
+    def _escape_like(value: str) -> str:
+        """Escape SQL LIKE wildcards so *value* matches literally."""
+        return (
+            value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        )
+
     def delete_document(self, doc_name: str, collection_name: str = "") -> dict:
         """
         Delete all chunks of a specific document.
+
+        Also deletes the part chunks produced by client-side chunking
+        (``{doc_name}_part1``, ``{doc_name}_part2``, ...), so re-embedding
+        a chunked document doesn't leave stale parts behind.
 
         :param doc_name: Document name to delete
         :param collection_name: Optional collection filter
@@ -3076,31 +3088,36 @@ class DocEmbedder:
         """
         stats = {"deleted": 0, "errors": []}
 
+        # Matches doc_name itself plus its _partN chunks. The prefix is
+        # LIKE-escaped, and the separator underscore is escaped too, so
+        # 'session-1' cannot clobber an unrelated 'session-11_part1'.
+        part_pattern = self._escape_like(doc_name) + r"\_part%"
+
         if self.dburl.startswith("sqlite"):
             with self.connection as conn:
                 cursor = conn.cursor()
                 try:
                     if collection_name:
                         cursor.execute(
-                            f"SELECT COUNT(*) FROM {self.table_name} WHERE doc_name = ? AND collection_name = ?",
-                            (doc_name, collection_name),
+                            f"SELECT COUNT(*) FROM {self.table_name} WHERE (doc_name = ? OR doc_name LIKE ? ESCAPE '\\') AND collection_name = ?",
+                            (doc_name, part_pattern, collection_name),
                         )
                     else:
                         cursor.execute(
-                            f"SELECT COUNT(*) FROM {self.table_name} WHERE doc_name = ?",
-                            (doc_name,),
+                            f"SELECT COUNT(*) FROM {self.table_name} WHERE doc_name = ? OR doc_name LIKE ? ESCAPE '\\'",
+                            (doc_name, part_pattern),
                         )
                     count = cursor.fetchone()[0]
 
                     if collection_name:
                         cursor.execute(
-                            f"DELETE FROM {self.table_name} WHERE doc_name = ? AND collection_name = ?",
-                            (doc_name, collection_name),
+                            f"DELETE FROM {self.table_name} WHERE (doc_name = ? OR doc_name LIKE ? ESCAPE '\\') AND collection_name = ?",
+                            (doc_name, part_pattern, collection_name),
                         )
                     else:
                         cursor.execute(
-                            f"DELETE FROM {self.table_name} WHERE doc_name = ?",
-                            (doc_name,),
+                            f"DELETE FROM {self.table_name} WHERE doc_name = ? OR doc_name LIKE ? ESCAPE '\\'",
+                            (doc_name, part_pattern),
                         )
                     conn.commit()
                     stats["deleted"] = count
@@ -3114,21 +3131,21 @@ class DocEmbedder:
             try:
                 if collection_name:
                     count = conn.sql(
-                        f"SELECT COUNT(*) FROM {self.table_name} WHERE doc_name = ? AND collection_name = ?",
-                        params=[doc_name, collection_name],
+                        f"SELECT COUNT(*) FROM {self.table_name} WHERE (doc_name = ? OR doc_name LIKE ? ESCAPE '\\') AND collection_name = ?",
+                        params=[doc_name, part_pattern, collection_name],
                     ).fetchone()[0]
                     conn.sql(
-                        f"DELETE FROM {self.table_name} WHERE doc_name = ? AND collection_name = ?",
-                        params=[doc_name, collection_name],
+                        f"DELETE FROM {self.table_name} WHERE (doc_name = ? OR doc_name LIKE ? ESCAPE '\\') AND collection_name = ?",
+                        params=[doc_name, part_pattern, collection_name],
                     )
                 else:
                     count = conn.sql(
-                        f"SELECT COUNT(*) FROM {self.table_name} WHERE doc_name = ?",
-                        params=[doc_name],
+                        f"SELECT COUNT(*) FROM {self.table_name} WHERE doc_name = ? OR doc_name LIKE ? ESCAPE '\\'",
+                        params=[doc_name, part_pattern],
                     ).fetchone()[0]
                     conn.sql(
-                        f"DELETE FROM {self.table_name} WHERE doc_name = ?",
-                        params=[doc_name],
+                        f"DELETE FROM {self.table_name} WHERE doc_name = ? OR doc_name LIKE ? ESCAPE '\\'",
+                        params=[doc_name, part_pattern],
                     )
                 stats["deleted"] = count
                 logger.info(f"Deleted {count} chunks of document '{doc_name}'")
@@ -3139,7 +3156,10 @@ class DocEmbedder:
             with Session(self.engine) as session:
                 try:
                     stmt = self.embedding.__table__.delete().where(
-                        self.embedding.doc_name == doc_name
+                        or_(
+                            self.embedding.doc_name == doc_name,
+                            self.embedding.doc_name.like(part_pattern, escape="\\"),
+                        )
                     )
                     if collection_name:
                         stmt = stmt.where(self.embedding.collection_name == collection_name)

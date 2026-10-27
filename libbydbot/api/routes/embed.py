@@ -164,7 +164,8 @@ def embed_text(request: EmbedTextRequest, embedder: EmbedderDep):
         embedder.collection_name = request.collection_name
         embedder.embed_text(request.text, request.doc_name, request.page_number)
 
-        _maybe_auto_ingest_wiki(embedder, request.collection_name, request.doc_name)
+        if request.auto_ingest is not False:
+            _maybe_auto_ingest_wiki(embedder, request.collection_name, request.doc_name)
 
         return EmbedTextResponse(
             success=True,

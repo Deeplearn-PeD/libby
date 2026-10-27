@@ -630,3 +630,40 @@ def test_get_document_chunks_postgres():
     assert len(chunks) == 2
     assert [c["page_number"] for c in chunks] == [0, 1]
 
+
+
+def test_delete_document_removes_part_chunks(tmp_path):
+    """delete_document('doc_a') also removes doc_a_partN chunks (client-side
+    chunking stores parts under suffixed names). Unrelated documents and
+    their parts survive."""
+    db_path = tmp_path / "embedding.db"
+    embedder = DocEmbedder(
+        "c", dburl=f"sqlite:///{db_path}", embedding_model="mxbai-embed-large"
+    )
+    embedder.embed_text("whole doc", "doc_a", 0)
+    embedder.embed_text("part 1", "doc_a_part1", 1)
+    embedder.embed_text("part 2", "doc_a_part2", 2)
+    embedder.embed_text("other whole", "doc_b", 0)
+    embedder.embed_text("other part", "doc_b_part1", 1)
+
+    stats = embedder.delete_document("doc_a")
+    assert stats["deleted"] == 3, stats
+    remaining = {d[0] for d in embedder.get_embedded_documents()}
+    assert remaining == {"doc_b", "doc_b_part1"}
+
+
+def test_delete_document_no_cross_document_collision(tmp_path):
+    """Deleting 'doc_a' must not touch 'doc_a2_part1' or 'doc_ab_part1'
+    (the separator underscore is escaped in the LIKE pattern)."""
+    db_path = tmp_path / "embedding.db"
+    embedder = DocEmbedder(
+        "c", dburl=f"sqlite:///{db_path}", embedding_model="mxbai-embed-large"
+    )
+    embedder.embed_text("target", "doc_a", 0)
+    embedder.embed_text("sibling", "doc_a2_part1", 1)
+    embedder.embed_text("glued", "doc_ab_part1", 1)
+
+    stats = embedder.delete_document("doc_a")
+    assert stats["deleted"] == 1, stats
+    remaining = {d[0] for d in embedder.get_embedded_documents()}
+    assert remaining == {"doc_a2_part1", "doc_ab_part1"}
