@@ -4,6 +4,7 @@ This module implements LibbyDBot's memory system
 LibbyDBot's memory system is a simple data model that persists data between sessions
 """
 import os
+from pydantic import NaiveDatetime
 from sqlmodel import SQLModel, Field, create_engine, Session, select
 import datetime
 import loguru
@@ -20,7 +21,10 @@ class User(SQLModel, table=True):
 
 class Memory(SQLModel, table=True):
     id: int | None = Field(primary_key=True, default=None)
-    timestamp: datetime.datetime = Field(default_factory=datetime.datetime.now, index=True)
+    # NaiveDatetime keeps the historical naive-UTC storage format for the
+    # indexed timestamp column (sqlmodel >= 0.0.44 enforces tz-aware values
+    # on plain datetime fields).
+    timestamp: NaiveDatetime = Field(default_factory=datetime.datetime.now, index=True)
     question: str = Field()
     context: str = Field()
     response: str = Field()

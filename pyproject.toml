@@ -35,6 +35,17 @@ readme = "README.md"
 
 [tool.uv]
 package = true
+# Security-refresh constraints (2026-11): floors at the Dependabot-patched
+# versions, caps at the last API-compatible majors. Loosen when Libby adopts
+# the next majors — duckdb 2.0 (storage format + HNSW persistence flag),
+# sqlmodel 0.0.48 (tz-aware datetime enforcement), pydantic-ai 2.x / mcp 2.x.
+constraint-dependencies = [
+    "duckdb>=1.1.3,<2.0",
+    "sqlmodel>=0.0.18,<0.0.48",
+    "sqlalchemy>=2.0.29,<2.1",
+    "pydantic-ai-slim>=1.107.6,<2",
+    "mcp>=1.28.1,<2",
+]
 
 [project.scripts]
 libby = "libbydbot.cli:main"

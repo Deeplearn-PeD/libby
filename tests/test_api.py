@@ -747,7 +747,10 @@ class TestGraphRoutes:
         from libbydbot.api.main import create_app
 
         test_app = create_app()
-        route_paths = [r.path for r in test_app.routes if hasattr(r, "path")]
+        # fastapi >= 0.162 nests included routers (lazy _IncludedRouter
+        # entries on app.routes), so introspect the OpenAPI schema instead
+        # of walking app.routes directly.
+        route_paths = set(test_app.openapi()["paths"].keys())
 
         assert "/api/wiki/graph/rebuild" in route_paths
         assert "/api/wiki/graph/{collection_name}" in route_paths
