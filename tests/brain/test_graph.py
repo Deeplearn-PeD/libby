@@ -1,3 +1,4 @@
+import json
 import tempfile
 import time
 from pathlib import Path
@@ -5,7 +6,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from libbydbot.brain.graph import WikiKnowledgeGraph
+from libbydbot.brain.graph import (
+    EDGE_CONFIDENCE,
+    GRAPH_SCHEMA_VERSION,
+    INFERRED_EDGE_CONFIDENCE,
+    PAGE_NODE_TYPES,
+    WikiKnowledgeGraph,
+)
 from libbydbot.brain.wiki import WikiManager
 from libbydbot.brain.wiki_models import (
     KeyConcept,
@@ -262,6 +269,203 @@ class TestQueries:
         assert by_title["Phantom"]["inbound_count"] == 1
         assert stubs[0]["title"] == "Ghost"  # most-referenced first
         assert any("Testing" in ref for ref in by_title["Ghost"]["referenced_by"])
+
+
+class TestEdgeProvenance:
+    """graphify-style edge tagging: extracted (explicit in content) vs
+    inferred (LLM summaries, regex chunk matching) + confidence rubric."""
+
+    def test_wikilink_edges_are_extracted(self, kg):
+        edge = kg.graph.edges["sources/doc_a.md", "entities/alice.md"]
+        assert edge["origin"] == "extracted"
+        assert edge["confidence"] == 1.0
+
+    def test_summary_mentions_are_inferred(self, wiki_dir):
+        kg = WikiKnowledgeGraph(wiki_dir, "c").rebuild()
+        kg.update_from_ingest("Doc B", make_summary())
+        edge = kg.graph.edges["sources/doc_b.md", "entities/carol.md"]
+        assert edge["origin"] == "inferred"
+        assert edge["confidence"] == pytest.approx(EDGE_CONFIDENCE["mentions"])
+
+    def test_chunk_references_are_inferred(self, wiki_dir):
+        kg = WikiKnowledgeGraph(wiki_dir, "c").rebuild()
+        kg.update_from_ingest("Doc B", make_summary(), CHUNKS)
+        edge = kg.graph.edges["chunk:h1", "concepts/testing.md"]
+        assert edge["origin"] == "inferred"
+        assert edge["confidence"] == pytest.approx(EDGE_CONFIDENCE["references"])
+
+    def test_chunk_of_edges_are_extracted(self, wiki_dir):
+        kg = WikiKnowledgeGraph(wiki_dir, "c").rebuild()
+        kg.update_from_ingest("Doc B", make_summary(), CHUNKS)
+        edge = kg.graph.edges["chunk:h1", "sources/doc_b.md"]
+        assert edge["origin"] == "extracted"
+        assert edge["confidence"] == 1.0
+
+    def test_inferred_links_to_edges_never_get_full_confidence(self, wiki_dir):
+        """An LLM-suggested relation pointing at an existing page of another
+        type becomes links_to — the inferred rubric must apply (0.75), not
+        the extracted wikilink rubric (1.0)."""
+        summary = make_summary()
+        summary.entities[0].related_entities = ["Testing"]  # a concept page
+        kg = WikiKnowledgeGraph(wiki_dir, "c").rebuild()
+        kg.update_from_ingest("Doc B", summary)
+        edge = kg.graph.edges["entities/carol.md", "concepts/testing.md"]
+        assert edge["edge_type"] == "links_to"
+        assert edge["origin"] == "inferred"
+        assert edge["confidence"] == pytest.approx(
+            INFERRED_EDGE_CONFIDENCE["links_to"]
+        )
+        assert edge["confidence"] < 1.0
+
+    def test_shortest_path_reports_weakest_hop(self, wiki_dir):
+        """Carol -> Alice traverses the LLM-inferred related_to edge, so the
+        path confidence is that single (weakest) hop's 0.75."""
+        kg = WikiKnowledgeGraph(wiki_dir, "c").rebuild()
+        kg.update_from_ingest("Doc B", make_summary())
+        result = kg.shortest_path("Carol", "Alice")
+        assert result["found"]
+        assert result["confidence"] == pytest.approx(EDGE_CONFIDENCE["related_to"])
+        assert result["edges"][0]["confidence"] == pytest.approx(
+            EDGE_CONFIDENCE["related_to"]
+        )
+
+    def test_shortest_path_extracted_is_full_confidence(self, kg):
+        result = kg.shortest_path("Alice", "Doc A")
+        assert result["found"]
+        assert result["confidence"] == 1.0
+
+    def test_explain_includes_provenance(self, kg):
+        info = kg.explain("Alice")
+        assert info["found"]
+        edges = info["outbound"] + info["inbound"]
+        assert edges
+        assert all("origin" in e and "confidence" in e for e in edges)
+
+
+class TestCommunities:
+    def test_rebuild_tags_communities_by_default(self, kg):
+        for node, data in kg.graph.nodes(data=True):
+            if data.get("node_type") in PAGE_NODE_TYPES:
+                assert "community" in data
+        assert kg.graph.graph.get("community_labels")
+
+    def test_detect_communities_tags_all_pages(self, kg):
+        mapping = kg.detect_communities()
+        assert mapping
+        for node, data in kg.graph.nodes(data=True):
+            if data.get("node_type") in PAGE_NODE_TYPES:
+                assert data.get("community", -1) >= 0
+                assert node in mapping
+        labels = kg.graph.graph.get("community_labels", {})
+        assert labels
+        assert all(isinstance(v, str) and v for v in labels.values())
+
+    def test_rebuild_skips_communities_when_disabled(self, wiki_dir):
+        with patch.object(WikiKnowledgeGraph, "_communities_enabled", return_value=False):
+            kg = WikiKnowledgeGraph(wiki_dir, "c").rebuild()
+        for node, data in kg.graph.nodes(data=True):
+            if data.get("node_type") in PAGE_NODE_TYPES:
+                assert "community" not in data
+
+    def test_disabling_communities_clears_stale_state(self, wiki_dir):
+        """Turning the setting off must not leave stale community attrs or
+        labels behind on an already-populated graph instance."""
+        kg = WikiKnowledgeGraph(wiki_dir, "c").rebuild()  # enabled by default
+        assert kg.graph.graph.get("community_labels")
+        with patch.object(WikiKnowledgeGraph, "_communities_enabled", return_value=False):
+            kg.rebuild()
+        assert not kg.graph.graph.get("community_labels")
+        for node, data in kg.graph.nodes(data=True):
+            if data.get("node_type") in PAGE_NODE_TYPES:
+                assert "community" not in data
+
+    def test_bridges_cross_community_edges(self, kg):
+        """Deterministic partition: doc_a+alice in community 0, bob and
+        testing in community 1 — the alice->bob and doc_a->testing edges
+        must come back as bridges; intra-community edges must not."""
+        for node in kg.graph.nodes:
+            data = kg.graph.nodes[node]
+            if data.get("node_type") in PAGE_NODE_TYPES:
+                data["community"] = 0
+        kg.graph.nodes["entities/bob.md"]["community"] = 1
+        kg.graph.nodes["concepts/testing.md"]["community"] = 1
+        bridges = kg.bridges(10)
+        pairs = {(b["from"], b["to"]) for b in bridges}
+        assert ("entities/alice.md", "entities/bob.md") in pairs
+        assert ("sources/doc_a.md", "concepts/testing.md") in pairs
+        # intra-community edges are never bridges
+        assert ("sources/doc_a.md", "entities/alice.md") not in pairs
+        assert all(
+            b["from_community"] != b["to_community"] for b in bridges
+        )
+
+    def test_status_includes_communities_and_bridges(self, kg):
+        status = kg.status()
+        assert "communities" in status
+        assert "community_labels" in status
+        assert "bridges" in status
+
+
+class TestHubSuppression:
+    @pytest.fixture
+    def star_kg(self, tmp_path):
+        """One hub concept linked from 12 leaf entity pages."""
+        wiki = tmp_path
+        for sub in ("sources", "entities", "concepts", "synthesis"):
+            (wiki / sub).mkdir(parents=True, exist_ok=True)
+        (wiki / "concepts" / "hub.md").write_text(
+            "---\ntitle: Hub\n---\n\n# Hub\n", encoding="utf-8"
+        )
+        for i in range(12):
+            (wiki / "entities" / f"leaf{i}.md").write_text(
+                f"---\ntitle: Leaf {i}\n---\n\n# Leaf {i}\n\nUses [[Hub]].\n",
+                encoding="utf-8",
+            )
+        (wiki / "index.md").write_text("# Index\n", encoding="utf-8")
+        (wiki / "log.md").write_text("# Log\n", encoding="utf-8")
+        return WikiKnowledgeGraph(wiki, "star").rebuild()
+
+    def test_hub_threshold_values(self, kg):
+        degrees = sorted(
+            kg.graph.degree(n)
+            for n, d in kg.graph.nodes(data=True)
+            if d.get("node_type") in PAGE_NODE_TYPES
+        )
+        assert kg._hub_degree_threshold(100) == float("inf")
+        assert kg._hub_degree_threshold(0) == degrees[0]
+        idx = min(len(degrees) - 1, int(round(0.5 * (len(degrees) - 1))))
+        assert kg._hub_degree_threshold(50) == degrees[idx]
+        assert kg._hub_degree_threshold(99) <= degrees[-1]
+
+    def test_hubs_exclude_hubs_drops_superhubs(self, star_kg):
+        default_titles = [h["title"] for h in star_kg.hubs(20)]
+        assert "Hub" in default_titles
+        filtered = star_kg.hubs(20, exclude_hubs=99)
+        assert filtered
+        assert "Hub" not in [h["title"] for h in filtered]
+
+    def test_score_pages_with_hub_damping(self, star_kg):
+        ranked = star_kg.score_pages("hub", hub_percentile=95)
+        assert ranked and ranked[0] == "concepts/hub.md"
+        damped = star_kg.score_pages("hub", hub_percentile=50)
+        assert damped and damped[0] == "concepts/hub.md"
+
+
+class TestSchemaVersion:
+    def test_saved_graph_has_schema_version(self, kg):
+        data = json.loads(
+            (Path(kg.wiki_dir) / "graph.json").read_text(encoding="utf-8")
+        )
+        assert data["graph"]["schema_version"] == GRAPH_SCHEMA_VERSION
+
+    def test_legacy_graph_without_marker_loads(self, wiki_dir):
+        """Graphs persisted before schema versioning load with defaults."""
+        WikiKnowledgeGraph(wiki_dir, "c").rebuild()
+        data = json.loads((wiki_dir / "graph.json").read_text(encoding="utf-8"))
+        data.pop("graph", None)
+        (wiki_dir / "graph.json").write_text(json.dumps(data), encoding="utf-8")
+        kg = WikiKnowledgeGraph(wiki_dir, "c")
+        assert kg.graph.number_of_nodes() > 0
 
 
 class TestExport:

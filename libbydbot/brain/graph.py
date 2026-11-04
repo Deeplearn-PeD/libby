@@ -4,11 +4,15 @@ Knowledge graph layer for Libby's LLM Wiki.
 WikiKnowledgeGraph builds and maintains a persistent NetworkX graph over a
 collection's wiki pages (sources, entities, concepts, synthesis) and its
 embedded chunks. Nodes carry page metadata from YAML frontmatter; edges
-capture wikilinks, mention/related relationships, and chunk references.
+capture wikilinks, mention/related relationships, and chunk references,
+each tagged with a provenance origin (extracted vs inferred) and a
+confidence score in graphify's style. The page-level graph is partitioned
+into Louvain topic communities with hub-derived labels, and cross-community
+"bridge" edges surface surprising connections between topics.
 
-The graph is persisted as ``graph.json`` (NetworkX node-link format) inside
-the wiki directory and can be exported to an interactive ``graph.html``
-visualization via pyvis.
+The graph is persisted as ``graph.json`` (NetworkX node-link format, with
+a schema version marker) inside the wiki directory and can be exported to
+an interactive ``graph.html`` visualization via pyvis.
 """
 
 import itertools
@@ -68,6 +72,61 @@ EDGE_COLORS = {
     "chunk_of": "#D0D5DD",
     "references": "#B497E7",
 }
+
+#: Bump when the persisted graph format changes in a way loaders must know
+#: about. A missing marker means a legacy (pre-versioning) graph, which
+#: loads with default provenance attributes.
+GRAPH_SCHEMA_VERSION = 2
+
+#: Provenance origin per edge type, used when a call site does not say
+#: otherwise. ``extracted`` = read directly from wiki content (wikilinks,
+#: chunk-to-source structure); ``inferred`` = derived (LLM summaries,
+#: regex chunk matching).
+EDGE_ORIGIN: dict[str, str] = {
+    "mentions": "inferred",
+    "mentioned_in": "inferred",
+    "related_to": "inferred",
+    "links_to": "extracted",
+    "chunk_of": "extracted",
+    "references": "inferred",
+}
+
+#: Discrete confidence rubric per edge type (graphify-style): 1.0 for
+#: deterministic structure, graded values for inferred relationships.
+EDGE_CONFIDENCE: dict[str, float] = {
+    "mentions": 0.85,
+    "mentioned_in": 0.85,
+    "related_to": 0.75,
+    "links_to": 1.0,
+    "chunk_of": 1.0,
+    "references": 0.85,
+}
+
+#: Confidence rubric for edges derived from LLM summaries, per edge type.
+#: ``links_to`` here is the inferred variant (an LLM-suggested relation that
+#: happens to point at an existing page of another type), distinct from the
+#: extracted 1.0 wikilink rubric above: inferred edges never get 1.0.
+INFERRED_EDGE_CONFIDENCE: dict[str, float] = {
+    "mentions": 0.85,
+    "mentioned_in": 0.85,
+    "related_to": 0.75,
+    "links_to": 0.75,
+    "references": 0.85,
+    "chunk_of": 1.0,
+}
+
+#: Confidence assumed for edges persisted before provenance tagging.
+DEFAULT_EDGE_CONFIDENCE = 1.0
+
+
+def _libby_version() -> str:
+    """Installed libby distribution version, for graph.json provenance."""
+    try:
+        from importlib.metadata import version
+
+        return version("libby")
+    except Exception:
+        return "unknown"
 
 
 def sanitize_name(name: str) -> str:
@@ -172,6 +231,8 @@ class WikiKnowledgeGraph:
 
     def save(self) -> Path:
         """Persist the graph to graph.json in node-link format (atomically)."""
+        self.graph.graph["schema_version"] = GRAPH_SCHEMA_VERSION
+        self.graph.graph["libby_version"] = _libby_version()
         data = nx.node_link_data(self.graph, edges="edges")
         _atomic_write_text(
             self.graph_path,
@@ -184,6 +245,17 @@ class WikiKnowledgeGraph:
     def load(self) -> None:
         """Load the graph from graph.json."""
         data = json.loads(self.graph_path.read_text(encoding="utf-8"))
+        schema = (data.get("graph") or {}).get("schema_version")
+        if schema is None:
+            logger.info(
+                "graph.json has no schema marker (legacy format); loading with "
+                "default edge provenance until the next rebuild"
+            )
+        elif schema > GRAPH_SCHEMA_VERSION:
+            logger.warning(
+                f"graph.json schema v{schema} is newer than supported "
+                f"v{GRAPH_SCHEMA_VERSION}; loading best-effort"
+            )
         self.graph = nx.node_link_graph(data, edges="edges")
 
     # ────────────────────────── parsing helpers ─────────────────────
@@ -230,6 +302,17 @@ class WikiKnowledgeGraph:
         if u_type == v_type and u_type in ("entity", "concept"):
             return "related_to"
         return "links_to"
+
+    @staticmethod
+    def _edge_attrs(edge_type: str, origin: str, confidence: float) -> dict[str, Any]:
+        """
+        Standard provenance attributes for a new edge.
+
+        Mirrors graphify's tagging: ``origin`` distinguishes relationships
+        read directly from content (``extracted``) from derived ones
+        (``inferred``), and ``confidence`` carries a 0-1 rubric value.
+        """
+        return {"edge_type": edge_type, "origin": origin, "confidence": confidence}
 
     def resolve_node(self, name: str) -> str | None:
         """Resolve a human name or page title to a node id (exact, case-insensitive)."""
@@ -325,7 +408,10 @@ class WikiKnowledgeGraph:
                 if v == rel:
                     continue
                 v_type = self.graph.nodes[v].get("node_type", "")
-                self.graph.add_edge(rel, v, edge_type=self._edge_type(u_type, v_type))
+                # Wikilinks are explicit in page content: extracted, full confidence.
+                self.graph.add_edge(rel, v, **self._edge_attrs(
+                    self._edge_type(u_type, v_type), "extracted", 1.0
+                ))
 
         # Restore chunk nodes and re-attach them to their source pages.
         # Reference targets may have changed identity (e.g. stub -> page),
@@ -337,6 +423,8 @@ class WikiKnowledgeGraph:
             if u in self.graph and target is not None:
                 self.graph.add_edge(u, target, **attrs)
         self._reattach_chunk_of_edges()
+
+        self._refresh_communities()
 
         self.save()
         return self
@@ -357,7 +445,10 @@ class WikiKnowledgeGraph:
                 continue
             source_node = self._source_node_for_doc(data.get("doc_name", ""))
             if source_node:
-                self.graph.add_edge(node, source_node, edge_type="chunk_of")
+                self.graph.add_edge(
+                    node, source_node,
+                    **self._edge_attrs("chunk_of", "extracted", EDGE_CONFIDENCE["chunk_of"]),
+                )
 
     def _ensure_page_node(self, name: str, node_type: str) -> str:
         """
@@ -416,27 +507,40 @@ class WikiKnowledgeGraph:
         for entity in summary.entities:
             node_id = self._ensure_page_node(entity.name, "entity")
             entity_names.append(entity.name)
-            self.graph.add_edge(source_id, node_id, edge_type="mentions")
+            # Summary-derived edges are LLM inferences, not explicit page content.
+            self.graph.add_edge(source_id, node_id, **self._edge_attrs(
+                "mentions", "inferred", INFERRED_EDGE_CONFIDENCE["mentions"]
+            ))
             for related in entity.related_entities:
                 rel_id = self._link_target_node(related)
-                self.graph.add_edge(
-                    node_id, rel_id, edge_type=self._edge_type("entity", self.graph.nodes[rel_id].get("node_type", ""))
+                rel_type = self._edge_type(
+                    "entity", self.graph.nodes[rel_id].get("node_type", "")
                 )
+                self.graph.add_edge(node_id, rel_id, **self._edge_attrs(
+                    rel_type, "inferred", INFERRED_EDGE_CONFIDENCE.get(rel_type, 0.75)
+                ))
 
         concept_names: list[str] = []
         for concept in summary.concepts:
             node_id = self._ensure_page_node(concept.name, "concept")
             concept_names.append(concept.name)
-            self.graph.add_edge(source_id, node_id, edge_type="mentions")
+            self.graph.add_edge(source_id, node_id, **self._edge_attrs(
+                "mentions", "inferred", INFERRED_EDGE_CONFIDENCE["mentions"]
+            ))
             for related in concept.related_concepts:
                 rel_id = self._link_target_node(related)
-                self.graph.add_edge(
-                    node_id, rel_id, edge_type=self._edge_type("concept", self.graph.nodes[rel_id].get("node_type", ""))
+                rel_type = self._edge_type(
+                    "concept", self.graph.nodes[rel_id].get("node_type", "")
                 )
+                self.graph.add_edge(node_id, rel_id, **self._edge_attrs(
+                    rel_type, "inferred", INFERRED_EDGE_CONFIDENCE.get(rel_type, 0.75)
+                ))
 
         if chunks:
             self.add_chunks(chunks)
             self.link_chunks_to_names(chunks, entity_names + concept_names)
+
+        self._refresh_communities()
 
         self.save()
         return self
@@ -461,7 +565,10 @@ class WikiKnowledgeGraph:
                 )
             source_node = self._source_node_for_doc(chunk.get("doc_name", ""))
             if source_node:
-                self.graph.add_edge(node_id, source_node, edge_type="chunk_of")
+                self.graph.add_edge(
+                    node_id, source_node,
+                    **self._edge_attrs("chunk_of", "extracted", EDGE_CONFIDENCE["chunk_of"]),
+                )
 
     def link_chunks_to_names(self, chunks: list[dict], names: list[str]) -> int:
         """
@@ -485,9 +592,149 @@ class WikiKnowledgeGraph:
                 if pattern.search(content):
                     chunk_id = f"chunk:{doc_hash}"
                     if chunk_id in self.graph and not self.graph.has_edge(chunk_id, target):
-                        self.graph.add_edge(chunk_id, target, edge_type="references")
+                        self.graph.add_edge(chunk_id, target, **self._edge_attrs(
+                            "references", "inferred", INFERRED_EDGE_CONFIDENCE["references"]
+                        ))
                         created += 1
         return created
+
+    # ──────────────────── community / hub analysis ──────────────────
+
+    @staticmethod
+    def _communities_enabled() -> bool:
+        try:
+            from libbydbot.settings import Settings
+
+            return bool(Settings().wiki_graph_communities)
+        except Exception:
+            return True
+
+    def _refresh_communities(self) -> None:
+        """
+        Recompute community assignments per the current settings.
+
+        When communities are disabled, previously computed assignments are
+        cleared instead of being left stale (the graph may be a long-lived
+        shared instance loaded from a graph.json that had communities).
+        """
+        if self._communities_enabled():
+            self.detect_communities()
+            return
+        for _, data in self.graph.nodes(data=True):
+            if data.get("node_type") in PAGE_NODE_TYPES:
+                data.pop("community", None)
+        self.graph.graph.pop("community_labels", None)
+
+    def detect_communities(self, resolution: float | None = None) -> dict[str, int]:
+        """
+        Partition the page-level graph into topic communities (Louvain).
+
+        Only real wiki pages participate — chunk and stub nodes distort edge
+        density. Each page node gains a ``community`` attribute, and the
+        graph gains ``community_labels``: LLM-free names derived from each
+        community's top hubs (graphify's labeling trick). Returns the
+        node -> community-id mapping.
+        """
+        if resolution is None:
+            try:
+                from libbydbot.settings import Settings
+
+                resolution = Settings().wiki_graph_resolution
+            except Exception:
+                resolution = 1.0
+        pages = [
+            n
+            for n, d in self.graph.nodes(data=True)
+            if d.get("node_type") in PAGE_NODE_TYPES
+        ]
+        # Reset any previous assignment so stale ids never survive a re-run.
+        for node in pages:
+            self.graph.nodes[node]["community"] = -1
+        self.graph.graph.pop("community_labels", None)
+        if len(pages) < 3:
+            return {}
+
+        sub = self.graph.subgraph(pages).to_undirected()
+        try:
+            communities = nx.community.louvain_communities(
+                sub, resolution=resolution, seed=42
+            )
+        except Exception as e:
+            logger.warning(f"Community detection failed: {e}")
+            return {}
+
+        labels: dict[str, str] = {}
+        mapping: dict[str, int] = {}
+        for i, members in enumerate(communities):
+            hubs = sorted(members, key=lambda n: (-self.graph.degree(n), n))
+            labels[str(i)] = ", ".join(
+                self.graph.nodes[n].get("title", n) for n in hubs[:3]
+            )
+            for node in members:
+                self.graph.nodes[node]["community"] = i
+                mapping[node] = i
+        self.graph.graph["community_labels"] = labels
+        logger.info(
+            f"Detected {len(communities)} communities (resolution={resolution})"
+        )
+        return mapping
+
+    def _hub_degree_threshold(self, percentile: float) -> float:
+        """
+        Degree cutoff at *percentile* over page nodes (0-100).
+
+        Used for hub suppression: nodes at or above the cutoff are
+        super-hubs whose connectivity says more about ubiquity than
+        relevance. A percentile of 100 disables suppression (inf cutoff).
+        """
+        if percentile >= 100:
+            return float("inf")
+        degrees = sorted(
+            self.graph.degree(n)
+            for n, d in self.graph.nodes(data=True)
+            if d.get("node_type") in PAGE_NODE_TYPES
+        )
+        if not degrees:
+            return float("inf")
+        idx = min(
+            len(degrees) - 1,
+            max(0, int(round((percentile / 100.0) * (len(degrees) - 1)))),
+        )
+        return float(degrees[idx])
+
+    def bridges(self, top_n: int = 10) -> list[dict[str, Any]]:
+        """
+        Cross-community edges — the places where two topic clusters touch.
+
+        These "surprising connections" are prime candidates for synthesis:
+        they link ideas the wiki otherwise treats separately (graphify's
+        report section of the same name). Ranked by endpoint connectivity
+        x edge confidence. Empty when communities have not been detected.
+        """
+        labels = self.graph.graph.get("community_labels", {})
+        found: list[dict[str, Any]] = []
+        for u, v, d in self.graph.edges(data=True):
+            nu, nv = self.graph.nodes[u], self.graph.nodes[v]
+            if nu.get("node_type") not in PAGE_NODE_TYPES or nv.get("node_type") not in PAGE_NODE_TYPES:
+                continue
+            cu, cv = nu.get("community", -1), nv.get("community", -1)
+            if cu == cv or cu < 0 or cv < 0:
+                continue
+            confidence = d.get("confidence", DEFAULT_EDGE_CONFIDENCE)
+            found.append({
+                "from": u,
+                "to": v,
+                "from_title": nu.get("title", u),
+                "to_title": nv.get("title", v),
+                "edge_type": d.get("edge_type", "links_to"),
+                "origin": d.get("origin", EDGE_ORIGIN.get(d.get("edge_type", ""), "inferred")),
+                "confidence": confidence,
+                "from_community": labels.get(str(cu), str(cu)),
+                "to_community": labels.get(str(cv), str(cv)),
+                "strength": round((self.graph.degree(u) + self.graph.degree(v)) * confidence, 2),
+            })
+        found.sort(key=lambda b: b["strength"], reverse=True)
+        return found[: max(1, int(top_n))]
 
     # ────────────────────────── queries ─────────────────────────────
 
@@ -504,12 +751,31 @@ class WikiKnowledgeGraph:
             return {"found": False, "error": f"No path between '{a}' and '{b}'", "nodes": [], "edges": []}
         nodes = [{"id": n, "title": self.graph.nodes[n].get("title", n)} for n in path]
         edges = []
+        confidences: list[float] = []
         for x, y in itertools.pairwise(path):
             if self.graph.has_edge(x, y):
-                edges.append({"from": x, "to": y, "edge_type": self.graph.edges[x, y].get("edge_type", "links_to")})
+                d = self.graph.edges[x, y]
             elif self.graph.has_edge(y, x):
-                edges.append({"from": y, "to": x, "edge_type": self.graph.edges[y, x].get("edge_type", "links_to")})
-        return {"found": True, "length": len(path) - 1, "nodes": nodes, "edges": edges}
+                d = self.graph.edges[y, x]
+            else:
+                continue
+            confidence = d.get("confidence", DEFAULT_EDGE_CONFIDENCE)
+            confidences.append(confidence)
+            edges.append({
+                "from": x if self.graph.has_edge(x, y) else y,
+                "to": y if self.graph.has_edge(x, y) else x,
+                "edge_type": d.get("edge_type", "links_to"),
+                "confidence": confidence,
+            })
+        # Path confidence is that of its weakest hop (graphify's rule): one
+        # speculative link chains down everything that flows through it.
+        return {
+            "found": True,
+            "length": len(path) - 1,
+            "confidence": min(confidences) if confidences else DEFAULT_EDGE_CONFIDENCE,
+            "nodes": nodes,
+            "edges": edges,
+        }
 
     def explain(self, name: str) -> dict[str, Any]:
         """Describe a node: its attributes plus inbound/outbound connections."""
@@ -517,17 +783,26 @@ class WikiKnowledgeGraph:
         if node is None:
             return {"found": False, "error": f"Node not found: {name}"}
         data = dict(self.graph.nodes[node])
+
+        def _edge_entry(other: str, attrs: dict) -> dict[str, Any]:
+            edge_type = attrs.get("edge_type", "links_to")
+            return {
+                "node": other,
+                "title": self.graph.nodes[other].get("title", other),
+                "edge_type": edge_type,
+                "origin": attrs.get(
+                    "origin", EDGE_ORIGIN.get(edge_type, "inferred")
+                ),
+                "confidence": attrs.get("confidence", DEFAULT_EDGE_CONFIDENCE),
+            }
+
         out_edges = [
-            {"node": v, "title": self.graph.nodes[v].get("title", v),
-             "edge_type": d.get("edge_type", "links_to")}
-            for _, v, d in self.graph.out_edges(node, data=True)
+            _edge_entry(v, d) for _, v, d in self.graph.out_edges(node, data=True)
         ]
         in_edges = [
-            {"node": u, "title": self.graph.nodes[u].get("title", u),
-             "edge_type": d.get("edge_type", "links_to")}
-            for u, _, d in self.graph.in_edges(node, data=True)
+            _edge_entry(u, d) for u, _, d in self.graph.in_edges(node, data=True)
         ]
-        return {
+        entry = {
             "found": True,
             "id": node,
             "title": data.get("title", node),
@@ -536,6 +811,13 @@ class WikiKnowledgeGraph:
             "outbound": out_edges,
             "inbound": in_edges,
         }
+        community = data.get("community", -1)
+        if community is not None and community >= 0:
+            entry["community"] = community
+            entry["community_label"] = self.graph.graph.get(
+                "community_labels", {}
+            ).get(str(community), str(community))
+        return entry
 
     def chunks_for_node(self, name: str, limit: int = 5) -> list[dict]:
         """Return chunks that reference the given node."""
@@ -558,10 +840,17 @@ class WikiKnowledgeGraph:
                 break
         return results
 
-    def score_pages(self, question: str, max_nodes: int = 15) -> list[str]:
+    def score_pages(
+        self, question: str, max_nodes: int = 15, hub_percentile: float | None = None
+    ) -> list[str]:
         """
         Rank wiki pages for a question using seed matching and neighborhood
         expansion over the graph. Returns page ids (relative paths).
+
+        ``hub_percentile`` overrides the degree percentile above which a
+        page counts as a super-hub and gets a damped degree bonus (read
+        from ``WIKI_GRAPH_HUB_PERCENTILE`` when not given; 100 disables
+        damping).
         """
         tokens = [t for t in re.findall(r"\w+", question.lower()) if len(t) > 2]
         candidates = [
@@ -602,9 +891,23 @@ class WikiKnowledgeGraph:
                 else:
                     scores[neighbor] += scores[seed] * 0.25
 
-        # Degree bonus: well-connected pages are better synthesis anchors
+        # Degree bonus: well-connected pages are better synthesis anchors.
+        # Super-hubs (degree above the hub percentile) get a damped bonus:
+        # ubiquitous concepts must not dominate rankings just by being
+        # everywhere in the corpus (graphify's --exclude-hubs insight).
+        if hub_percentile is None:
+            try:
+                from libbydbot.settings import Settings
+
+                hub_percentile = Settings().wiki_graph_hub_percentile
+            except Exception:
+                hub_percentile = 95
+        cutoff = self._hub_degree_threshold(hub_percentile)
         for node in scores:
-            scores[node] += min(self.graph.degree(node), 20) * 0.05
+            bonus = min(self.graph.degree(node), 20) * 0.05
+            if self.graph.degree(node) >= cutoff:
+                bonus *= 0.5
+            scores[node] += bonus
 
         ranked = sorted(scores.keys(), key=lambda n: scores[n], reverse=True)
         return ranked[:max_nodes]
@@ -625,13 +928,24 @@ class WikiKnowledgeGraph:
         ]
         return {"question": question, "nodes": nodes, "edges": edges}
 
-    def hubs(self, top_n: int = 10) -> list[dict[str, Any]]:
-        """Return the most-connected non-chunk nodes."""
+    def hubs(self, top_n: int = 10, exclude_hubs: int | None = None) -> list[dict[str, Any]]:
+        """
+        Return the most-connected non-chunk nodes.
+
+        ``exclude_hubs`` suppresses utility super-hubs from the ranking so
+        mid-tail connectors become visible: give it a degree percentile
+        (e.g. 99 to drop the top 1% most connected pages), mirroring
+        graphify's ``--exclude-hubs`` flag.
+        """
+        cutoff = (
+            self._hub_degree_threshold(exclude_hubs) if exclude_hubs is not None else None
+        )
         ranked = sorted(
             (
                 (n, self.graph.degree(n))
                 for n, d in self.graph.nodes(data=True)
                 if d.get("node_type") in PAGE_NODE_TYPES + ("stub",)
+                and (cutoff is None or self.graph.degree(n) < cutoff)
             ),
             key=lambda x: x[1],
             reverse=True,
@@ -652,6 +966,7 @@ class WikiKnowledgeGraph:
         for _, _, d in self.graph.edges(data=True):
             t = d.get("edge_type", "unknown")
             edge_counts[t] = edge_counts.get(t, 0) + 1
+        community_labels = self.graph.graph.get("community_labels", {})
         return {
             "collection": self.collection_name,
             "graph_path": str(self.graph_path),
@@ -660,6 +975,9 @@ class WikiKnowledgeGraph:
             "node_counts": node_counts,
             "edge_counts": edge_counts,
             "hubs": self.hubs(5),
+            "communities": len(community_labels),
+            "community_labels": community_labels,
+            "bridges": self.bridges(5),
         }
 
     def stubs(self, max_stubs: int = 500) -> list[dict[str, Any]]:
@@ -810,10 +1128,16 @@ class WikiKnowledgeGraph:
         """Serialize a node for the shell / batch payloads (vis-network style)."""
         data = self.graph.nodes[node]
         node_type = data.get("node_type", "unknown")
+        title = f"{data.get('title', node)} [{node_type}] degree={degree}"
+        community = data.get("community", -1)
+        if community is not None and community >= 0:
+            label = self.graph.graph.get("community_labels", {}).get(str(community))
+            if label:
+                title += f" · {label}"
         out: dict[str, Any] = {
             "id": node,
             "label": data.get("title", node),
-            "title": f"{data.get('title', node)} [{node_type}] degree={degree}",
+            "title": title,
             "color": NODE_COLORS.get(node_type, "#666666"),
             "size": 8 + min(degree * 2, 30),
             "shape": "box" if node_type == "chunk" else "dot",

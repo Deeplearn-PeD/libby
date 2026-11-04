@@ -73,6 +73,27 @@ class Settings(BaseSettings):
         description="Maintain a knowledge graph over wiki pages and embedded chunks",
     )
 
+    wiki_graph_communities: bool = Field(
+        default=True,
+        description="Detect topic communities (Louvain) in the wiki knowledge graph",
+    )
+
+    wiki_graph_resolution: float = Field(
+        default=1.0,
+        description=(
+            "Louvain resolution for community detection; higher values yield "
+            "more, smaller communities"
+        ),
+    )
+
+    wiki_graph_hub_percentile: int = Field(
+        default=95,
+        description=(
+            "Degree percentile above which a page node counts as a super-hub; "
+            "super-hubs get a damped degree bonus in query ranking"
+        ),
+    )
+
     db_url: str = Field(
         default_factory=lambda: f"sqlite:///{Path.home() / '.libby' / 'data' / 'libby.db'}",
         description="Database URL for chat history",

@@ -183,6 +183,9 @@ libby/
 - `WIKI_AUTO_INGEST` - Automatically ingest documents into the wiki after embedding (default: `True`). Reads straight from the embedding table, so no PDF re-parsing is needed.
 - `WIKI_MODEL` - Dedicated LLM model for wiki ingest/query/summary (default: `glm-5-turbo`). Must be a **non-thinking** model that supports structured tool-calling — thinking models (`kimi-k2.6`, `deepseek-v4-flash/pro`) reject pydantic-ai `tool_choice` and yield empty summaries. Working options: `glm-5-turbo`/`glm-5.2` (Zhipu), `gpt-4o`, `gemini-2.5-flash`.
 - `WIKI_GRAPH_ENABLED` - Maintain a knowledge graph over wiki pages and embedded chunks (default: `True`)
+- `WIKI_GRAPH_COMMUNITIES` - Detect Louvain topic communities in the wiki graph (default: `True`)
+- `WIKI_GRAPH_RESOLUTION` - Louvain resolution; higher values yield more, smaller communities (default: `1.0`)
+- `WIKI_GRAPH_HUB_PERCENTILE` - Degree percentile above which a page counts as a super-hub with damped ranking bonus (default: `95`)
 
 ## Supported Models
 
@@ -308,19 +311,40 @@ queries it.
 - **Chunk nodes** — one per embedded chunk (id = `chunk:<doc_hash>`).
 - **Edge types** — `mentions`, `mentioned_in`, `related_to`, `links_to`, `chunk_of`
   (chunk → source), `references` (chunk → entity/concept matched by name).
+- **Edge provenance** — every edge carries `origin` (`extracted` = explicit in
+  wiki content, e.g. wikilinks and `chunk_of`; `inferred` = LLM summaries or
+  regex chunk matches) and a `confidence` score (1.0 extracted; inferred edges
+  use 0.85 for mentions/references and 0.75 for related_to/links_to — inferred
+  edges never get 1.0). `shortest_path` reports the weakest hop's
+  confidence as the path confidence; `explain` lists both per edge.
+- **Communities** — the page-level graph is partitioned into Louvain topic
+  communities on rebuild/ingest (`detect_communities`); each page node gets a
+  `community` attribute and the graph gets LLM-free `community_labels` derived
+  from each community's top hubs.
+- **Bridges** — `bridges()` returns cross-community edges ("surprising
+  connections"), ranked by endpoint connectivity × confidence; surfaced in
+  `status()`.
 - Broken wikilinks become `stub` nodes; stubs are upgraded when real pages appear.
 - The graph is updated incrementally on ingest and can be fully rebuilt from disk
   (chunk nodes and reference edges survive rebuilds).
+- **Schema version** — `graph.json` carries `graph.schema_version` and
+  `graph.libby_version`; legacy files without a marker load with default
+  edge provenance.
 
 Graph capabilities:
 
 - **Graph-aware query** — `WikiManager.query()` ranks pages via seed matching + 1-hop
-  neighborhood expansion + degree, replacing the naive keyword filter.
-- **Path** — shortest path between two concepts.
-- **Explain** — a node's attributes plus inbound/outbound connections.
+  neighborhood expansion + degree, replacing the naive keyword filter. Super-hubs
+  (degree above `WIKI_GRAPH_HUB_PERCENTILE`) get a damped degree bonus so
+  ubiquitous concepts don't dominate rankings.
+- **Path** — shortest path between two concepts, with weakest-hop confidence.
+- **Explain** — a node's attributes (including its community) plus inbound/outbound
+  connections with provenance.
 - **Subgraph query** — ranked nodes/edges for a question.
-- **Hubs** — most-connected nodes.
-- **Visualization** — export an interactive `graph.html` via pyvis.
+- **Hubs** — most-connected nodes; pass `exclude_hubs=<percentile>` (e.g. 99) to
+  suppress utility super-hubs from the ranking.
+- **Visualization** — export an interactive `graph.html` via pyvis; tooltips
+  include community labels.
 
 ### CLI Commands (Legacy)
 
