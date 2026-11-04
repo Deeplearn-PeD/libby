@@ -1,7 +1,39 @@
 # Changelog
 
-All notable changes to Libby D. Bot will be documented in this file.
+All notable changes to this project will be documented in this file.
 
+## [1.4.0] - 2026-11-04
+
+### Features
+- feat(graph): graphify-inspired upgrades — Louvain communities, bridges, edge provenance, hub suppression
+- feat(embed): per-request auto_ingest override + part-aware delete_document
+- feat(graph): stubs endpoint for knowledge-gap source recommendations
+- feat(wiki): progressive ego-graph expansion on node click and zoom-out
+- feat: add knowledge graph over wiki pages and embedded chunks
+- feat(wiki): default wiki model to glm-5-turbo over the Zhipu provider
+- feat(wiki): dedicated WIKI_MODEL setting separate from the chat model
+- feat(wiki): merge per-part documents into one source page
+
+### Bug Fixes
+- fix(viz): live physics layout for the incremental knowledge graph
+- fix(wiki): migrate legacy pyvis viz to the shell + ego-centered neighborhood pages
+- fix(embed): merge collection rows across embedding tables + ingest diagnosis
+- fix(settings): default wiki base to the persistent /data volume in containers
+- fix(wiki): report empty embedding stores as an explicit failure
+- fix(wiki): pick the right JSON object from reasoning-wrapped responses
+- fix(embed): get_document_texts scans all tables for the collection
+- fix(embed): get_document_texts reads from active table so wiki builds from embeddings
+
+### Chores
+- chore: ignore local runtime artifacts (dbs, data dir, *.orig backups)
+- chore(deps): bump base-ai-agent to 5ce5b26 (pydantic-ai 1.x Agent.run fix)
+
+### Other Changes
+- test(ingest): fix stale corpus expectations (test_corpus has one PDF)
+- perf(embed): batch embedding requests (Ollama /api/embed, Gemini batch)
+- perf(wiki): async graph rebuilds with incremental shell visualization
+- perf(wiki): cache-first graph visualization without chunk nodes
+- changed model in settings.py
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
