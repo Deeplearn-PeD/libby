@@ -25,6 +25,8 @@ from typing import Any
 import loguru
 import networkx as nx
 
+from libbydbot.brain.name_quality import has_semantic_value
+
 logger = loguru.logger
 
 
@@ -316,13 +318,16 @@ class WikiKnowledgeGraph:
 
     def resolve_node(self, name: str) -> str | None:
         """Resolve a human name or page title to a node id (exact, case-insensitive)."""
-        name_l = name.strip().lower()
+        name_l = str(name).strip().lower()
         if name_l in self.graph:
             return name_l
         for node, data in self.graph.nodes(data=True):
-            if data.get("title", "").lower() == name_l:
+            # Titles can be non-strings: YAML parses bare numeric titles
+            # (e.g. "350045") as ints.
+            title = str(data.get("title", "")).lower()
+            if title == name_l:
                 return node
-            if Path(node).stem.lower() == name_l:
+            if Path(str(node)).stem.lower() == name_l:
                 return node
         return None
 
@@ -344,7 +349,9 @@ class WikiKnowledgeGraph:
         """Add (or update) a node for a wiki page. Returns the node id."""
         fm, _ = self._parse_frontmatter(content)
         node_type = self._node_type_for_path(rel_path) or "synthesis"
-        title = fm.get("title", Path(rel_path).stem)
+        # YAML parses bare numeric titles (e.g. "350045") as ints —
+        # coerce or every downstream str operation crashes.
+        title = str(fm.get("title") or Path(rel_path).stem)
         self.graph.add_node(
             rel_path,
             title=title,
@@ -412,6 +419,14 @@ class WikiKnowledgeGraph:
                 self.graph.add_edge(rel, v, **self._edge_attrs(
                     self._edge_type(u_type, v_type), "extracted", 1.0
                 ))
+
+        # Anti-spam: drop nodes whose names carry no semantic value
+        # (generic entity/concept pages, generic stubs) and page nodes
+        # left isolated by those removals. Runs BEFORE chunk nodes are
+        # restored, so chunk "references" edges only re-attach to
+        # surviving targets. Also cleans legacy wikis built before the
+        # name-quality filter existed.
+        self._prune_generic_nodes()
 
         # Restore chunk nodes and re-attach them to their source pages.
         # Reference targets may have changed identity (e.g. stub -> page),
@@ -608,6 +623,39 @@ class WikiKnowledgeGraph:
             return bool(Settings().wiki_graph_communities)
         except Exception:
             return True
+
+    def _prune_generic_nodes(self) -> None:
+        """Remove graph nodes whose names carry no semantic value.
+
+        Removes: entity/concept nodes with generic names (single letters,
+        pure numbers, ``session-123``-style identifiers) — including
+        legacy pages written before the name-quality filter existed —
+        generic stubs, and entity/concept nodes left isolated by the
+        removals. Source pages (e.g. ``session-N`` transcripts) are kept:
+        they are the traceability anchors between concepts and sessions.
+        """
+        generic = [
+            n
+            for n, d in self.graph.nodes(data=True)
+            if d.get("node_type") in ("entity", "concept", "stub")
+            and not has_semantic_value(str(d.get("title", n)))
+        ]
+        if generic:
+            self.graph.remove_nodes_from(generic)
+
+        isolated = [
+            n
+            for n, d in self.graph.nodes(data=True)
+            if d.get("node_type") in ("entity", "concept")
+            and self.graph.degree(n) == 0
+        ]
+        if isolated:
+            self.graph.remove_nodes_from(isolated)
+        if generic or isolated:
+            logger.info(
+                f"Graph build: pruned {len(generic)} generic and "
+                f"{len(isolated)} isolated node(s)"
+            )
 
     def _refresh_communities(self) -> None:
         """

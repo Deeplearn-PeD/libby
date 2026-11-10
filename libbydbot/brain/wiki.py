@@ -21,6 +21,7 @@ import loguru
 import yaml
 
 from libbydbot.brain.graph import is_shell_html
+from libbydbot.brain.name_quality import has_semantic_value
 from libbydbot.brain.wiki_models import (
     LintReport,
     SourceSummary,
@@ -834,6 +835,29 @@ class WikiManager:
         # 3. Apply updates
         pages_touched = 0
 
+        # Anti-spam: drop extracted entities/concepts whose names carry no
+        # semantic value (session identifiers, single letters, pure
+        # numbers) before they become wiki pages.
+        generic_entities = [
+            e.name for e in summary.entities if not has_semantic_value(e.name)
+        ]
+        summary.entities = [
+            e for e in summary.entities if has_semantic_value(e.name)
+        ]
+        generic_concepts = [
+            c.name for c in summary.concepts if not has_semantic_value(c.name)
+        ]
+        summary.concepts = [
+            c for c in summary.concepts if has_semantic_value(c.name)
+        ]
+        if generic_entities or generic_concepts:
+            logger.info(
+                f"Wiki ingest: skipped {len(generic_entities)} generic "
+                f"entity name(s) and {len(generic_concepts)} generic "
+                f"concept name(s) from '{doc_name}': "
+                f"{(generic_entities + generic_concepts)[:8]}"
+            )
+
         # Write source page
         source_page = self._build_source_page(doc_name, summary, source_type)
         source_path = self.sources_dir / f"{self._sanitize_name(doc_name)}.md"
@@ -865,6 +889,7 @@ class WikiManager:
             "pages_touched": pages_touched,
             "entities_created": len(summary.entities),
             "concepts_created": len(summary.concepts),
+            "skipped_generic": len(generic_entities) + len(generic_concepts),
             "summary": summary.summary,
         }
 
@@ -1218,6 +1243,10 @@ class WikiManager:
             f"You are a disciplined wiki maintainer. Read the source below and produce "
             f"a structured summary. Extract entities, concepts, and flag any claims that "
             f"might contradict common knowledge or previously established facts.\n\n"
+            f"IMPORTANT — extraction rules: never extract document/session identifiers, "
+            f"file names, dates, pure numbers, or single letters as entities or concepts. "
+            f"Only extract names and topics that carry meaning on their own "
+            f"(people, organizations, places, diseases, methods, datasets, policies...).\n\n"
             f"Source: {doc_name}\n\n{doc_content[:12000]}"
         )
         result = self._structured_llm_call(prompt, SourceSummary)

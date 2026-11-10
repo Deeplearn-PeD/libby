@@ -29,7 +29,7 @@ dependencies = [
     "pyvis>=0.3.2",
 ]
 name = "libby"
-version = "1.4.0"
+version = "1.5.0"
 description = "Libby the Librarian Bot."
 readme = "README.md"
 

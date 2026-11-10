@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.0] - 2026-11-10
+
+### Features
+- feat(wiki): name-quality filter — generic names (session identifiers, single letters, pure numbers/dates) no longer become entity/concept pages or graph nodes; extraction prompt updated with anti-generic rules; ingest result reports `skipped_generic`
+
+### Bug Fixes
+- fix(graph): crash on wiki pages with bare numeric YAML titles (parsed as ints — `resolve_node` and node creation now coerce titles to strings)
+- fix(graph): prune isolated entity/concept nodes left behind after generic-node removal
+
+EpidBot's usage-graph builds pick this up on the next build; a FULL
+rebuild (`scope=everything`, `full=true`) also regenerates the wiki
+pages, removing generic entities/concepts already written by older
+versions (incremental builds only filter new content).
+
 ## [1.4.0] - 2026-11-04
 
 ### Features
