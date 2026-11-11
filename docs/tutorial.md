@@ -42,11 +42,23 @@ GEMINI_API_KEY=your_api_key
 # Optional: OpenAI API key (for GPT models)
 OPENAI_API_KEY=your_api_key
 
+# Optional: Zhipu AI API key (for GLM models, incl. the default wiki model)
+ZHIPUAI_API_KEY=your_api_key
+
 # Optional: Database URL for embeddings
 EMBED_DB=duckdb:///data/embeddings.duckdb
 
-# Optional: Wiki base path (default: ~/.libby/wikis)
+# Optional: Wiki base path (default: ~/.libby/wikis, /data/wikis in containers)
 WIKI_BASE_PATH=~/.libby/wikis
+
+# Optional: dedicated wiki LLM (must support structured tool-calling)
+WIKI_MODEL=glm-5-turbo
+
+# Optional: knowledge graph tuning (all have sensible defaults)
+WIKI_GRAPH_ENABLED=True
+WIKI_GRAPH_COMMUNITIES=True
+WIKI_GRAPH_RESOLUTION=1.0
+WIKI_GRAPH_HUB_PERCENTILE=95
 ```
 
 ## Step 3: Preparing Your Documents
@@ -278,8 +290,19 @@ wiki pages and the embedded chunks of each collection. It is persisted as
 - **Nodes** — one per source/entity/concept/synthesis page, plus one per embedded chunk.
 - **Typed edges** — `mentions`, `mentioned_in`, `related_to`, `links_to`, `chunk_of`
   (chunk → its source document) and `references` (chunk → entity/concept whose name
-  appears in the chunk text).
-- **Rebuilds are safe** — chunk nodes and their reference edges survive full rebuilds.
+  appears in the chunk text). Every edge is tagged with an **origin**
+  (`extracted` = explicit in wiki content; `inferred` = LLM summaries or regex
+  chunk matches) and a **confidence** score; `wiki_path` reports the path's
+  confidence as its weakest hop.
+- **Topic communities** — the page graph is partitioned into Louvain communities
+  with labels derived from each community's hubs; visible in `wiki_status`,
+  `wiki_explain`, and the visualization tooltips (`WIKI_GRAPH_COMMUNITIES`).
+- **Bridges** — cross-community edges ("surprising connections") are reported in
+  the graph statistics — good candidates for what to read next.
+- **Hub suppression** — ubiquitous concepts get a damped ranking bonus so they
+  don't dominate query results (`WIKI_GRAPH_HUB_PERCENTILE`).
+- **Rebuilds are safe** — chunk nodes and their reference edges survive full
+  rebuilds, and `graph.json` is schema-versioned so format upgrades are detected.
 
 #### Exploring the graph from the CLI
 
@@ -296,6 +319,11 @@ libby-cli wiki_explain "Alice" research
 # Export the interactive visualization
 libby-cli wiki_graph_export research --output graph.html
 ```
+
+In the REST API, `GET /api/wiki/graph/{collection}/stubs` lists wikilink targets
+that have no page yet — topics your corpus acknowledges but doesn't cover,
+ranked by how often they are referenced. Use it as a reading list for filling
+knowledge gaps.
 
 !!! note
     Because the legacy CLI constructor also accepts `collection_name`, pass the

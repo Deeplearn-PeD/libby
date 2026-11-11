@@ -9,7 +9,8 @@ Libby D. Bot is an AI-powered librarian that:
 - Enables semantic search over document collections
 - Provides question answering using retrieved context
 - Builds a persistent, compounding **LLM Wiki** of entities, concepts, and synthesis
-- Maintains a **knowledge graph** over wiki pages and embedded chunks, with path/explain queries and an interactive visualization
+- Maintains a **knowledge graph** over wiki pages and embedded chunks, with path/explain queries, Louvain **topic communities**, cross-community **bridge detection**, edge **provenance and confidence**, and an interactive visualization
+- Surfaces **knowledge gaps** — graph stubs rank topics the wiki acknowledges but doesn't cover
 - Offers content generation capabilities
 - Exposes a REST API for programmatic access
 
@@ -74,8 +75,8 @@ sftp> put document.pdf
 - **Multiple Database Support**: SQLite, DuckDB, and PostgreSQL
 - **Hybrid Search**: Combines vector similarity with keyword search (FTS)
 - **LLM Wiki**: Persistent markdown knowledge base with entity/concept extraction and health-checks
-- **Knowledge Graph**: NetworkX graph over wiki pages and embedded chunks; graph-aware queries, path/explain navigation, and an interactive `graph.html` served by the REST API
-- **Multiple LLM Models**: Llama3, Gemma, GPT-4o, Qwen3, Gemini
+- **Knowledge Graph**: NetworkX graph over wiki pages and embedded chunks; graph-aware queries, path/explain navigation, Louvain topic communities, bridge edges, edge provenance/confidence, hub-aware rankings, and an interactive `graph.html` served by the REST API
+- **Multiple LLM Models**: Kimi (default), GLM (wiki default), Llama3, Gemma, Qwen
 - **Embedding Models**: embeddinggemma (default), mxbai-embed-large, gemini-embedding-001
 - **Multi-language**: English and Portuguese support
 - **Docker Ready**: Containerized deployment support

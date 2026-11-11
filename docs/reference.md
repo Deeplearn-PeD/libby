@@ -215,7 +215,7 @@ wiki = WikiManager(
 |-----------|------|---------|-------------|
 | `collection_name` | `str` | Required | Collection whose wiki to manage |
 | `wiki_base` | `str \| Path` | `~/.libby/wikis` | Base directory for wikis |
-| `model` | `str` | `"kimi-k2.5"` | LLM model for summaries/synthesis |
+| `model` | `str` | From `WIKI_MODEL` (`glm-5-turbo`) | LLM model for summaries/synthesis |
 | `graph_enabled` | `bool \| None` | From settings | Maintain the knowledge graph |
 
 #### Wiki Methods
@@ -250,7 +250,14 @@ edges are preserved. Returns graph statistics.
 
 ##### `graph_status() -> dict`
 
-Graph statistics: node/edge counts by type and the most-connected hub nodes.
+Graph statistics: node/edge counts by type, the most-connected hub nodes, the
+number of detected topic communities with their hub-derived labels, and the top
+cross-community bridge edges.
+
+##### `graph_stubs(max_stubs: int = 500) -> list[dict]`
+
+Wikilink targets without a page (stubs), ordered by inbound reference count —
+a ranked list of knowledge gaps for source recommendations.
 
 ##### `graph_path(a: str, b: str) -> dict`
 
@@ -292,22 +299,38 @@ kg.rebuild()
 
 - **Nodes** — page nodes identified by relative path (`entities/alice.md`) with
   `node_type` of `source`, `entity`, `concept`, `synthesis`, or `stub`; chunk
-  nodes identified by `chunk:<doc_hash>`.
+  nodes identified by `chunk:<doc_hash>`. Page nodes carry a `community`
+  attribute when community detection is enabled.
 - **Edge types** — `mentions`, `mentioned_in`, `related_to`, `links_to`,
   `chunk_of` (chunk → source), `references` (chunk → entity/concept matched by name).
+- **Edge provenance** — every edge carries `origin` (`extracted` = explicit in
+  wiki content, e.g. wikilinks and `chunk_of`; `inferred` = LLM summaries or
+  regex chunk matches) and a `confidence` score (1.0 extracted; inferred edges
+  use 0.85 for mentions/references and 0.75 for related_to/links_to — inferred
+  edges never get 1.0).
+- **Communities** — Louvain partition of the page-level graph computed on
+  rebuild/ingest; labels are derived LLM-free from each community's top hubs
+  (`graph.community_labels`). Disabled via `WIKI_GRAPH_COMMUNITIES=False`.
+- **Schema version** — `graph.json` carries `graph.schema_version` and
+  `graph.libby_version`; legacy files without a marker load with defaults.
 
 #### Key Methods
 
 | Method | Description |
 |--------|-------------|
-| `rebuild()` | Rebuild page nodes/edges from disk; chunks survive |
+| `rebuild()` | Rebuild page nodes/edges from disk; chunks survive; recomputes communities |
 | `update_from_ingest(doc_name, summary, chunks)` | Incremental update after an ingest |
 | `add_chunks(chunks)` / `link_chunks_to_names(chunks, names)` | Chunk node management |
-| `save()` / `load()` | Persist to / load from `graph.json` |
-| `shortest_path(a, b)` / `explain(name)` | Navigation queries |
-| `score_pages(question)` / `subgraph_for_query(question)` | Query ranking |
-| `hubs(top_n)` / `status()` | Centrality and statistics |
-| `export_html(path)` | Interactive pyvis visualization |
+| `detect_communities(resolution)` | Louvain topic communities with hub-derived labels |
+| `bridges(top_n)` | Cross-community edges ("surprising connections") ranked by connectivity × confidence |
+| `_hub_degree_threshold(percentile)` | Degree cutoff used for hub suppression |
+| `stubs(max_stubs)` | Wikilink targets without pages, ranked by inbound references |
+| `save()` / `load()` | Persist to / load from `graph.json` (schema-versioned) |
+| `shortest_path(a, b)` / `explain(name)` | Navigation queries; paths report weakest-hop confidence, explain includes provenance and community |
+| `score_pages(question, hub_percentile=None)` / `subgraph_for_query(question)` | Query ranking with super-hub damping |
+| `hubs(top_n, exclude_hubs=None)` | Centrality; pass a percentile (e.g. 99) to suppress super-hubs |
+| `export_html(path)` / `export_shell(path)` | pyvis export / incremental visualization shell |
+| `viz_data_page(cursor, limit)` / `neighbors_html(name)` / `neighbors_data(name)` | Paginated viz payloads and ego-centered neighborhood rendering |
 
 ---
 
@@ -403,10 +426,11 @@ print(settings.default_embedding_model)  # "embeddinggemma"
 
 | Name | Code | Default |
 |------|------|---------|
-| Llama3 | `llama3.2` | Yes |
+| Kimi | `kimi-k2.6` | Yes |
+| GLM | `glm-5-turbo` | No (default for the wiki) |
+| Llama3 | `llama3.2` | No |
 | Gemma | `gemma3` | No |
-| ChatGPT | `gpt-4o` | No |
-| Qwen | `qwen3` | No |
+| Qwen | `qwen3.5:4b` | No |
 
 #### Available Embedding Models
 
@@ -433,11 +457,21 @@ print(settings.default_embedding_model)  # "embeddinggemma"
 | `POST` | `/api/wiki/query` | Query the wiki |
 | `POST` | `/api/wiki/lint` | Lint the wiki |
 | `GET` | `/api/wiki/status/{collection_name}` | Wiki statistics |
+| `GET` | `/api/wiki/ingest-diagnosis/{collection_name}` | Diagnose wiki/embedding store divergence |
+| `POST` | `/api/wiki/ingest-from-embeddings` | Build/update the wiki from the embedding table |
+| `POST` | `/api/wiki/consolidate` | Merge per-part source pages into one page per document |
+| `GET` | `/api/wiki/pages/{collection_name}` | List wiki pages grouped by category |
+| `GET` | `/api/wiki/page/{collection_name}` | Read a single wiki page |
 | `POST` | `/api/wiki/graph/rebuild` | Rebuild the knowledge graph |
-| `GET` | `/api/wiki/graph/{collection_name}` | Knowledge graph statistics |
+| `GET` | `/api/wiki/graph/{collection_name}` | Graph statistics (hubs, communities, bridges) |
+| `GET` | `/api/wiki/graph/{collection_name}/stubs` | Knowledge-gap stubs ranked by inbound references |
 | `GET` | `/api/wiki/graph/{collection_name}/viz` | Serve the interactive `graph.html` visualization |
-| `POST` | `/api/wiki/graph/path` | Shortest path between two nodes |
-| `POST` | `/api/wiki/graph/explain` | Explain a node's connections |
+| `GET` | `/api/wiki/graph/{collection_name}/neighbors` | Ego-centered neighborhood page for a node |
+| `POST` | `/api/wiki/graph/{collection_name}/neighbors/data` | Progressive neighborhood expansion data |
+| `GET` | `/api/wiki/graph/{collection_name}/data` | Paginated viz data (degree-ranked nodes + edges) |
+| `GET` | `/api/wiki/graph-lib/{filename}` | Served viz libraries (e.g. vis-network) |
+| `POST` | `/api/wiki/graph/path` | Shortest path between two nodes (weakest-hop confidence) |
+| `POST` | `/api/wiki/graph/explain` | Explain a node's connections (with provenance) |
 | `POST` | `/api/wiki/graph/query` | Ranked subgraph for a question |
 | `GET` | `/api/health` | Health check |
 
@@ -490,10 +524,15 @@ libby-server --host 0.0.0.0 --port 8000
 |----------|-------------|---------|
 | `OLLAMA_HOST` | Ollama server URL | `http://localhost:11434` |
 | `GEMINI_API_KEY` | Google Gemini API key | - |
+| `ZHIPUAI_API_KEY` | Zhipu AI API key (GLM models, incl. the default wiki model) | - |
 | `PGURL` | PostgreSQL connection URL | - |
-| `EMBED_DB` | Embedding database URL | `duckdb:///data/embeddings.duckdb` |
+| `EMBED_DB` | Embedding database URL (API server; CLI uses `embed_db_url`) | `postgresql://libby:***@localhost:5432/libby` |
 | `EMBEDDING_MODEL` | Embedding model | `embeddinggemma` |
 | `COLLECTION_NAME` | Default collection | `main` |
-| `WIKI_BASE_PATH` | Base directory for LLM wikis | `~/.libby/wikis` |
-| `WIKI_AUTO_INGEST` | Auto-ingest into wiki after embedding | `False` |
+| `WIKI_BASE_PATH` | Base directory for LLM wikis | `~/.libby/wikis` (or `/data/wikis` in containers) |
+| `WIKI_AUTO_INGEST` | Auto-ingest into wiki after embedding | `True` |
+| `WIKI_MODEL` | Dedicated LLM for wiki ingest/query/summary | `glm-5-turbo` |
 | `WIKI_GRAPH_ENABLED` | Maintain the knowledge graph over wiki + chunks | `True` |
+| `WIKI_GRAPH_COMMUNITIES` | Detect Louvain topic communities | `True` |
+| `WIKI_GRAPH_RESOLUTION` | Louvain resolution (higher → more, smaller communities) | `1.0` |
+| `WIKI_GRAPH_HUB_PERCENTILE` | Degree percentile above which a page is a super-hub | `95` |

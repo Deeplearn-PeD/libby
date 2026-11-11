@@ -21,7 +21,7 @@ Libby the librarian. AI agent specialized in creating and querying embeddings fo
 - **Rechunk & Re-embed** — Switch embedding models or chunk sizes without downtime. Shadow collections keep the original data queryable during re-embedding, then a single finalize step cuts over.
 - **Textual TUI** (`libby`) — A rich interactive terminal interface with screens for chat, embedding, wiki browsing, wiki ingest, and settings.
 - **LLM Wiki** (`libby-cli wiki_*`) — A persistent markdown knowledge base that accumulates insights from your documents over time, with entity/concept extraction, synthesis, and automated health-checks.
-- **Knowledge Graph** — A NetworkX graph over wiki pages and embedded chunks with path/explain/subgraph queries, graph-aware wiki answers, and an interactive `graph.html` visualization (also served by the REST API).
+- **Knowledge Graph** — A NetworkX graph over wiki pages and embedded chunks with path/explain/subgraph queries, graph-aware wiki answers, and an interactive `graph.html` visualization (also served by the REST API). Ships with graphify-inspired analysis: **topic communities** (Louvain, hub-labeled), **bridge edges** (cross-community "surprising connections"), **edge provenance** (extracted vs inferred + confidence), and **hub suppression** in rankings.
 - **Legacy CLI** (`libby-cli`) — The original Fire-based command-line interface preserved for scripting.
 
 ## Installation
@@ -255,6 +255,9 @@ libby-cli wiki_explain "Alice" --collection_name my_collection
 
 # Export an interactive graph.html visualization
 libby-cli wiki_graph_export --collection_name my_collection
+
+# Merge per-part source pages into one page per document
+libby-cli wiki_consolidate --collection_name my_collection
 ```
 
 ### Wiki Workflows
@@ -284,10 +287,23 @@ Auto-fix creates stub pages for broken links with `status: stub` frontmatter.
 ### Knowledge Graph
 
 Libby maintains a NetworkX knowledge graph over each collection's wiki pages and
-embedded chunks, persisted as `graph.json` inside the wiki directory.
+embedded chunks, persisted as `graph.json` inside the wiki directory (stamped
+with a schema version).
 
 - **Page nodes** for sources/entities/concepts/synthesis; **chunk nodes** for embedded chunks.
 - **Typed edges**: `mentions`, `mentioned_in`, `related_to`, `links_to`, `chunk_of`, `references`.
+- **Edge provenance** — every edge carries an `origin` (`extracted` for content
+  read directly from the wiki, e.g. wikilinks; `inferred` for LLM-summary and
+  regex chunk matches) and a `confidence` score (1.0 extracted; 0.85–0.75
+  inferred). `wiki_path` reports the path's confidence as its weakest hop.
+- **Topic communities** — the page graph is partitioned into Louvain communities
+  with LLM-free labels derived from each community's hubs; shown in `wiki_status`,
+  `wiki_explain`, and the visualization tooltips.
+- **Bridges** — cross-community edges ("surprising connections") surfaced in
+  graph statistics; prime candidates for follow-up research.
+- **Hub suppression** — super-hubs get a damped degree bonus in query ranking so
+  ubiquitous concepts don't dominate; `hubs(exclude_hubs=percentile)` mirrors
+  graphify's `--exclude-hubs`.
 - The graph is updated incrementally during ingest and can be rebuilt from disk
   (`wiki_graph`). Chunk reference edges survive rebuilds.
 - **Graph-aware query**: `wiki_query` ranks pages via seed matching + neighborhood
@@ -296,9 +312,16 @@ embedded chunks, persisted as `graph.json` inside the wiki directory.
   `wiki_graph_export` (interactive `graph.html`).
 - **Visualization**: `graph.html` is also served by the REST API at
   `GET /api/wiki/graph/{collection}/viz` (see the API endpoints table below), and
-  can be rebuilt/exported from the TUI Wiki Browser's **Graph** button.
+  can be rebuilt/exported from the TUI Wiki Browser's **Graph** button. The
+  neighbors endpoint renders an ego-centered neighborhood page with progressive
+  click/zoom expansion.
+- **Stubs** — wikilink targets without a page (`GET /api/wiki/graph/{collection}/stubs`)
+  are topics the wiki acknowledges but doesn't cover, ordered by inbound
+  references — a ready-made source-recommendation list for filling knowledge gaps.
 
-Control with `WIKI_GRAPH_ENABLED` (default `True`).
+Control with `WIKI_GRAPH_ENABLED` (default `True`), plus `WIKI_GRAPH_COMMUNITIES`,
+`WIKI_GRAPH_RESOLUTION`, and `WIKI_GRAPH_HUB_PERCENTILE` (see the environment
+variables table below).
 
 ## REST API Server
 
@@ -410,15 +433,21 @@ Once the server is running, access the interactive API documentation at:
 | `POST` | `/api/wiki/query` | Query the wiki |
 | `POST` | `/api/wiki/lint` | Lint the wiki |
 | `GET`  | `/api/wiki/status/{collection_name}` | Wiki statistics |
+| `GET`  | `/api/wiki/ingest-diagnosis/{collection_name}` | Diagnose wiki/embedding store divergence |
 | `POST` | `/api/wiki/ingest-from-embeddings` | Build/update the wiki from the embedding table |
 | `POST` | `/api/wiki/consolidate` | Merge per-part source pages into one page per document |
 | `GET`  | `/api/wiki/pages/{collection_name}` | List all wiki pages grouped by category |
 | `GET`  | `/api/wiki/page/{collection_name}` | Read a single wiki page (`?category=...&page=...`) |
 | `POST` | `/api/wiki/graph/rebuild` | Rebuild the knowledge graph |
-| `GET`  | `/api/wiki/graph/{collection_name}` | Knowledge graph statistics |
+| `GET`  | `/api/wiki/graph/{collection_name}` | Knowledge graph statistics (communities, bridges, hubs) |
+| `GET`  | `/api/wiki/graph/{collection_name}/stubs` | Wikilink targets without pages (knowledge-gap candidates) |
 | `GET`  | `/api/wiki/graph/{collection_name}/viz` | Serve interactive `graph.html` visualization |
-| `POST` | `/api/wiki/graph/path` | Shortest path between two nodes |
-| `POST` | `/api/wiki/graph/explain` | Explain a node's connections |
+| `GET`  | `/api/wiki/graph/{collection_name}/neighbors` | Ego-centered neighborhood page for a node |
+| `POST` | `/api/wiki/graph/{collection_name}/neighbors/data` | Progressive neighborhood expansion data |
+| `GET`  | `/api/wiki/graph/{collection_name}/data` | Paginated viz data (degree-ranked nodes + edges) |
+| `GET`  | `/api/wiki/graph-lib/{filename}` | Served viz libraries (e.g. vis-network) |
+| `POST` | `/api/wiki/graph/path` | Shortest path between two nodes (weakest-hop confidence) |
+| `POST` | `/api/wiki/graph/explain` | Explain a node's connections (with provenance) |
 | `POST` | `/api/wiki/graph/query` | Ranked subgraph for a question |
 
 #### System
@@ -603,9 +632,14 @@ curl -X POST "http://localhost:8001/api/reassign/collection" \
 | `OLLAMA_HOST` | Ollama server URL | `http://localhost:11434` |
 | `GEMINI_API_KEY` | Google Gemini API key | - |
 | `OPENAI_API_KEY` | OpenAI API key | - |
-| `WIKI_BASE_PATH` | Base directory for LLM wikis | `~/.libby/wikis` |
-| `WIKI_AUTO_INGEST` | Auto-ingest into wiki after embedding | `False` |
+| `WIKI_BASE_PATH` | Base directory for LLM wikis | `~/.libby/wikis` (or `/data/wikis` in containers) |
+| `WIKI_AUTO_INGEST` | Auto-ingest into wiki after embedding | `True` |
+| `WIKI_MODEL` | Dedicated LLM for wiki ingest/query/summary (non-thinking model recommended) | `glm-5-turbo` |
 | `WIKI_GRAPH_ENABLED` | Maintain knowledge graph over wiki + chunks | `True` |
+| `WIKI_GRAPH_COMMUNITIES` | Detect Louvain topic communities in the graph | `True` |
+| `WIKI_GRAPH_RESOLUTION` | Louvain resolution (higher → more, smaller communities) | `1.0` |
+| `WIKI_GRAPH_HUB_PERCENTILE` | Degree percentile above which a page counts as a super-hub | `95` |
+| `ZHIPUAI_API_KEY` | Zhipu AI API key (for GLM models, incl. the default wiki model) | - |
 | `BACKUP_RETENTION_DAYS` | Days to keep PostgreSQL backups | `7` |
 | `BACKUP_SCHEDULE` | Backup schedule (cron format) | `0 2 * * *` |
 
@@ -700,16 +734,18 @@ gunzip -c libby_backup_YYYYMMDD_HHMMSS.sql.gz | \
 
 - **Rich Textual TUI** — Interactive terminal interface with dashboards, chat, embedding, wiki browsing, and wiki ingest
 - **LLM Wiki** — Persistent markdown knowledge base with entity/concept extraction, synthesis, and health-checks
+- **Knowledge Graph** — Typed graph over wiki pages and chunks with provenance/confidence, Louvain topic communities, bridge detection, hub suppression, and an interactive visualization
+- **Knowledge-gap discovery** — Graph stubs expose topics the wiki acknowledges but doesn't cover, ranked by inbound references
 - **Embedding Management** — Re-embed, verify integrity, rollback, and migrate between backends
 - **Hybrid Search** — Vector similarity + full-text keyword search with Reciprocal Rank Fusion
 - **Shadow Collections** — Zero-downtime re-embedding with shadow/finalize workflow
 - **12 Verification Checks** — Automated data integrity analysis with auto-fix capabilities
 - **Multiple language support** (English and Portuguese)
-- **Various AI models** available (Llama3, Gemma3, ChatGPT, Qwen3, Gemini, GPT-4o)
+- **Various AI models** available (Kimi, GLM, Llama3, Gemma, Qwen, Gemini, GPT-4o)
 - **PDF document processing** and embedding with configurable chunking
 - **Question answering** with context from your documents
 - **Content generation** capabilities
-- **REST API** with 25 endpoints for full programmatic access
+- **REST API** with 40+ endpoints for full programmatic access
 - **Docker support** for containerized deployment
 - **Obsidian-compatible** wiki format
 - **Auto model detection** — Detects and uses the embedding model from existing data on startup
@@ -719,16 +755,16 @@ gunzip -c libby_backup_YYYYMMDD_HHMMSS.sql.gz | \
 Libby supports different AI models and languages. You can configure these through environment variables or the config.yml file.
 
 Available Embedding Models:
-- `mxbai-embed-large` (default)
-- `embeddinggemma` (768-dim, recommended for Gemma-based workflows)
-- `nomic-embed-text`
+- `embeddinggemma` (default, 768-dim)
+- `mxbai-embed-large` (1024-dim)
+- `gemini-embedding-001`
 
 Available LLM Models:
-- Llama3.2 (default)
+- Kimi (`kimi-k2.6`, default)
+- GLM (`glm-5-turbo`, default for the wiki)
+- Llama3.2
 - Gemma3
-- GPT-4o
 - Qwen3
-- Gemini
 
 Supported Languages:
 - English (en_US)
