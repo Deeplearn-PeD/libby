@@ -185,10 +185,79 @@ def is_shell_html(path: Path) -> bool:
         return False
 
 
+#: Legend palette mirrors NODE_COLORS (chunk excluded — implementation detail).
+LEGEND_NODE_TYPES: list[tuple[str, str]] = [
+    ("source", "#4C9AFF"),
+    ("entity", "#36B37E"),
+    ("concept", "#FFAB00"),
+    ("synthesis", "#FF5630"),
+    ("stub", "#9AA1B0"),
+]
+
+_LEGEND_PALETTE = [
+    "#2563eb", "#059669", "#d97706", "#dc2626", "#7c3aed",
+    "#0891b2", "#db2777", "#65a30d", "#ea580c", "#0d9488",
+]
+
+
+def _community_chip_color(label: str) -> str:
+    """Deterministic chip color for a community label (mirrors the TS helper)."""
+    digest = 0
+    for char in label:
+        digest = (digest * 31 + ord(char)) & 0xFFFFFFFF
+    return _LEGEND_PALETTE[digest % len(_LEGEND_PALETTE)]
+
+
+def _legend_html(
+    community_labels: dict[str, str] | None = None,
+    bridges: list[dict] | None = None,
+) -> str:
+    """Fixed legend overlay for the graph shell (node types + communities)."""
+    parts: list[str] = ['<div class="kg-legend-row"><span class="kg-legend-title">Node types</span></div>']
+    for node_type, color in LEGEND_NODE_TYPES:
+        parts.append(
+            f'<div class="kg-legend-row">'
+            f'<span class="kg-dot" style="background:{color}"></span>{node_type}'
+            f"</div>"
+        )
+    labels = community_labels or {}
+    if labels:
+        parts.append('<div class="kg-legend-row kg-legend-title" style="margin-top:6px">Communities</div>')
+        for label in list(labels.values())[:10]:
+            chip_color = _community_chip_color(label)
+            parts.append(
+                f'<div class="kg-legend-row">'
+                f'<span class="kg-dot" style="background:{chip_color}"></span>{label}'
+                f"</div>"
+            )
+    bridges = bridges or []
+    if bridges:
+        parts.append('<div class="kg-legend-row" style="margin-top:6px;color:#6b7280">'
+                     f'{len(bridges)} cross-community bridge(s)</div>')
+    style = (
+        "#kg-legend{position:fixed;bottom:10px;right:10px;z-index:20;"
+        "background:rgba(255,255,255,.94);border:1px solid #d4d4d4;border-radius:8px;"
+        "padding:8px 10px;font:11px/1.5 sans-serif;color:#333;max-width:280px;"
+        "max-height:45vh;overflow:auto;box-shadow:0 2px 8px rgba(0,0,0,.12)}"
+        "#kg-legend .kg-legend-row{white-space:nowrap;overflow:hidden;"
+        "text-overflow:ellipsis;text-align:left}"
+        "#kg-legend .kg-legend-title{font-weight:600;color:#111}"
+        "#kg-legend .kg-dot{display:inline-block;width:9px;height:9px;"
+        "border-radius:50%;margin-right:6px;vertical-align:middle}"
+    )
+    return (
+        f"<style>{style}</style>"
+        f'<div id="kg-legend">'
+        + "".join(parts)
+        + "</div>"
+    )
+
+
 def render_shell_html(
     boot: dict,
     notice_html: str = "",
     title: str = "Knowledge graph",
+    legend_html: str = "",
 ) -> str:
     """Render the shell page for a given boot payload."""
     boot_json = json.dumps(boot, ensure_ascii=False).replace("</", "<\\/")
@@ -197,6 +266,7 @@ def render_shell_html(
         notice_js=notice_html,
         lib_url=VIZ_LIB_URL,
         boot=boot_json,
+        legend_html=legend_html,
         SHELL_VERSION=SHELL_VERSION,
     )
 
@@ -1372,6 +1442,10 @@ class WikiKnowledgeGraph:
             boot,
             notice_html=notice_html,
             title=f"Knowledge graph — {self.collection_name}",
+            legend_html=_legend_html(
+                community_labels=self.graph.graph.get("community_labels", {}),
+                bridges=self.bridges(5),
+            ),
         )
         _atomic_write_text(out_path, html)
         logger.info(
@@ -1482,6 +1556,10 @@ class WikiKnowledgeGraph:
             boot,
             notice_html=f'<div class="kg-notice">{notice}</div>',
             title=f"{title} — knowledge graph",
+            legend_html=_legend_html(
+                community_labels=self.graph.graph.get("community_labels", {}),
+                bridges=self.bridges(5),
+            ),
         )
         return {"found": True, "center": center, "title": title, "html": html}
 
@@ -1729,6 +1807,7 @@ window.__GRAPH_BOOT__ = {boot};
   window.__GRAPH_READY__ = true;
 }})();
 </script>
+{legend_html}
 </body>
 </html>
 """
