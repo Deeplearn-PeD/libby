@@ -16,7 +16,7 @@ class TestLibbyInterface(unittest.TestCase):
     def test_initialization_default(self):
         self.assertEqual(self.libby.name, 'Libby D. Bot')
         self.assertEqual(self.libby.languages, ['pt_BR', 'en'])
-        self.assertEqual(self.libby.model, 'llama3.2')
+        self.assertEqual(self.libby.model, 'deepseek-flash')
 
     def test_initialization_custom(self):
         custom_libby = LibbyInterface(
@@ -36,7 +36,7 @@ class TestLibbyInterface(unittest.TestCase):
 
     def test_default_model(self):
         libby = LibbyInterface(dburl=self.DBURL, embed_db=self.DBURL)
-        self.assertEqual(libby.model, 'llama3.2')  # Default model from config
+        self.assertEqual(libby.model, 'deepseek-flash')  # Default model from settings
 
     def test_embed(self):
         de = self.libby.embed(corpus_path='tests/test_corpus')

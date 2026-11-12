@@ -215,7 +215,7 @@ wiki = WikiManager(
 |-----------|------|---------|-------------|
 | `collection_name` | `str` | Required | Collection whose wiki to manage |
 | `wiki_base` | `str \| Path` | `~/.libby/wikis` | Base directory for wikis |
-| `model` | `str` | From `WIKI_MODEL` (`glm-5-turbo`) | LLM model for summaries/synthesis |
+| `model` | `str` | From `WIKI_MODEL` (`deepseek-flash`) | LLM model for summaries/synthesis |
 | `graph_enabled` | `bool \| None` | From settings | Maintain the knowledge graph |
 
 #### Wiki Methods
@@ -426,8 +426,9 @@ print(settings.default_embedding_model)  # "embeddinggemma"
 
 | Name | Code | Default |
 |------|------|---------|
-| Kimi | `kimi-k2.6` | Yes |
-| GLM | `glm-5-turbo` | No (default for the wiki) |
+| DeepSeek | `deepseek-flash` | Yes (also the wiki default) |
+| Kimi | `kimi-k2.6` | No |
+| GLM | `glm-5-turbo` | No |
 | Llama3 | `llama3.2` | No |
 | Gemma | `gemma3` | No |
 | Qwen | `qwen3.5:4b` | No |
@@ -531,7 +532,8 @@ libby-server --host 0.0.0.0 --port 8000
 | `COLLECTION_NAME` | Default collection | `main` |
 | `WIKI_BASE_PATH` | Base directory for LLM wikis | `~/.libby/wikis` (or `/data/wikis` in containers) |
 | `WIKI_AUTO_INGEST` | Auto-ingest into wiki after embedding | `True` |
-| `WIKI_MODEL` | Dedicated LLM for wiki ingest/query/summary | `glm-5-turbo` |
+| `DEEPSEEK_API_KEY` | DeepSeek API key (default LLM + wiki model) | - |
+| `WIKI_MODEL` | Dedicated LLM for wiki ingest/query/summary | `deepseek-flash` |
 | `WIKI_GRAPH_ENABLED` | Maintain the knowledge graph over wiki + chunks | `True` |
 | `WIKI_GRAPH_COMMUNITIES` | Detect Louvain topic communities | `True` |
 | `WIKI_GRAPH_RESOLUTION` | Louvain resolution (higher → more, smaller communities) | `1.0` |

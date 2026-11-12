@@ -34,7 +34,8 @@ class Settings(BaseSettings):
         "Gemma": {"code": "gemma3"},
         "GLM": {"code": "glm-5-turbo"},
         "Qwen": {"code": "qwen3.5:4b"},
-        "Kimi": {"code": "kimi-k2.6", "is_default": True},
+        "Kimi": {"code": "kimi-k2.6"},
+        "DeepSeek": {"code": "deepseek-flash", "is_default": True},
     }
 
     embedding_models: Dict[str, Dict[str, Any]] = {
@@ -58,13 +59,14 @@ class Settings(BaseSettings):
     )
 
     wiki_model: str = Field(
-        default="glm-5-turbo",
+        default="deepseek-flash",
         description=(
             "Dedicated LLM model for wiki ingest/query/summary. Empty falls "
-            "back to the default chat model. Prefer a non-thinking model "
-            "(e.g. glm-5-turbo via the Zhipu provider, gpt-4o, "
-            "gemini-2.5-flash) since thinking models reject pydantic-ai "
-            "structured tool-calling and yield sparse summaries."
+            "back to the default chat model. Structured-output callers "
+            "automatically disable DeepSeek thinking mode (extra_body "
+            "thinking:disabled) since thinking rejects pydantic-ai "
+            "tool_choice and yields sparse summaries; plain chat keeps "
+            "thinking on."
         ),
     )
 
@@ -124,7 +126,7 @@ class Settings(BaseSettings):
         for model, details in self.models.items():
             if details.get("is_default"):
                 return details["code"]
-        return "llama3.2"
+        return "deepseek-flash"
 
     @property
     def default_embedding_model(self) -> str:

@@ -76,7 +76,7 @@ sftp> put document.pdf
 - **Hybrid Search**: Combines vector similarity with keyword search (FTS)
 - **LLM Wiki**: Persistent markdown knowledge base with entity/concept extraction and health-checks
 - **Knowledge Graph**: NetworkX graph over wiki pages and embedded chunks; graph-aware queries, path/explain navigation, Louvain topic communities, bridge edges, edge provenance/confidence, hub-aware rankings, and an interactive `graph.html` served by the REST API
-- **Multiple LLM Models**: Kimi (default), GLM (wiki default), Llama3, Gemma, Qwen
+- **Multiple LLM Models**: DeepSeek (default), Kimi, GLM, Llama3, Gemma, Qwen
 - **Embedding Models**: embeddinggemma (default), mxbai-embed-large, gemini-embedding-001
 - **Multi-language**: English and Portuguese support
 - **Docker Ready**: Containerized deployment support

@@ -34,7 +34,7 @@ class LibbyInterface(LibbyDBot):
         name: str = "Libby D. Bot",
         collection_name: str = "Libby D. Bot",
         languages=["pt_BR", "en"],
-        model: str = "llama3.2",
+        model: str = "deepseek-flash",
         dburl: str = "postgresql://libby:libby123@localhost:5432/libby",
         embed_db: str = "postgresql://libby:libby123@localhost:5432/libby",
     ):

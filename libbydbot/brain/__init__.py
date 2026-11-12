@@ -99,6 +99,7 @@ def patched_get_model_instance(self, provider: str, model_name: str):
     """Create a Pydantic AI Model instance based on provider and config."""
     from pydantic_ai.models.openai import OpenAIChatModel
     from pydantic_ai.providers.openai import OpenAIProvider
+    from pydantic_ai.settings import ModelSettings
 
     provider_config = getattr(self, "_config", None) or {}
     # Fallback: base_agent stores config in CONFIG module variable
@@ -111,9 +112,19 @@ def patched_get_model_instance(self, provider: str, model_name: str):
     if provider == "ollama" and base_url and not base_url.endswith("/v1"):
         base_url = f"{base_url.rstrip('/')}/v1"
 
+    # DeepSeek models run with thinking mode enabled by default
+    # (https://api-docs.deepseek.com/guides/thinking_mode), but thinking
+    # rejects pydantic-ai's tool_choice and breaks structured output.
+    # Disable it for structured-output callers only (wiki ingest/query,
+    # analyze, structured chat); plain chat keeps thinking on.
+    settings = None
+    if model_name.startswith("deepseek") and isinstance(self, StructuredLangModel):
+        settings = ModelSettings(extra_body={"thinking": {"type": "disabled"}})
+
     return OpenAIChatModel(
         model_name,
         provider=OpenAIProvider(api_key=api_key or "dummy", base_url=base_url),
+        settings=settings,
     )
 
 
@@ -175,6 +186,7 @@ PROVIDERS = {
     "qwen3.5:4b": "qwen",
     "gemini": "google",
     "kimi-k2.5": "moonshot",
+    "deepseek-flash": "deepseek",
 }
 
 
@@ -183,7 +195,7 @@ class LibbyDBot(Persona):
         self,
         name: str = "Libby D. Bot",
         languages=["pt_BR", "en"],
-        model: str = "llama3.2",
+        model: str = "deepseek-flash",
         dburl: str = "postgresql://libby:libby123@localhost:5432/libby",
         provider: str = None,
         embed_db: str = "postgresql://libby:libby123@localhost:5432/libby",

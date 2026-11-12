@@ -51,8 +51,11 @@ EMBED_DB=duckdb:///data/embeddings.duckdb
 # Optional: Wiki base path (default: ~/.libby/wikis, /data/wikis in containers)
 WIKI_BASE_PATH=~/.libby/wikis
 
+# Optional: DeepSeek API key (required by the default LLM and wiki model)
+DEEPSEEK_API_KEY=your_api_key
+
 # Optional: dedicated wiki LLM (must support structured tool-calling)
-WIKI_MODEL=glm-5-turbo
+WIKI_MODEL=deepseek-flash
 
 # Optional: knowledge graph tuning (all have sensible defaults)
 WIKI_GRAPH_ENABLED=True

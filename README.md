@@ -634,7 +634,8 @@ curl -X POST "http://localhost:8001/api/reassign/collection" \
 | `OPENAI_API_KEY` | OpenAI API key | - |
 | `WIKI_BASE_PATH` | Base directory for LLM wikis | `~/.libby/wikis` (or `/data/wikis` in containers) |
 | `WIKI_AUTO_INGEST` | Auto-ingest into wiki after embedding | `True` |
-| `WIKI_MODEL` | Dedicated LLM for wiki ingest/query/summary (non-thinking model recommended) | `glm-5-turbo` |
+| `DEEPSEEK_API_KEY` | DeepSeek API key (required by the default LLM and wiki model) | - |
+| `WIKI_MODEL` | Dedicated LLM for wiki ingest/query/summary (non-thinking model required) | `deepseek-flash` |
 | `WIKI_GRAPH_ENABLED` | Maintain knowledge graph over wiki + chunks | `True` |
 | `WIKI_GRAPH_COMMUNITIES` | Detect Louvain topic communities in the graph | `True` |
 | `WIKI_GRAPH_RESOLUTION` | Louvain resolution (higher → more, smaller communities) | `1.0` |
@@ -760,8 +761,9 @@ Available Embedding Models:
 - `gemini-embedding-001`
 
 Available LLM Models:
-- Kimi (`kimi-k2.6`, default)
-- GLM (`glm-5-turbo`, default for the wiki)
+- DeepSeek (`deepseek-flash`, default — also the wiki default)
+- Kimi (`kimi-k2.6`)
+- GLM (`glm-5-turbo`)
 - Llama3.2
 - Gemma3
 - Qwen3
