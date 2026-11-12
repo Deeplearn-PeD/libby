@@ -464,6 +464,17 @@ class WikiGraphStatusResponse(BaseModel):
         False,
         description="True while a background rebuild is in flight (the served graph is the previous snapshot)",
     )
+    communities: int = Field(
+        0, description="Number of Louvain topic communities detected (0 when not detected)"
+    )
+    community_labels: dict[str, str] = Field(
+        default_factory=dict,
+        description="Community id -> hub-derived topic label",
+    )
+    bridges: list[dict] = Field(
+        default_factory=list,
+        description="Top cross-community bridge edges (from/to titles + communities)",
+    )
 
 
 class WikiPathRequest(BaseModel):
