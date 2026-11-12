@@ -26,6 +26,7 @@ dependencies = [
     "uvicorn>=0.30.0",
     "textual>=8.2.4",
     "networkx>=3.6.1",
+    "scipy>=1.14",
     "pyvis>=0.3.2",
 ]
 name = "libby"
