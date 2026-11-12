@@ -1178,15 +1178,19 @@ class WikiKnowledgeGraph:
         node_type = data.get("node_type", "unknown")
         title = f"{data.get('title', node)} [{node_type}] degree={degree}"
         community = data.get("community", -1)
+        community_label = None
         if community is not None and community >= 0:
             label = self.graph.graph.get("community_labels", {}).get(str(community))
             if label:
+                community_label = label
                 title += f" · {label}"
+        color = NODE_COLORS.get(node_type, "#666666")
         out: dict[str, Any] = {
             "id": node,
             "label": data.get("title", node),
             "title": title,
-            "color": NODE_COLORS.get(node_type, "#666666"),
+            "color": color,
+            "community": community_label,
             "size": 8 + min(degree * 2, 30),
             "shape": "box" if node_type == "chunk" else "dot",
             "degree": degree,
@@ -1658,12 +1662,16 @@ window.__GRAPH_BOOT__ = {boot};
   // neighborhood; zooming out expands around the most-connected
   // un-expanded node. Requests go through the parent page (auth) via
   // window.__KG_BRIDGE__, which answers with __GRAPH_API__.expand().
+  // Works in BOTH modes: the full graph (boot.ego=false) expands the
+  // clicked node's neighborhood in place; the ego page expands around
+  // its anchor. Caps keep the render bounded (12 expansions / 1500
+  // nodes / 500ms throttle).
   var expanded = {{}};
   var expandCount = 0;
   var lastExpandAt = 0;
 
   function requestExpand(anchor, depth) {{
-    if (!boot.ego || !anchor || expanded[anchor]) return;
+    if (!anchor || expanded[anchor]) return;
     if (expandCount >= 12 || nodes.length >= 1500) return;
     var now = Date.now();
     if (now - lastExpandAt < 500) return;
