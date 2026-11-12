@@ -297,7 +297,7 @@ class WikiManager:
         self,
         collection_name: str,
         wiki_base: str | Path = "",
-        model: str = "kimi-k2.5",
+        model: str = "deepseek-flash",
         graph_enabled: bool | None = None,
     ):
         self.collection_name = collection_name

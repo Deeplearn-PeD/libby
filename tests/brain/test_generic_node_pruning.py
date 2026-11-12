@@ -117,7 +117,9 @@ class TestIngestSkipsGenericNames:
     def _wiki_manager(self, tmp_path):
         from libbydbot.brain.wiki import WikiManager
 
-        return WikiManager(str(tmp_path / "wiki"), "test_collection")
+        return WikiManager(
+            collection_name="test_collection", wiki_base=str(tmp_path / "wiki")
+        )
 
     def test_generic_names_never_become_pages(self, tmp_path, monkeypatch):
         summary = SourceSummary(

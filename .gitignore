@@ -169,3 +169,10 @@ data/
 *.db
 *.db-journal
 *.orig
+
+# test artifacts leaked into the repo root
+test_collection/
+
+# local scratch scripts
+/check_*.py
+/verify_fix.py
