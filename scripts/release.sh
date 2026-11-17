@@ -190,18 +190,56 @@ fi
 echo "Creating git tag v$NEW_VERSION..."
 git tag -a "v$NEW_VERSION" -m "Release v$NEW_VERSION"
 
+# ── GitHub Release publishing ────────────────────────────────────────
+# A git tag alone does not create a GitHub *Release*; without this step
+# the repo's Releases page keeps pointing at the last manually published
+# version. Notes are kept inside .git/ so they are never tracked and can
+# never be swept up by git add -A.
+NOTES_FILE=".git/RELEASE_NOTES.md"
+echo -e "$CHANGELOG_ENTRY" > "$NOTES_FILE"
+
+PUBLISHED=0
+if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+    echo
+    echo "Pushing commits and tags..."
+    if git push && git push --tags; then
+        echo "Publishing GitHub Release..."
+        # --latest is explicit: GitHub otherwise hands the flag to the
+        # most recently *created* release, not the newest version.
+        if gh release create "v$NEW_VERSION" --title "v$NEW_VERSION" \
+            --notes-file "$NOTES_FILE" --latest; then
+            PUBLISHED=1
+        else
+            echo
+            echo "Warning: GitHub Release creation failed — publish it manually:"
+            echo "  gh release create v$NEW_VERSION --title \"v$NEW_VERSION\" --notes-file $NOTES_FILE --latest"
+        fi
+    else
+        echo
+        echo "Warning: push failed — push manually, then publish the release:"
+        echo "  git push && git push --tags"
+        echo "  gh release create v$NEW_VERSION --title \"v$NEW_VERSION\" --notes-file $NOTES_FILE --latest"
+    fi
+else
+    echo
+    echo "gh CLI not available or authenticated — after pushing, publish the release with:"
+    echo "  git push && git push --tags"
+    echo "  gh release create v$NEW_VERSION --title \"v$NEW_VERSION\" --notes-file $NOTES_FILE --latest"
+fi
+
 echo
 echo "=========================================="
 echo "  Release v$NEW_VERSION created!"
 echo "=========================================="
+if [[ "$PUBLISHED" == "1" ]]; then
+    echo
+    echo "Published to GitHub Releases and marked as latest."
+fi
 echo
 echo "Changelog preview:"
 echo "----------------------------------------"
 echo -e "$CHANGELOG_ENTRY"
 echo "----------------------------------------"
-echo
-echo "To push changes and tag:"
-echo "  git push && git push --tags"
 echo
 echo "To undo (before pushing):"
 echo "  git tag -d v$NEW_VERSION"

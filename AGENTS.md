@@ -211,11 +211,9 @@ The script will:
 3. Update version in `pyproject.toml`
 4. Commit all changes with a message
 5. Create an annotated git tag (e.g., `v0.9.0`)
+6. Push commits/tags and publish the GitHub Release (marked as latest) when the `gh` CLI is authenticated — otherwise it prints the exact `git push` and `gh release create` commands to run manually
 
-After running the script, push changes with:
-```bash
-git push && git push --tags
-```
+A git tag alone does not create a GitHub *Release*; the script's final step exists so the Releases page always points at the newest version.
 
 ### Version Bump Guidelines
 
