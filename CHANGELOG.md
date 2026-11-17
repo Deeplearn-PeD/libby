@@ -2,19 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
-## [1.5.0] - 2026-11-10
+## [1.5.0] - 2026-11-17
 
 ### Features
 - feat(wiki): name-quality filter — generic names (session identifiers, single letters, pure numbers/dates) no longer become entity/concept pages or graph nodes; extraction prompt updated with anti-generic rules; ingest result reports `skipped_generic`
+- feat(graph): click-expansion in full graph mode + explicit community field in viz payloads
+- feat(settings): switch default LLM and wiki model to deepseek-flash (DeepSeek thinking mode auto-disabled for structured-output callers; plain chat keeps thinking on)
 
 ### Bug Fixes
 - fix(graph): crash on wiki pages with bare numeric YAML titles (parsed as ints — `resolve_node` and node creation now coerce titles to strings)
 - fix(graph): prune isolated entity/concept nodes left behind after generic-node removal
+- fix(graph): shell legend never rendered — template placeholder was double-brace escaped
+- fix(api): expose communities/community_labels/bridges in graph status response — the response model was stripping the new v1.4 fields from graph_status()
+- fix(deps): declare scipy dependency — required by Louvain community detection but never declared (only present transitively in some environments)
+- fix(tests): stop leaking test artifacts into the repo root (WikiManager positional-arg swap)
 
-EpidBot's usage-graph builds pick this up on the next build; a FULL
-rebuild (`scope=everything`, `full=true`) also regenerates the wiki
-pages, removing generic entities/concepts already written by older
-versions (incremental builds only filter new content).
+### Chores
+- chore(deps): full lockfile refresh to clear Dependabot alerts (all 100+ open alerts resolved; breaking majors constrained — duckdb <2.0, sqlmodel <0.0.48, sqlalchemy <2.1, pydantic-ai/mcp <2)
+
+### Documentation
+- docs: sync README and mkdocs site with the v1.4.0 graph upgrades, new endpoints, env vars, and current model defaults
+
+EpidBot's usage-graph builds pick the name-quality filter up on the next
+build; a FULL rebuild (`scope=everything`, `full=true`) also regenerates
+the wiki pages, removing generic entities/concepts already written by
+older versions (incremental builds only filter new content).
 
 ## [1.4.0] - 2026-11-04
 
