@@ -1480,21 +1480,28 @@ class DocEmbedder:
         Reconstruct full document text from the embedding table.
 
         Returns a mapping of ``doc_name`` -> concatenated text, with chunks
-        ordered by ``page_number``. Optionally filtered by *collection* and/or
+        ordered by ``page_number`` (chunks on the same page keep their
+        insertion order). Optionally filtered by *collection* and/or
         *doc_name*.
 
         Robust to multi-table stores: rows are read from EVERY data table
-        holding the collection and merged, deduplicating by
-        ``(doc_name, page_number)``. This matters when a collection's chunks
-        are split across tables (partial backend migrations, re-embeddings
-        under different models creating dimension-specific tables) — the
-        previous first-table-wins read silently dropped every chunk that
-        lived outside the first matching table.
+        holding the collection and merged, deduplicating by ``doc_hash``
+        (legacy rows without a hash fall back to a content-derived key).
+        This matters when a collection's chunks are split across tables
+        (partial backend migrations, re-embeddings under different models
+        creating dimension-specific tables) — the previous first-table-wins
+        read silently dropped every chunk that lived outside the first
+        matching table.
+
+        Documents may legitimately hold several chunks on the same page —
+        every non-PDF format stores all of its chunks on page 0, and
+        oversized PDF pages are auto-split — so chunks are never
+        deduplicated by ``(doc_name, page_number)``.
         """
         collection = collection or self.collection_name
         candidates = self._candidate_text_tables()
         docs: dict[str, list[tuple[int, str]]] = {}
-        seen: set[tuple[str, int]] = set()
+        seen: set[str] = set()
         tables_used: list[str] = []
 
         for tbl in candidates:
@@ -1509,8 +1516,10 @@ class DocEmbedder:
                 continue
             tables_used.append(tbl)
             new_rows = 0
-            for name, page, document in rows:
-                key = (name, page)
+            for doc_hash, name, page, document in rows:
+                key = doc_hash or sha256(
+                    f"{name}:{page}:{document}".encode()
+                ).hexdigest()
                 if key in seen:
                     continue  # same chunk already read from another table
                 seen.add(key)
@@ -1564,18 +1573,18 @@ class DocEmbedder:
     def _fetch_doc_rows(
         self, tbl: str, collection: str, doc_name: str
     ) -> list[tuple]:
-        """Return ``(doc_name, page_number, document)`` rows for one table."""
+        """Return ``(doc_hash, doc_name, page_number, document)`` rows for one table."""
         if self.dburl.startswith("sqlite"):
             with self.connection as conn:
                 cur = conn.cursor()
                 if doc_name:
                     return cur.execute(
-                        f"SELECT doc_name, page_number, document FROM {tbl} "
+                        f"SELECT doc_hash, doc_name, page_number, document FROM {tbl} "
                         "WHERE collection_name=? AND doc_name=? ORDER BY page_number",
                         (collection, doc_name),
                     ).fetchall()
                 return cur.execute(
-                    f"SELECT doc_name, page_number, document FROM {tbl} "
+                    f"SELECT doc_hash, doc_name, page_number, document FROM {tbl} "
                     "WHERE collection_name=? ORDER BY doc_name, page_number",
                     (collection,),
                 ).fetchall()
@@ -1583,12 +1592,12 @@ class DocEmbedder:
             conn = self.connection
             if doc_name:
                 return conn.sql(
-                    f"SELECT doc_name, page_number, document FROM {tbl} "
+                    f"SELECT doc_hash, doc_name, page_number, document FROM {tbl} "
                     "WHERE collection_name=? AND doc_name=? ORDER BY page_number",
                     params=[collection, doc_name],
                 ).fetchall()
             return conn.sql(
-                f"SELECT doc_name, page_number, document FROM {tbl} "
+                f"SELECT doc_hash, doc_name, page_number, document FROM {tbl} "
                 "WHERE collection_name=? ORDER BY doc_name, page_number",
                 params=[collection],
             ).fetchall()
@@ -1597,7 +1606,7 @@ class DocEmbedder:
                 if doc_name:
                     rows = session.execute(
                         text(
-                            f"SELECT doc_name, page_number, document FROM {tbl} "
+                            f"SELECT doc_hash, doc_name, page_number, document FROM {tbl} "
                             "WHERE collection_name=:col AND doc_name=:doc "
                             "ORDER BY page_number"
                         ),
@@ -1606,7 +1615,7 @@ class DocEmbedder:
                 else:
                     rows = session.execute(
                         text(
-                            f"SELECT doc_name, page_number, document FROM {tbl} "
+                            f"SELECT doc_hash, doc_name, page_number, document FROM {tbl} "
                             "WHERE collection_name=:col ORDER BY doc_name, page_number"
                         ),
                         {"col": collection},

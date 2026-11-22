@@ -219,6 +219,26 @@ def test_get_document_texts_merges_collection_split_across_tables(tmp_path):
     assert texts["alpha"] == "alpha page 0.\nalpha page 1."
 
 
+def test_get_document_texts_preserves_same_page_chunks(tmp_path):
+    """Non-PDF documents store every chunk on page 0; none may be dropped.
+
+    Regression test: get_document_texts used to deduplicate rows by
+    (doc_name, page_number), silently discarding all but the first chunk
+    of any single-page document (and of auto-split oversized PDF pages).
+    """
+    db_path = tmp_path / "embedding.db"
+    embedder = DocEmbedder(
+        "c", dburl=f"sqlite:///{db_path}", embedding_model="mxbai-embed-large"
+    )
+    embedder.embed_chunks(
+        [("first chunk about dengue", 0), ("second chunk about zika", 0)],
+        "notes.html",
+    )
+    texts = embedder.get_document_texts(collection="c", doc_name="notes.html")
+    assert "first chunk about dengue" in texts["notes.html"]
+    assert "second chunk about zika" in texts["notes.html"]
+
+
 def test_get_document_chunks_merges_collection_split_across_tables(tmp_path):
     """get_document_chunks must also merge across tables, deduplicating by
     doc_hash (graph chunk nodes come from this method)."""
