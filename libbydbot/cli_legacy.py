@@ -204,15 +204,14 @@ class LibbyInterface(LibbyDBot):
         wiki = self._get_wiki(collection_name)
         results = []
 
-        for pdf_path in glob(os.path.join(corpus_path, "*.pdf")):
+        from libbydbot.brain.ingest import extract_full_text, list_supported_files
+
+        for doc_path in list_supported_files(corpus_path):
             try:
-                doc = fitz.open(pdf_path)
-                text = ""
-                for page in doc:
-                    text += page.get_text() + "\n"
-                doc_name = doc.metadata.get("title") or os.path.basename(pdf_path)
+                text, metadata = extract_full_text(doc_path)
+                doc_name = metadata.get("title") or os.path.basename(doc_path)
             except Exception as e:
-                print(f"Error reading {pdf_path}: {e}")
+                print(f"Error reading {doc_path}: {e}")
                 continue
 
             result = wiki.ingest_source(doc_name, text)
@@ -220,7 +219,7 @@ class LibbyInterface(LibbyDBot):
             print(f"  Ingested: {doc_name} ({result['pages_touched']} pages touched)")
 
         if not results:
-            print("No PDF documents found to ingest into wiki.")
+            print("No supported documents found to ingest into wiki.")
         else:
             total_pages = sum(r["pages_touched"] for r in results)
             print(f"\nWiki ingest complete: {len(results)} sources, {total_pages} pages touched.")

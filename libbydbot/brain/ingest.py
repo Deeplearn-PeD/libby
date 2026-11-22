@@ -3,6 +3,7 @@ Code for ingesting documents from multiple sources such as the file system or we
 """
 
 import os
+import re
 
 import fitz
 import loguru
@@ -20,9 +21,10 @@ class FileSystemIngester:
 
     Attributes:
         path (str): Path to the directory containing the documents.
-        file_type (str): Type of files to ingest (default is 'pdf').
+        file_type (str): Type of files to ingest: an extension such as 'pdf'
+            or 'docx' (default 'pdf'), or 'all' for every supported format.
         engine (Engine): SQLAlchemy engine connected to the database.
-        pipeline (PDFPipeline | None): Pipeline for processing PDF files.
+        pipeline (DocumentPipeline): Pipeline for processing the files.
     """
     def __init__(self, path: str, file_type: str = 'pdf', dburl: str = "sqlite:///:memory:", chunk_size: int = 500, chunk_overlap: int = 80):
         self.path = path
@@ -30,8 +32,14 @@ class FileSystemIngester:
         self._setup_db(dburl)
         if file_type == 'pdf':
             self.pipeline = PDFPipeline(path, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+        elif file_type in ('all', '*'):
+            self.pipeline = DocumentPipeline(path, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
         else:
-            self.pipeline = None
+            ext = file_type if file_type.startswith('.') else f'.{file_type}'
+            self.pipeline = DocumentPipeline(
+                path, chunk_size=chunk_size, chunk_overlap=chunk_overlap,
+                extensions=frozenset({ext.lower()}),
+            )
 
     def _setup_db(self, dburl: str)->None:
         """
@@ -169,9 +177,134 @@ class ChunkInfo:
         self.chunk_index = chunk_index
 
 
-class PDFPipeline:
+# File extensions handled natively by PyMuPDF (page-accurate extraction).
+PDF_EXTENSIONS: frozenset[str] = frozenset({".pdf"})
+
+# File extensions converted to Markdown by Microsoft's MarkItDown.
+MARKITDOWN_EXTENSIONS: frozenset[str] = frozenset({
+    # plain text & markup
+    ".txt", ".text", ".md", ".markdown", ".rst",
+    ".html", ".htm", ".xhtml",
+    # office documents
+    ".docx", ".pptx", ".xlsx", ".xls", ".msg",
+    # structured data / misc
+    ".csv", ".json", ".jsonl", ".xml", ".rss", ".atom", ".ipynb", ".epub",
+})
+
+SUPPORTED_EXTENSIONS: frozenset[str] = PDF_EXTENSIONS | MARKITDOWN_EXTENSIONS
+
+# MarkItDown marks PowerPoint slide boundaries with this comment; we use it to
+# map each slide to a "page" so chunks keep a meaningful location.
+_SLIDE_MARKER = re.compile(r"^<!-- Slide number: (\d+) -->\s*$", re.MULTILINE)
+
+_markitdown = None
+
+
+def is_supported_file(path: str) -> bool:
+    """Return True when *path* has an extension Libby can ingest."""
+    return os.path.splitext(path)[1].lower() in SUPPORTED_EXTENSIONS
+
+
+def _get_markitdown():
+    """Lazily build a shared MarkItDown converter (plugins disabled)."""
+    global _markitdown
+    if _markitdown is None:
+        try:
+            from markitdown import MarkItDown
+        except ImportError as e:  # pragma: no cover - dependency is declared
+            raise ImportError(
+                "The 'markitdown' package is required to ingest non-PDF documents. "
+                "Install it with: uv add 'markitdown[docx,pptx,xlsx,xls,outlook]'"
+            ) from e
+        _markitdown = MarkItDown(enable_plugins=False)
+    return _markitdown
+
+
+def _split_slides(markdown: str) -> dict[int, str]:
+    """Split MarkItDown PPTX output into {slide_index: text} (0-based)."""
+    pages: dict[int, str] = {}
+    matches = list(_SLIDE_MARKER.finditer(markdown))
+    if not matches:
+        return {0: markdown}
+    for i, m in enumerate(matches):
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(markdown)
+        pages[int(m.group(1)) - 1] = markdown[m.end():end].strip()
+    return pages
+
+
+def extract_document(path: str) -> tuple[dict[int, str], dict]:
     """
-    Pipeline for processing PDF files in a directory.
+    Extract the text of a single document, organised by page.
+
+    PDFs are read with PyMuPDF so real page numbers are preserved. Every other
+    supported format is converted to Markdown with MarkItDown; PowerPoint
+    decks are split per slide, everything else is returned as page 0.
+
+    :param path: path to the document
+    :return: (pages, metadata) where pages maps page number -> text and
+        metadata always contains ``source_name``, ``source_path`` and
+        ``source_format`` (plus ``title`` when the document declares one)
+    :raises ValueError: if the file extension is not supported
+    """
+    ext = os.path.splitext(path)[1].lower()
+    if ext not in SUPPORTED_EXTENSIONS:
+        raise ValueError(
+            f"Unsupported file type '{ext or path}'. Supported: {', '.join(sorted(SUPPORTED_EXTENSIONS))}"
+        )
+
+    pages: dict[int, str] = {}
+    if ext in PDF_EXTENSIONS:
+        doc = fitz.open(path)
+        metadata = dict(doc.metadata)
+        for page_number, page in enumerate(doc):
+            p_text = page.get_text()
+            if p_text:
+                pages[page_number] = p_text
+    else:
+        result = _get_markitdown().convert(path)
+        markdown = result.markdown or ""
+        metadata = {"title": result.title or ""}
+        pages = _split_slides(markdown) if ext == ".pptx" else {0: markdown}
+
+    # Expose the source filename so callers can fall back to it when the
+    # document's title metadata is empty (PyMuPDF returns '' for unset
+    # titles, which defeats dict.get(key, default)).
+    metadata.setdefault("source_name", os.path.splitext(os.path.basename(path))[0])
+    metadata.setdefault("source_path", path)
+    metadata["source_format"] = ext.lstrip(".")
+    return pages, metadata
+
+
+def extract_full_text(path: str) -> tuple[str, dict]:
+    """Extract a document's complete text (pages joined by newlines)."""
+    pages, metadata = extract_document(path)
+    text = "\n".join(pages[k] for k in sorted(pages))
+    return text, metadata
+
+
+def list_supported_files(path: str, extensions: frozenset[str] | None = None) -> list[str]:
+    """
+    List the ingestible files directly inside *path* (non-recursive), sorted.
+    If *path* is itself a file, it is returned when its extension is accepted.
+    """
+    exts = extensions if extensions is not None else SUPPORTED_EXTENSIONS
+    if os.path.isfile(path):
+        candidates = [path]
+    else:
+        candidates = glob(os.path.join(path, "*"))
+    return sorted(
+        f for f in candidates
+        if os.path.isfile(f) and os.path.splitext(f)[1].lower() in exts
+    )
+
+
+class DocumentPipeline:
+    """
+    Pipeline for processing every supported document in a directory.
+
+    PDFs are extracted with PyMuPDF; other formats (Word, PowerPoint, Excel,
+    HTML, plain text, Markdown, CSV, JSON, EPUB, Outlook messages, ...) are
+    converted to Markdown with MarkItDown.
 
     When *chunk_size* > 0 the pipeline processes each page **individually**
     and yields a list of :class:`ChunkInfo` objects instead of a raw dict.
@@ -179,51 +312,52 @@ class PDFPipeline:
     real page numbers for every chunk.
 
     Attributes:
-        path (str): Path to the directory containing the PDF files.
+        path (str): Path to the directory containing the documents.
+        extensions (frozenset[str]): File extensions to pick up.
         splitter (TextSplitter | None): Optional splitter to chunk the text.
     """
 
-    def __init__(self, path: str, chunk_size: int = 0, chunk_overlap: int = 0):
+    def __init__(
+        self,
+        path: str,
+        chunk_size: int = 0,
+        chunk_overlap: int = 0,
+        extensions: frozenset[str] | None = None,
+    ):
         self.path = path
+        self.extensions = extensions if extensions is not None else SUPPORTED_EXTENSIONS
         if chunk_size > 0:
             self.splitter = TextSplitter(chunk_size, chunk_overlap)
         else:
             self.splitter = None
 
     def __iter__(self):
-        for d in glob(os.path.join(self.path, '*.pdf')):
+        for d in list_supported_files(self.path, self.extensions):
             try:
-                doc = fitz.open(d)
-                metadata = dict(doc.metadata)
+                pages, metadata = extract_document(d)
             except (EmptyFileError, Exception) as e:
                 logger.error(f"Error opening {d}: {e}")
                 continue
 
-            # Expose the source filename so callers can fall back to it when
-            # the PDF's title metadata is empty (PyMuPDF returns '' for unset
-            # titles, which defeats dict.get(key, default)).
-            metadata.setdefault(
-                "source_name", os.path.splitext(os.path.basename(d))[0]
-            )
-            metadata.setdefault("source_path", d)
-
             if self.splitter:
                 chunks: list[ChunkInfo] = []
-                for page_number, page in enumerate(doc):
-                    page_text = page.get_text()
+                for page_number in sorted(pages):
+                    page_text = pages[page_number]
                     if not page_text or not page_text.strip():
                         continue
                     page_chunks = self.splitter.split_text(page_text)
                     for ci, chunk_text in enumerate(page_chunks):
-                        chunks.append(
-                            ChunkInfo(chunk_text, page_number, ci)
-                        )
+                        chunks.append(ChunkInfo(chunk_text, page_number, ci))
                 yield chunks, metadata
             else:
-                text: dict[int, str] = {}
-                for page_number, page in enumerate(doc):
-                    p_text = page.get_text()
-                    if not p_text:
-                        continue
-                    text[page_number] = p_text
-                yield text, metadata
+                yield pages, metadata
+
+
+class PDFPipeline(DocumentPipeline):
+    """
+    Pipeline restricted to PDF files (kept for backward compatibility).
+    See :class:`DocumentPipeline` for the multi-format version.
+    """
+
+    def __init__(self, path: str, chunk_size: int = 0, chunk_overlap: int = 0):
+        super().__init__(path, chunk_size, chunk_overlap, extensions=PDF_EXTENSIONS)

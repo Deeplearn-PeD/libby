@@ -98,7 +98,7 @@ embedder.embed_text(
 
 ##### `embed_path(corpus_path: str)`
 
-Embed all PDFs in a directory.
+Embed all supported documents in a directory (see `SUPPORTED_EXTENSIONS` below).
 
 ```python
 embedder.embed_path("/path/to/documents")
@@ -334,22 +334,34 @@ kg.rebuild()
 
 ---
 
-### PDFPipeline
+### DocumentPipeline / PDFPipeline
 
-Iterator for processing PDF files.
+Iterators that turn a directory of documents into chunks.
+
+`DocumentPipeline` handles every format in `SUPPORTED_EXTENSIONS`: PDF, Word (.docx), PowerPoint (.pptx), Excel (.xlsx/.xls), Outlook (.msg), HTML, plain text, Markdown, reStructuredText, CSV, JSON/JSONL, XML/RSS/Atom, Jupyter notebooks and EPUB.
+PDFs are extracted page by page with PyMuPDF; all other formats are converted
+to Markdown with [MarkItDown](https://github.com/microsoft/markitdown).
+PowerPoint decks are split per slide (each slide becomes a "page"); other
+non-PDF formats are a single page 0. `PDFPipeline` is the same iterator
+restricted to `.pdf` files.
 
 ```python
-from libbydbot.brain.ingest import PDFPipeline
+from libbydbot.brain.ingest import DocumentPipeline
 
-pipeline = PDFPipeline(
-    path="/path/to/pdfs",
+pipeline = DocumentPipeline(
+    path="/path/to/documents",
     chunk_size=800,
-    chunk_overlap=100
+    chunk_overlap=100,
 )
 
-for text, metadata in pipeline:
-    print(f"Processing: {metadata.get('title')}")
+for chunks, metadata in pipeline:
+    # metadata: title (if any), source_name, source_path, source_format
+    print(f"Processing: {metadata.get('title') or metadata['source_name']}")
 ```
+
+Single-file helpers: `extract_document(path) -> (pages, metadata)`,
+`extract_full_text(path) -> (text, metadata)`, `is_supported_file(path)`,
+`list_supported_files(directory)`.
 
 ---
 
@@ -448,7 +460,7 @@ print(settings.default_embedding_model)  # "embeddinggemma"
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `POST` | `/api/embed/text` | Embed raw text |
-| `POST` | `/api/embed/upload` | Upload and embed PDF |
+| `POST` | `/api/embed/upload` | Upload and embed a document (any supported format) |
 | `POST` | `/api/embed/reembed` | Re-embed documents with new model |
 | `GET` | `/api/embed/model-info` | Get embedding model info |
 | `POST` | `/api/retrieve` | Hybrid search |

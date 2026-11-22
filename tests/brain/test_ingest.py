@@ -124,3 +124,122 @@ class TestTextSplitter:
         chunks = splitter.split_text(long_text)
         for chunk in chunks:
             assert len(chunk) <= 800
+
+
+# ---------------------------------------------------------------------------
+# Multi-format ingestion (MarkItDown)
+# ---------------------------------------------------------------------------
+import shutil
+
+from libbydbot.brain.ingest import (
+    DocumentPipeline,
+    SUPPORTED_EXTENSIONS,
+    extract_document,
+    extract_full_text,
+    is_supported_file,
+    list_supported_files,
+)
+
+
+@pytest.fixture
+def mixed_corpus(tmp_path):
+    """A directory with one document per interesting format."""
+    from pptx import Presentation
+
+    shutil.copy("tests/test_corpus/sample.pdf", tmp_path / "sample.pdf")
+    (tmp_path / "page.html").write_text(
+        "<html><head><title>Vector Borne Diseases</title></head>"
+        "<body><h1>Dengue</h1><p>Transmitted by Aedes mosquitoes.</p>"
+        "<script>var x = 1;</script></body></html>",
+        encoding="utf-8",
+    )
+    (tmp_path / "notes.txt").write_text("Plain text notes about malaria.", encoding="utf-8")
+    (tmp_path / "readme.md").write_text("# Heading\n\nSome *markdown* body.", encoding="utf-8")
+    (tmp_path / "data.csv").write_text("city,cases\nRio,10\nRecife,20\n", encoding="utf-8")
+
+    prs = Presentation()
+    for title in ("First slide", "Second slide"):
+        slide = prs.slides.add_slide(prs.slide_layouts[1])
+        slide.shapes.title.text = title
+        slide.placeholders[1].text = f"Body of {title.lower()}"
+    prs.save(tmp_path / "deck.pptx")
+
+    (tmp_path / "binary.exe").write_bytes(b"\x00\x01")
+    return tmp_path
+
+
+def test_is_supported_file():
+    assert is_supported_file("a.PDF")
+    assert is_supported_file("dir/report.docx")
+    assert is_supported_file("page.html")
+    assert not is_supported_file("program.exe")
+    assert not is_supported_file("no_extension")
+    assert ".pptx" in SUPPORTED_EXTENSIONS
+
+
+def test_list_supported_files_skips_unknown(mixed_corpus):
+    names = {os.path.basename(f) for f in list_supported_files(str(mixed_corpus))}
+    assert names == {"sample.pdf", "page.html", "notes.txt", "readme.md", "data.csv", "deck.pptx"}
+
+
+def test_extract_html_uses_title_and_drops_scripts(mixed_corpus):
+    pages, meta = extract_document(str(mixed_corpus / "page.html"))
+    assert meta["title"] == "Vector Borne Diseases"
+    assert meta["source_format"] == "html"
+    assert meta["source_name"] == "page"
+    assert "Dengue" in pages[0] and "Aedes" in pages[0]
+    assert "var x" not in pages[0]
+
+
+def test_extract_pptx_splits_slides_into_pages(mixed_corpus):
+    pages, meta = extract_document(str(mixed_corpus / "deck.pptx"))
+    assert sorted(pages) == [0, 1]
+    assert "First slide" in pages[0]
+    assert "Second slide" in pages[1]
+    assert "Slide number" not in pages[0]
+
+
+def test_extract_pdf_keeps_pymupdf_pages(mixed_corpus):
+    pages, meta = extract_document(str(mixed_corpus / "sample.pdf"))
+    assert meta["source_format"] == "pdf"
+    assert len(pages) >= 1
+
+
+def test_extract_unsupported_raises(mixed_corpus):
+    with pytest.raises(ValueError):
+        extract_document(str(mixed_corpus / "binary.exe"))
+
+
+def test_extract_full_text_csv(mixed_corpus):
+    text, meta = extract_full_text(str(mixed_corpus / "data.csv"))
+    assert "Recife" in text
+    assert meta["source_format"] == "csv"
+
+
+def test_document_pipeline_handles_all_formats(mixed_corpus):
+    pipeline = DocumentPipeline(str(mixed_corpus), chunk_size=200, chunk_overlap=20)
+    docs = {meta["source_format"]: chunks for chunks, meta in pipeline}
+    assert set(docs) == {"pdf", "html", "txt", "md", "csv", "pptx"}
+    for chunks in docs.values():
+        assert chunks and all(isinstance(c, ChunkInfo) and c.text for c in chunks)
+    assert {c.page_number for c in docs["pptx"]} == {0, 1}
+
+
+def test_pdf_pipeline_ignores_other_formats(mixed_corpus):
+    docs = list(PDFPipeline(str(mixed_corpus)))
+    assert len(docs) == 1
+    assert docs[0][1]["source_format"] == "pdf"
+
+
+def test_filesystem_ingester_all_formats(mixed_corpus):
+    ingester = FileSystemIngester(path=str(mixed_corpus), file_type="all", chunk_size=200, chunk_overlap=20)
+    ingester.ingest()
+    with Session(ingester.engine) as session:
+        assert len(session.exec(select(PDFDocument)).all()) == 6
+
+
+def test_filesystem_ingester_single_extension(mixed_corpus):
+    ingester = FileSystemIngester(path=str(mixed_corpus), file_type="html")
+    ingester.ingest()
+    with Session(ingester.engine) as session:
+        assert len(session.exec(select(PDFDocument)).all()) == 1

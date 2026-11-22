@@ -2,7 +2,7 @@
 
 ## Overview
 
-Libby D. Bot is an AI-powered librarian designed for Retrieval Augmented Generation (RAG). It processes PDF documents, generates vector embeddings, and enables intelligent question answering over document collections.
+Libby D. Bot is an AI-powered librarian designed for Retrieval Augmented Generation (RAG). It processes documents (PDF, Office, HTML, text, and more), generates vector embeddings, and enables intelligent question answering over document collections.
 
 ## Architecture
 
@@ -15,7 +15,7 @@ libbydbot/
 └── brain/               # Core functionality
     ├── __init__.py      # LibbyDBot class
     ├── embed.py         # Document embedding & retrieval
-    ├── ingest.py        # PDF ingestion & chunking
+    ├── ingest.py        # Multi-format ingestion & chunking
     ├── memory.py        # Chat history persistence
     └── analyze.py       # Article summarization
 ```
@@ -37,10 +37,11 @@ Handles:
 - Hybrid search (vector + keyword/FTS)
 - Document chunking and storage
 
-#### 3. PDFPipeline (`brain/ingest.py`)
+#### 3. DocumentPipeline (`brain/ingest.py`)
 
 Manages:
-- PDF text extraction using PyMuPDF
+- PDF text extraction using PyMuPDF (page-accurate)
+- Conversion of Office, HTML, text, CSV, JSON, EPUB and other formats to Markdown using MarkItDown
 - Text chunking with configurable overlap
 - Metadata extraction
 
@@ -181,6 +182,7 @@ PGURL=postgresql://user:pass@host/db
 
 Key dependencies include:
 - **PyMuPDF** (`fitz`): PDF processing
+- **MarkItDown**: conversion of DOCX, PPTX, XLSX, HTML, EPUB, etc. to Markdown
 - **SQLAlchemy/SQLModel**: Database ORM
 - **pgvector/sqlite-vec/DuckDB VSS**: Vector storage
 - **Ollama**: Local LLM inference

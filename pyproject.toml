@@ -28,6 +28,7 @@ dependencies = [
     "networkx>=3.6.1",
     "scipy>=1.14",
     "pyvis>=0.3.2",
+    "markitdown[docx,outlook,pptx,xls,xlsx]>=0.1.9",
 ]
 name = "libby"
 version = "1.5.0"

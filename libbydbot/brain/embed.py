@@ -1108,13 +1108,15 @@ class DocEmbedder:
     def embed_path(self, corpus_path: str, callback=None):
         """
         Embed all documents in a path using chunking.
-        :param corpus_path:  path to a folder containing PDFs
+        :param corpus_path:  path to a folder containing documents (PDF, DOCX,
+            PPTX, XLSX, HTML, TXT, MD, CSV, EPUB, ...; see
+            ``libbydbot.brain.ingest.SUPPORTED_EXTENSIONS``)
         :param callback: optional callable(doc_name, chunk_index, total_chunks) for progress reporting
         :return:
         """
-        from libbydbot.brain.ingest import PDFPipeline, ChunkInfo
+        from libbydbot.brain.ingest import DocumentPipeline, ChunkInfo
 
-        pipeline = PDFPipeline(
+        pipeline = DocumentPipeline(
             corpus_path, chunk_size=self.chunk_size, chunk_overlap=self.chunk_overlap
         )
 

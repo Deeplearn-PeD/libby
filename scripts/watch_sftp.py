@@ -2,10 +2,12 @@
 """
 SFTP Document Watcher for Libby D. Bot
 
-Monitors an SFTP upload directory for new PDF files and submits them
+Monitors an SFTP upload directory for new documents (PDF, Office, HTML,
+text, ...) and submits them
 to the Libby API for embedding.
 """
 
+import mimetypes
 import os
 import shutil
 import time
@@ -14,6 +16,16 @@ from pathlib import Path
 
 import requests
 from loguru import logger
+
+# Mirrors libbydbot.brain.ingest.SUPPORTED_EXTENSIONS. Duplicated on purpose:
+# this script runs in a slim container without the libbydbot package.
+SUPPORTED_EXTENSIONS = frozenset({
+    ".pdf",
+    ".txt", ".text", ".md", ".markdown", ".rst",
+    ".html", ".htm", ".xhtml",
+    ".docx", ".pptx", ".xlsx", ".xls", ".msg",
+    ".csv", ".json", ".jsonl", ".xml", ".rss", ".atom", ".ipynb", ".epub",
+})
 
 
 class DocumentWatcher:
@@ -45,17 +57,17 @@ class DocumentWatcher:
         logger.info(f"Processed directory: {self.processed_dir}")
         logger.info(f"Failed directory: {self.failed_dir}")
 
-    def _get_pdf_files(self) -> list[Path]:
-        """Get list of PDF files in watch directory (excluding subdirectories)."""
-        pdf_files = []
+    def _get_document_files(self) -> list[Path]:
+        """Get supported documents in the watch directory (excluding subdirectories)."""
+        doc_files = []
         for item in self.watch_dir.iterdir():
-            if item.is_file() and item.suffix.lower() == ".pdf":
-                pdf_files.append(item)
-        return sorted(pdf_files)
+            if item.is_file() and item.suffix.lower() in SUPPORTED_EXTENSIONS:
+                doc_files.append(item)
+        return sorted(doc_files)
 
     def _embed_file(self, file_path: Path) -> tuple[bool, str]:
         """
-        Submit a PDF file to the Libby API for embedding.
+        Submit a document to the Libby API for embedding.
 
         Returns:
             Tuple of (success: bool, message: str)
@@ -64,7 +76,10 @@ class DocumentWatcher:
 
         try:
             with open(file_path, "rb") as f:
-                files = {"file": (file_path.name, f, "application/pdf")}
+                content_type = (
+                    mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+                )
+                files = {"file": (file_path.name, f, content_type)}
                 data = {
                     "collection_name": self.collection_name,
                     "chunk_size": self.chunk_size,
@@ -105,7 +120,7 @@ class DocumentWatcher:
 
     def process_files(self) -> dict:
         """
-        Process all PDF files in the watch directory.
+        Process all supported documents in the watch directory.
 
         Returns:
             Statistics about processing
@@ -118,16 +133,16 @@ class DocumentWatcher:
             "files": [],
         }
 
-        pdf_files = self._get_pdf_files()
-        stats["total"] = len(pdf_files)
+        doc_files = self._get_document_files()
+        stats["total"] = len(doc_files)
 
-        if not pdf_files:
-            logger.info("No PDF files found in watch directory")
+        if not doc_files:
+            logger.info("No supported documents found in watch directory")
             return stats
 
-        logger.info(f"Found {len(pdf_files)} PDF file(s) to process")
+        logger.info(f"Found {len(doc_files)} document(s) to process")
 
-        for file_path in pdf_files:
+        for file_path in doc_files:
             logger.info(f"Processing: {file_path.name}")
             success, message = self._embed_file(file_path)
 

@@ -56,7 +56,7 @@ def _maybe_auto_ingest_wiki(
     """
     If ``wiki_auto_ingest`` is enabled, rebuild the affected wiki pages from
     the freshly embedded chunks (reading straight from the embedding table, so
-    no PDF re-parsing is needed).
+    no document re-parsing is needed).
 
     Failures are logged but never propagated, so a wiki problem can never break
     the embedding flow.
@@ -87,6 +87,56 @@ def _maybe_auto_ingest_wiki(
         logger.warning(f"Wiki auto-ingest skipped for '{doc_name or collection_name}': {e}")
 
 
+def _validate_upload_filename(filename: str | None) -> str:
+    """Return a safe basename for an upload, or raise 400 if unsupported."""
+    from libbydbot.brain.ingest import SUPPORTED_EXTENSIONS, is_supported_file
+
+    name = os.path.basename(filename or "")
+    if not name or not is_supported_file(name):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Unsupported file type. Supported extensions: "
+                + ", ".join(sorted(SUPPORTED_EXTENSIONS))
+            ),
+        )
+    return name
+
+
+def _embed_directory(
+    embedder: DocEmbedder,
+    directory: str,
+    filename: str,
+    chunk_size: int,
+    chunk_overlap: int,
+) -> tuple[int, set[str]]:
+    """
+    Run every supported document in *directory* through the ingestion
+    pipeline and embed its chunks.
+
+    :return: (number of chunks embedded, set of document names embedded)
+    """
+    from libbydbot.brain.ingest import ChunkInfo, DocumentPipeline
+
+    chunks_embedded = 0
+    embedded_doc_names: set[str] = set()
+    pipeline = DocumentPipeline(
+        directory, chunk_size=chunk_size, chunk_overlap=chunk_overlap
+    )
+    for text, metadata in pipeline:
+        doc_name = metadata.get("title") or filename or "Unknown"
+        embedded_doc_names.add(doc_name)
+        if isinstance(text, list) and text and isinstance(text[0], ChunkInfo):
+            jobs = [(chunk.text, chunk.page_number) for chunk in text]
+        elif isinstance(text, list):
+            jobs = [(chunk, i) for i, chunk in enumerate(text)]
+        else:
+            jobs = [(page_text, page_number) for page_number, page_text in text.items()]
+        embedder.embed_chunks(jobs, doc_name)
+        chunks_embedded += len(jobs)
+    return chunks_embedded, embedded_doc_names
+
+
 def _run_embed_job(
     job_id: str,
     temp_dir: str,
@@ -104,27 +154,10 @@ def _run_embed_job(
         if embedder is None:
             raise RuntimeError("Embedder not initialized")
 
-        from libbydbot.brain.ingest import PDFPipeline, ChunkInfo
-
         embedder.collection_name = collection_name
-        chunks_embedded = 0
-        embedded_doc_names: set[str] = set()
-
-        pipeline = PDFPipeline(
-            temp_dir, chunk_size=chunk_size, chunk_overlap=chunk_overlap
+        chunks_embedded, embedded_doc_names = _embed_directory(
+            embedder, temp_dir, filename, chunk_size, chunk_overlap
         )
-
-        for text, metadata in pipeline:
-            doc_name = metadata.get("title") or filename or "Unknown"
-            embedded_doc_names.add(doc_name)
-            if isinstance(text, list) and text and isinstance(text[0], ChunkInfo):
-                jobs = [(chunk.text, chunk.page_number) for chunk in text]
-            elif isinstance(text, list):
-                jobs = [(chunk, i) for i, chunk in enumerate(text)]
-            else:
-                jobs = [(page_text, page_number) for page_number, page_text in text.items()]
-            embedder.embed_chunks(jobs, doc_name)
-            chunks_embedded += len(jobs)
 
         with _jobs_lock:
             _jobs[job_id]["status"] = "completed"
@@ -180,7 +213,7 @@ def embed_text(request: EmbedTextRequest, embedder: EmbedderDep):
 
 @router.post("/upload", response_model=EmbedJobAccepted)
 async def upload_and_embed(
-    file: UploadFile = File(..., description="PDF file to upload and embed"),
+    file: UploadFile = File(..., description="Document to upload and embed (PDF, DOCX, PPTX, XLSX, HTML, TXT, MD, CSV, EPUB, ...)"),
     collection_name: str = Form(
         "main", description="Collection to store the document in"
     ),
@@ -188,15 +221,17 @@ async def upload_and_embed(
     chunk_overlap: int = Form(100, description="Overlap between chunks"),
 ):
     """
-    Upload a PDF file for async embedding. Returns a job ID immediately.
+    Upload a document for async embedding.
+
+    PDFs are parsed with PyMuPDF; other formats are converted to Markdown
+    with MarkItDown. Returns a job ID immediately.
 
     Poll GET /embed/status/{job_id} for completion.
     """
-    if not file.filename or not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported")
+    filename = _validate_upload_filename(file.filename)
 
     temp_dir = tempfile.mkdtemp()
-    temp_file_path = os.path.join(temp_dir, file.filename)
+    temp_file_path = os.path.join(temp_dir, filename)
 
     with open(temp_file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
@@ -206,7 +241,7 @@ async def upload_and_embed(
     with _jobs_lock:
         _jobs[job_id] = {
             "status": "processing",
-            "doc_name": file.filename,
+            "doc_name": filename,
             "collection_name": collection_name,
             "chunks_embedded": 0,
             "error": None,
@@ -216,16 +251,16 @@ async def upload_and_embed(
 
     thread = threading.Thread(
         target=_run_embed_job,
-        args=(job_id, temp_dir, file.filename, collection_name, chunk_size, chunk_overlap),
+        args=(job_id, temp_dir, filename, collection_name, chunk_size, chunk_overlap),
         daemon=True,
     )
     thread.start()
 
-    logger.info(f"Started async embed job {job_id} for '{file.filename}'")
+    logger.info(f"Started async embed job {job_id} for '{filename}'")
 
     return EmbedJobAccepted(
         job_id=job_id,
-        doc_name=file.filename,
+        doc_name=filename,
         collection_name=collection_name,
         message="Document accepted for async embedding. Poll /embed/status/{job_id} for progress.",
     )
@@ -301,7 +336,7 @@ def list_jobs():
 @router.post("/upload/sync", response_model=EmbedUploadResponse)
 async def upload_and_embed_sync(
     embedder: EmbedderDep,
-    file: UploadFile = File(..., description="PDF file to upload and embed"),
+    file: UploadFile = File(..., description="Document to upload and embed (PDF, DOCX, PPTX, XLSX, HTML, TXT, MD, CSV, EPUB, ...)"),
     collection_name: str = Form(
         "main", description="Collection to store the document in"
     ),
@@ -309,52 +344,34 @@ async def upload_and_embed_sync(
     chunk_overlap: int = Form(100, description="Overlap between chunks"),
 ):
     """
-    Upload a PDF file and embed synchronously (blocks until done).
+    Upload a document and embed synchronously (blocks until done).
 
     Prefer /upload for large files.
     """
-    if not file.filename or not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported")
+    filename = _validate_upload_filename(file.filename)
 
     temp_dir = None
     try:
         temp_dir = tempfile.mkdtemp()
-        temp_file_path = os.path.join(temp_dir, file.filename)
+        temp_file_path = os.path.join(temp_dir, filename)
 
         with open(temp_file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        from libbydbot.brain.ingest import PDFPipeline, ChunkInfo
-
         embedder.collection_name = collection_name
-        chunks_embedded = 0
-        embedded_doc_names: set[str] = set()
-
-        pipeline = PDFPipeline(
-            temp_dir, chunk_size=chunk_size, chunk_overlap=chunk_overlap
+        chunks_embedded, embedded_doc_names = _embed_directory(
+            embedder, temp_dir, filename, chunk_size, chunk_overlap
         )
-
-        for text, metadata in pipeline:
-            doc_name = metadata.get("title") or file.filename or "Unknown"
-            embedded_doc_names.add(doc_name)
-            if isinstance(text, list) and text and isinstance(text[0], ChunkInfo):
-                jobs = [(chunk.text, chunk.page_number) for chunk in text]
-            elif isinstance(text, list):
-                jobs = [(chunk, i) for i, chunk in enumerate(text)]
-            else:
-                jobs = [(page_text, page_number) for page_number, page_text in text.items()]
-            embedder.embed_chunks(jobs, doc_name)
-            chunks_embedded += len(jobs)
 
         for name in embedded_doc_names:
             _maybe_auto_ingest_wiki(embedder, collection_name, name)
 
         return EmbedUploadResponse(
             success=True,
-            doc_name=file.filename,
+            doc_name=filename,
             chunks_embedded=chunks_embedded,
             collection_name=collection_name,
-            message=f"Successfully embedded {chunks_embedded} chunks from '{file.filename}' into collection '{collection_name}'",
+            message=f"Successfully embedded {chunks_embedded} chunks from '{filename}' into collection '{collection_name}'",
         )
     except Exception as e:
         logger.error(f"Error uploading and embedding file: {e}")

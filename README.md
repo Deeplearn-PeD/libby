@@ -70,7 +70,7 @@ Chat history is persisted to the database and loaded on each session.
 
 #### Embed Screen
 
-Browse the filesystem, select a folder of PDFs, and embed them into a collection with live progress logging.
+Browse the filesystem, select a folder of documents, and embed them into a collection with live progress logging.
 
 #### Wiki Browser
 
@@ -84,7 +84,7 @@ Select any page to render it as Markdown. Use **Refresh** to reload, **Ingest** 
 
 #### Wiki Ingest Screen
 
-Dedicated screen for ingesting PDFs into the LLM Wiki with per-document progress showing pages touched, entities, and concepts extracted.
+Dedicated screen for ingesting documents into the LLM Wiki with per-document progress showing pages touched, entities, and concepts extracted.
 
 #### Settings Screen
 
@@ -393,8 +393,8 @@ Once the server is running, access the interactive API documentation at:
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `POST` | `/api/embed/text` | Embed raw text into the database |
-| `POST` | `/api/embed/upload` | Upload and embed PDF files (async, returns job ID) |
-| `POST` | `/api/embed/upload/sync` | Upload and embed PDF files (synchronous) |
+| `POST` | `/api/embed/upload` | Upload and embed a document — PDF, DOCX, PPTX, XLSX, HTML, TXT, MD, CSV, EPUB, … (async, returns job ID) |
+| `POST` | `/api/embed/upload/sync` | Upload and embed a document (synchronous) |
 | `POST` | `/api/embed/reembed` | Re-embed documents with a new model |
 | `POST` | `/api/embed/finalize` | Finalize a rechunk operation (shadow → production) |
 | `POST` | `/api/embed/verify` | Verify data integrity (12 checks with auto-fix) |
@@ -743,7 +743,7 @@ gunzip -c libby_backup_YYYYMMDD_HHMMSS.sql.gz | \
 - **12 Verification Checks** — Automated data integrity analysis with auto-fix capabilities
 - **Multiple language support** (English and Portuguese)
 - **Various AI models** available (Kimi, GLM, Llama3, Gemma, Qwen, Gemini, GPT-4o)
-- **PDF document processing** and embedding with configurable chunking
+- **Multi-format document processing** (PDF, Word (.docx), PowerPoint (.pptx), Excel (.xlsx/.xls), Outlook (.msg), HTML, plain text, Markdown, reStructuredText, CSV, JSON/JSONL, XML/RSS/Atom, Jupyter notebooks and EPUB) and embedding with configurable chunking — PDFs via PyMuPDF, everything else via [MarkItDown](https://github.com/microsoft/markitdown)
 - **Question answering** with context from your documents
 - **Content generation** capabilities
 - **REST API** with 40+ endpoints for full programmatic access

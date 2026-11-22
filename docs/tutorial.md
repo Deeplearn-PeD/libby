@@ -458,7 +458,9 @@ curl -X POST "http://localhost:8001/api/embed/text" \
   }'
 ```
 
-#### Upload and Embed PDF
+#### Upload and Embed a Document
+
+Any supported format works (PDF, DOCX, PPTX, XLSX, HTML, TXT, MD, CSV, EPUB, …):
 
 ```bash
 curl -X POST "http://localhost:8001/api/embed/upload" \
