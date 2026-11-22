@@ -5,7 +5,7 @@ Welcome to the official documentation for Libby D. Bot, your AI-powered libraria
 ## What is Libby D. Bot?
 
 Libby D. Bot is an AI-powered librarian that:
-- Processes PDF documents and generates vector embeddings
+- Processes documents (PDF, Word, PowerPoint, Excel, HTML, text, Markdown, CSV, EPUB, …) and generates vector embeddings
 - Enables semantic search over document collections
 - Provides question answering using retrieved context
 - Builds a persistent, compounding **LLM Wiki** of entities, concepts, and synthesis

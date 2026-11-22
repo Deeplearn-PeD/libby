@@ -397,6 +397,35 @@ class TestUploadEmbed:
         assert len(doc_names) == len(pdf_files)
 
 
+    def test_upload_sync_embeds_html(self, client):
+        """Non-PDF formats are converted with MarkItDown and embedded."""
+        html = (
+            b"<html><head><title>Arbovirus Notes</title></head><body>"
+            b"<h1>Zika</h1><p>Zika virus is spread mostly by Aedes mosquitoes.</p>"
+            b"</body></html>"
+        )
+        response = client.post(
+            "/api/embed/upload/sync",
+            files={"file": ("notes.html", html, "text/html")},
+            data={"collection_name": "html_upload", "chunk_size": "800", "chunk_overlap": "100"},
+        )
+        assert response.status_code == 200, f"Upload failed: {response.text}"
+        assert response.json()["chunks_embedded"] > 0
+
+        docs = client.get("/api/documents", params={"collection_name": "html_upload"})
+        doc_names = {d["doc_name"] for d in docs.json()["documents"]}
+        assert "Arbovirus Notes" in doc_names
+
+    def test_upload_rejects_unsupported_extension(self, client):
+        for endpoint in ("/api/embed/upload", "/api/embed/upload/sync"):
+            response = client.post(
+                endpoint,
+                files={"file": ("malware.exe", b"\x00\x01", "application/octet-stream")},
+                data={"collection_name": "main"},
+            )
+            assert response.status_code == 400
+            assert ".docx" in response.json()["detail"]
+
 class TestWikiBrowse:
     """Test the wiki browsing endpoints (list pages + read a page)."""
 

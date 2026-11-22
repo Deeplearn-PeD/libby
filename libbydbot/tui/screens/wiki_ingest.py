@@ -23,7 +23,7 @@ class WikiIngestScreen(Screen):
         with Vertical(id="embed-container"):
             with Horizontal(id="embed-top"):
                 with Vertical(id="embed-left"):
-                    yield Static("Select folder with PDFs:")
+                    yield Static("Select folder with documents:")
                     yield DirectoryTree(".", id="ingest-tree")
                 with Vertical(id="embed-right"):
                     yield Static("Settings")
@@ -71,8 +71,6 @@ class WikiIngestScreen(Screen):
 
     def _ingest_worker(self, path: str, collection: str, log: RichLog):
         import os
-        import fitz
-        from glob import glob
 
         try:
             from libbydbot.brain.wiki import WikiManager
@@ -82,20 +80,19 @@ class WikiIngestScreen(Screen):
                 model=self.app.wiki_model,
             )
 
-            pdf_paths = glob(os.path.join(path, "*.pdf"))
-            if not pdf_paths:
-                self._safe_call(log.write, "No PDF files found.")
+            from libbydbot.brain.ingest import extract_full_text, list_supported_files
+
+            doc_paths = list_supported_files(path)
+            if not doc_paths:
+                self._safe_call(log.write, "No supported documents found.")
                 return
 
-            for pdf_path in pdf_paths:
+            for doc_path in doc_paths:
                 try:
-                    doc = fitz.open(pdf_path)
-                    text = ""
-                    for page in doc:
-                        text += page.get_text() + "\n"
-                    doc_name = doc.metadata.get("title") or os.path.basename(pdf_path)
+                    text, metadata = extract_full_text(doc_path)
+                    doc_name = metadata.get("title") or os.path.basename(doc_path)
                 except Exception as e:
-                    self._safe_call(log.write, f"Error reading {pdf_path}: {e}")
+                    self._safe_call(log.write, f"Error reading {doc_path}: {e}")
                     continue
 
                 self._safe_call(log.write, f"Ingesting: {doc_name}...")
