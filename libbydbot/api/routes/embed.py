@@ -108,6 +108,38 @@ def _validate_upload_filename(filename: str | None) -> str:
     return name
 
 
+def _check_upload_limits(path: str) -> None:
+    """
+    Enforce the configured upload limits on a freshly uploaded file.
+
+    Rejects files larger than ``MAX_UPLOAD_MB`` and zip-based documents
+    (docx/pptx/xlsx/epub) whose declared uncompressed size exceeds
+    ``MAX_ARCHIVE_UNCOMPRESSED_MB`` — checked via a cheap central-directory
+    read, so decompression bombs are turned away before the archive is
+    ever expanded.
+
+    :param path: path of the uploaded temp file
+    :raises HTTPException: 413 when a limit is exceeded, 400 when a
+        zip-based upload is not a valid archive
+    """
+    from libbydbot.brain.ingest import UploadLimitError, check_ingest_limits
+    from libbydbot.settings import Settings
+
+    settings = Settings()
+    try:
+        check_ingest_limits(
+            path,
+            max_bytes=int(settings.max_upload_mb * 1024 * 1024),
+            max_uncompressed_bytes=int(
+                settings.max_archive_uncompressed_mb * 1024 * 1024
+            ),
+        )
+    except UploadLimitError as e:
+        raise HTTPException(status_code=413, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 def _embed_directory(
     embedder: DocEmbedder,
     directory: str,
@@ -255,6 +287,12 @@ async def upload_and_embed(
     with open(temp_file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
+    try:
+        _check_upload_limits(temp_file_path)
+    except HTTPException:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
+
     job_id = str(uuid.uuid4())
 
     with _jobs_lock:
@@ -377,6 +415,8 @@ async def upload_and_embed_sync(
         with open(temp_file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
+        _check_upload_limits(temp_file_path)
+
         chunks_embedded, embedded_doc_names = _embed_directory(
             embedder, temp_dir, filename, chunk_size, chunk_overlap, collection_name
         )
@@ -391,6 +431,8 @@ async def upload_and_embed_sync(
             collection_name=collection_name,
             message=f"Successfully embedded {chunks_embedded} chunks from '{filename}' into collection '{collection_name}'",
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error uploading and embedding file: {e}")
         raise HTTPException(status_code=500, detail=str(e))

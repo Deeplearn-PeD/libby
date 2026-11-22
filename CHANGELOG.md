@@ -9,6 +9,11 @@ All notable changes to this project will be documented in this file.
 
 ### Bug Fixes
 - fix(api): upload endpoints now use the basename of the uploaded filename, so a client-supplied path can no longer escape the temp directory; unsupported types return 400 listing the accepted extensions
+- fix(embed): `get_document_texts` now deduplicates by `doc_hash` instead of `(doc_name, page_number)`, so documents with several chunks on the same page (every non-PDF format stores its chunks on page 0) are reconstructed without losing chunks
+- fix(api): embed/text and upload routes pass the target collection explicitly through `embed_text`/`embed_chunks` instead of mutating the shared embedder's `collection_name`, eliminating a race where concurrent requests stored chunks in the wrong collection
+
+### Security
+- fix(api): uploads larger than `MAX_UPLOAD_MB` (default 50 MB) are rejected with HTTP 413 before parsing, and zip-based documents (`.docx`/`.pptx`/`.xlsx`/`.epub`) whose declared uncompressed size exceeds `MAX_ARCHIVE_UNCOMPRESSED_MB` (default 512 MB) are rejected before the archive is expanded — blocking decompression bombs
 
 ## [1.5.0] - 2026-11-17
 

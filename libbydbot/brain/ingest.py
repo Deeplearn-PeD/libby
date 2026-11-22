@@ -193,6 +193,10 @@ MARKITDOWN_EXTENSIONS: frozenset[str] = frozenset({
 
 SUPPORTED_EXTENSIONS: frozenset[str] = PDF_EXTENSIONS | MARKITDOWN_EXTENSIONS
 
+# Zip-based formats: the upload guard reads their central directory to
+# reject decompression bombs before MarkItDown ever expands the archive.
+ZIP_BASED_EXTENSIONS: frozenset[str] = frozenset({".docx", ".pptx", ".xlsx", ".epub"})
+
 # MarkItDown marks PowerPoint slide boundaries with this comment; we use it to
 # map each slide to a "page" so chunks keep a meaningful location.
 _SLIDE_MARKER = re.compile(r"^<!-- Slide number: (\d+) -->\s*$", re.MULTILINE)
@@ -200,9 +204,58 @@ _SLIDE_MARKER = re.compile(r"^<!-- Slide number: (\d+) -->\s*$", re.MULTILINE)
 _markitdown = None
 
 
+class UploadLimitError(ValueError):
+    """Raised when a document exceeds the configured size/expansion limits."""
+
+
 def is_supported_file(path: str) -> bool:
     """Return True when *path* has an extension Libby can ingest."""
     return os.path.splitext(path)[1].lower() in SUPPORTED_EXTENSIONS
+
+
+def check_ingest_limits(path: str, max_bytes: int, max_uncompressed_bytes: int) -> None:
+    """
+    Verify that *path* is safe to ingest under the given size limits.
+
+    Checks the file's own size and, for zip-based formats (docx, pptx,
+    xlsx, epub), the total uncompressed size declared in the archive's
+    central directory. Reading the directory is cheap and decompresses
+    nothing, so a crafted archive with extreme expansion (decompression
+    bomb) is rejected before it can exhaust memory or CPU.
+
+    :param path: path to the document
+    :param max_bytes: maximum allowed file size in bytes
+    :param max_uncompressed_bytes: maximum allowed total uncompressed size
+        of zip-based documents, in bytes
+    :raises UploadLimitError: when either limit is exceeded
+    :raises ValueError: when a zip-based document is not a valid archive
+    """
+    import zipfile
+
+    size = os.path.getsize(path)
+    if size > max_bytes:
+        raise UploadLimitError(
+            f"File '{os.path.basename(path)}' is {size} bytes; the maximum "
+            f"accepted upload size is {max_bytes} bytes."
+        )
+
+    if os.path.splitext(path)[1].lower() not in ZIP_BASED_EXTENSIONS:
+        return
+
+    try:
+        with zipfile.ZipFile(path) as archive:
+            total_uncompressed = sum(info.file_size for info in archive.infolist())
+    except zipfile.BadZipFile as e:
+        raise ValueError(
+            f"File '{os.path.basename(path)}' is not a valid "
+            f"{os.path.splitext(path)[1].lower()} document: {e}"
+        ) from e
+    if total_uncompressed > max_uncompressed_bytes:
+        raise UploadLimitError(
+            f"Archive '{os.path.basename(path)}' expands to "
+            f"{total_uncompressed} bytes uncompressed; the maximum accepted "
+            f"uncompressed size is {max_uncompressed_bytes} bytes."
+        )
 
 
 def _get_markitdown():

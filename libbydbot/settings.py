@@ -96,6 +96,25 @@ class Settings(BaseSettings):
         ),
     )
 
+    max_upload_mb: float = Field(
+        default=50.0,
+        description=(
+            "Maximum accepted document upload size in MB for the "
+            "/api/embed/upload endpoints; larger uploads are rejected with "
+            "HTTP 413 before parsing"
+        ),
+    )
+
+    max_archive_uncompressed_mb: float = Field(
+        default=512.0,
+        description=(
+            "Maximum total uncompressed size in MB allowed inside zip-based "
+            "uploads (.docx/.pptx/.xlsx/.epub); archives that declare a "
+            "larger expansion are rejected with HTTP 413 before being "
+            "opened, blocking decompression bombs"
+        ),
+    )
+
     db_url: str = Field(
         default_factory=lambda: f"sqlite:///{Path.home() / '.libby' / 'data' / 'libby.db'}",
         description="Database URL for chat history",

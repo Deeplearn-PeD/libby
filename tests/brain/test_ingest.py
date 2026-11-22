@@ -134,6 +134,8 @@ import shutil
 from libbydbot.brain.ingest import (
     DocumentPipeline,
     SUPPORTED_EXTENSIONS,
+    UploadLimitError,
+    check_ingest_limits,
     extract_document,
     extract_full_text,
     is_supported_file,
@@ -243,3 +245,47 @@ def test_filesystem_ingester_single_extension(mixed_corpus):
     ingester.ingest()
     with Session(ingester.engine) as session:
         assert len(session.exec(select(PDFDocument)).all()) == 1
+
+
+# ---------------------------------------------------------------------------
+# Upload limits (size + decompression-bomb guard)
+# ---------------------------------------------------------------------------
+
+
+def test_check_ingest_limits_rejects_oversized_file(tmp_path):
+    big = tmp_path / "big.txt"
+    big.write_text("x" * 1000, encoding="utf-8")
+    with pytest.raises(UploadLimitError):
+        check_ingest_limits(str(big), max_bytes=100, max_uncompressed_bytes=10_000)
+
+
+def test_check_ingest_limits_rejects_zip_expansion(tmp_path):
+    import zipfile
+
+    bomb = tmp_path / "bomb.docx"
+    with zipfile.ZipFile(bomb, "w") as archive:
+        archive.writestr("huge.txt", "x" * 100_000)
+    with pytest.raises(UploadLimitError):
+        check_ingest_limits(
+            str(bomb), max_bytes=1_000_000, max_uncompressed_bytes=10_000
+        )
+
+
+def test_check_ingest_limits_accepts_small_archive(tmp_path):
+    import zipfile
+
+    doc = tmp_path / "ok.docx"
+    with zipfile.ZipFile(doc, "w") as archive:
+        archive.writestr("document.xml", "<doc>hello</doc>")
+    check_ingest_limits(str(doc), max_bytes=1_000_000, max_uncompressed_bytes=10_000)
+
+
+def test_check_ingest_limits_invalid_zip_is_plain_valueerror(tmp_path):
+    """A corrupt archive is a bad request (400), not a limit hit (413)."""
+    fake = tmp_path / "fake.docx"
+    fake.write_bytes(b"not a zip at all")
+    with pytest.raises(ValueError) as excinfo:
+        check_ingest_limits(
+            str(fake), max_bytes=1_000_000, max_uncompressed_bytes=10_000
+        )
+    assert not isinstance(excinfo.value, UploadLimitError)
