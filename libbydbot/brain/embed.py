@@ -844,25 +844,29 @@ class DocEmbedder:
                 except Exception as e:
                     logger.error(f"Error checking vector extension: {e}")
 
-    def _check_existing(self, hash: str):
+    def _check_existing(self, hash: str, collection: str = ""):
         """
-        Check if a document with this hash already exists in the current collection.
+        Check if a document with this hash already exists in the given
+        collection.
         :param hash: SHA256 hash of the document
+        :param collection: collection to check; empty means the embedder's
+            current collection
         :return:
         """
+        collection = collection or self.collection_name
         if self.dburl.startswith("sqlite"):
             target = self._target_table_for_dimension()
             with self.connection as conn:
                 cursor = conn.cursor()
                 q = f"SELECT doc_hash FROM {target} WHERE collection_name=? AND doc_hash=?"
-                result = cursor.execute(q, (self.collection_name, hash)).fetchone()
+                result = cursor.execute(q, (collection, hash)).fetchone()
             return result is not None
         elif self.dburl.startswith("duckdb"):
             target = self._target_table_for_dimension()
             conn = self.connection
             result = conn.sql(
                 f"SELECT id FROM {target} WHERE collection_name = ? AND doc_hash = ?",
-                params=[self.collection_name, hash],
+                params=[collection, hash],
             ).fetchall()
             return len(result) > 0
         else:
@@ -870,7 +874,7 @@ class DocEmbedder:
             with Session(self.engine) as session:
                 result = session.execute(
                     text(f"SELECT 1 FROM {target} WHERE collection_name = :col AND doc_hash = :hash"),
-                    {"col": self.collection_name, "hash": hash},
+                    {"col": collection, "hash": hash},
                 ).fetchone()
             return result is not None
 
@@ -899,22 +903,33 @@ class DocEmbedder:
             return
         yield doctext, page_number
 
-    def embed_text(self, doctext: str, docname: str, page_number: int):
+    def embed_text(
+        self, doctext: str, docname: str, page_number: int, collection: str = ""
+    ):
         """
         Embed a page of a document.
         :param doctext: page of a document
         :param docname: name of the document
         :param page_number: page number
+        :param collection: collection to embed into; empty means the
+            embedder's current collection. Passing it explicitly keeps a
+            shared embedder race-free under concurrent requests.
         :return:
         """
+        collection = collection or self.collection_name
         pairs = list(self._chunks_for_embedding(doctext, docname, page_number))
         if len(pairs) == 1:
-            self._embed_single(pairs[0][0], docname, pairs[0][1])
+            self._embed_single(pairs[0][0], docname, pairs[0][1], collection)
         else:
-            self._embed_many([t for t, _ in pairs], docname, [p for _, p in pairs])
+            self._embed_many(
+                [t for t, _ in pairs], docname, [p for _, p in pairs], collection
+            )
 
-    def _embed_single(self, doctext: str, docname: str, page_number: int):
+    def _embed_single(
+        self, doctext: str, docname: str, page_number: int, collection: str = ""
+    ):
         """Insert a single text chunk into the vector store."""
+        collection = collection or self.collection_name
         limit = self._max_embed_chars()
         if len(doctext) > limit:
             logger.warning(
@@ -923,23 +938,34 @@ class DocEmbedder:
             )
             doctext = doctext[:limit]
         document_hash = sha256(doctext.encode()).hexdigest()
-        if self._check_existing(document_hash):
+        if self._check_existing(document_hash, collection):
             logger.info(
                 f"Document {docname} page {page_number} already exists in the database, skipping."
             )
             return
         doctext = doctext.replace("\x00", "\ufffd")
         embedding = self._generate_embedding(doctext)
-        self._store_embedding(doctext, docname, page_number, document_hash, embedding)
+        self._store_embedding(
+            doctext, docname, page_number, document_hash, embedding, collection
+        )
 
-    def _embed_many(self, texts: list[str], docname: str, page_numbers: list[int]):
+    def _embed_many(
+        self,
+        texts: list[str],
+        docname: str,
+        page_numbers: list[int],
+        collection: str = "",
+    ):
         """
         Embed multiple chunks using batched requests, skipping chunks that are
         already stored. Falls back to single requests if a batch fails.
         :param texts: chunk texts
         :param docname: name of the document
         :param page_numbers: page number for each chunk
+        :param collection: collection to embed into; empty means the
+            embedder's current collection
         """
+        collection = collection or self.collection_name
         limit = self._max_embed_chars()
         prepared = []  # (text, page_number, document_hash)
         for text, page_number in zip(texts, page_numbers):
@@ -950,7 +976,7 @@ class DocEmbedder:
                 )
                 text = text[:limit]
             document_hash = sha256(text.encode()).hexdigest()
-            if self._check_existing(document_hash):
+            if self._check_existing(document_hash, collection):
                 logger.info(
                     f"Document {docname} page {page_number} already exists in the database, skipping."
                 )
@@ -968,27 +994,40 @@ class DocEmbedder:
                 )
                 for text, page_number, document_hash in group:
                     embedding = self._generate_embedding(text)
-                    self._store_embedding(text, docname, page_number, document_hash, embedding)
+                    self._store_embedding(
+                        text, docname, page_number, document_hash, embedding, collection
+                    )
                 continue
             for (text, page_number, document_hash), embedding in zip(group, embeddings):
-                self._store_embedding(text, docname, page_number, document_hash, embedding)
+                self._store_embedding(
+                    text, docname, page_number, document_hash, embedding, collection
+                )
 
     def embed_chunks(
-        self, jobs: list[tuple[str, int]], docname: str, callback=None
+        self, jobs: list[tuple[str, int]], docname: str, callback=None, collection: str = ""
     ):
         """
         Embed a document's chunks in batches of EMBED_BATCH_SIZE.
         :param jobs: list of (text, page_number) tuples
         :param docname: name of the document
         :param callback: optional callable(doc_name, chunk_index, total_chunks)
+        :param collection: collection to embed into; empty means the
+            embedder's current collection. Passing it explicitly keeps a
+            shared embedder race-free under concurrent requests.
         """
+        collection = collection or self.collection_name
         total = len(jobs)
         buffer: list[tuple[int, str, int]] = []  # (job_index, text, page_number)
 
         def _flush():
             if not buffer:
                 return
-            self._embed_many([t for _, t, _ in buffer], docname, [pn for _, _, pn in buffer])
+            self._embed_many(
+                [t for _, t, _ in buffer],
+                docname,
+                [pn for _, _, pn in buffer],
+                collection,
+            )
             if callback:
                 for job_index, _, _ in buffer:
                     callback(docname, job_index, total)
@@ -1002,9 +1041,16 @@ class DocEmbedder:
         _flush()
 
     def _store_embedding(
-        self, doctext: str, docname: str, page_number: int, document_hash: str, embedding
+        self,
+        doctext: str,
+        docname: str,
+        page_number: int,
+        document_hash: str,
+        embedding,
+        collection: str = "",
     ):
         """Insert one chunk with its embedding into the vector store."""
+        collection = collection or self.collection_name
         if self.dburl.startswith("sqlite"):
             import struct
 
@@ -1024,7 +1070,7 @@ class DocEmbedder:
                         VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                         (
-                            self.collection_name,
+                            collection,
                             docname,
                             page_number,
                             document_hash,
@@ -1061,7 +1107,7 @@ class DocEmbedder:
                     params=[
                         document_hash,
                         docname,
-                        self.collection_name,
+                        collection,
                         page_number,
                         doctext,
                         self.embedding_model,
@@ -1086,7 +1132,7 @@ class DocEmbedder:
                         {
                             "hash": document_hash,
                             "name": docname,
-                            "col": self.collection_name,
+                            "col": collection,
                             "page": page_number,
                             "doc": doctext,
                             "model": self.embedding_model,
@@ -1105,13 +1151,15 @@ class DocEmbedder:
                     )
                     session.rollback()
 
-    def embed_path(self, corpus_path: str, callback=None):
+    def embed_path(self, corpus_path: str, callback=None, collection: str = ""):
         """
         Embed all documents in a path using chunking.
         :param corpus_path:  path to a folder containing documents (PDF, DOCX,
             PPTX, XLSX, HTML, TXT, MD, CSV, EPUB, ...; see
             ``libbydbot.brain.ingest.SUPPORTED_EXTENSIONS``)
         :param callback: optional callable(doc_name, chunk_index, total_chunks) for progress reporting
+        :param collection: collection to embed into; empty means the
+            embedder's current collection
         :return:
         """
         from libbydbot.brain.ingest import DocumentPipeline, ChunkInfo
@@ -1134,7 +1182,7 @@ class DocEmbedder:
             else:
                 jobs = [(page_text, page_number) for page_number, page_text in chunks_or_dict.items()]
 
-            self.embed_chunks(jobs, docname, callback=callback)
+            self.embed_chunks(jobs, docname, callback=callback, collection=collection)
 
     def retrieve_docs(self, query: str, collection: str = "", num_docs: int = 5) -> str:
         """

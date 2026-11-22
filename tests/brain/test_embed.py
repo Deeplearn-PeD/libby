@@ -239,6 +239,37 @@ def test_get_document_texts_preserves_same_page_chunks(tmp_path):
     assert "second chunk about zika" in texts["notes.html"]
 
 
+def test_embed_chunks_explicit_collection_isolation(tmp_path):
+    """embed_chunks(collection=...) must not touch or depend on the shared
+    embedder's collection_name.
+
+    Concurrent API requests share one embedder; before the collection was
+    threaded explicitly, mutating embedder.collection_name could store
+    chunks in whichever collection another request had last set.
+    """
+    db_path = tmp_path / "embedding.db"
+    embedder = DocEmbedder(
+        "default", dburl=f"sqlite:///{db_path}", embedding_model="mxbai-embed-large"
+    )
+    embedder.embed_chunks([("text for other", 0)], "doc", collection="other")
+    assert embedder.collection_name == "default"
+    assert "text for other" in embedder.get_document_texts(collection="other")["doc"]
+    assert embedder.get_document_texts(collection="default") == {}
+
+
+def test_embed_text_explicit_collection(tmp_path):
+    """embed_text(collection=...) embeds into the given collection without
+    mutating the embedder's current collection."""
+    db_path = tmp_path / "embedding.db"
+    embedder = DocEmbedder(
+        "default", dburl=f"sqlite:///{db_path}", embedding_model="mxbai-embed-large"
+    )
+    embedder.embed_text("page text", "doc", 0, collection="elsewhere")
+    assert embedder.collection_name == "default"
+    assert "page text" in embedder.get_document_texts(collection="elsewhere")["doc"]
+    assert embedder.get_document_texts(collection="default") == {}
+
+
 def test_get_document_chunks_merges_collection_split_across_tables(tmp_path):
     """get_document_chunks must also merge across tables, deduplicating by
     doc_hash (graph chunk nodes come from this method)."""
