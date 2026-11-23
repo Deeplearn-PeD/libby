@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [1.6.0] - 2026-11-23
 
 ### Features
 - feat(ingest): multi-format document ingestion via Microsoft [MarkItDown](https://github.com/microsoft/markitdown) — PDF, Word (.docx), PowerPoint (.pptx), Excel (.xlsx/.xls), Outlook (.msg), HTML, plain text, Markdown, reStructuredText, CSV, JSON/JSONL, XML/RSS/Atom, Jupyter notebooks and EPUB are now accepted by `/api/embed/upload`, `/api/embed/upload/sync`, `embed_path` (CLI/TUI embed), wiki ingest (CLI/TUI) and the SFTP watcher. PDFs keep using PyMuPDF for page-accurate chunks; PPTX decks are split per slide. New `DocumentPipeline` (with `PDFPipeline` kept as a PDF-only subclass) plus `extract_document` / `extract_full_text` helpers; chunk metadata now records `source_format`.
