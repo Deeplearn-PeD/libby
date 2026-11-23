@@ -186,6 +186,8 @@ libby/
 - `WIKI_GRAPH_COMMUNITIES` - Detect Louvain topic communities in the wiki graph (default: `True`)
 - `WIKI_GRAPH_RESOLUTION` - Louvain resolution; higher values yield more, smaller communities (default: `1.0`)
 - `WIKI_GRAPH_HUB_PERCENTILE` - Degree percentile above which a page counts as a super-hub with damped ranking bonus (default: `95`)
+- `MAX_UPLOAD_MB` - Maximum accepted document upload size in MB for the `/api/embed/upload*` endpoints; larger uploads get HTTP 413 (default: `50`)
+- `MAX_ARCHIVE_UNCOMPRESSED_MB` - Maximum total uncompressed size in MB allowed inside zip-based uploads (`.docx`/`.pptx`/`.xlsx`/`.epub`); blocks decompression bombs with HTTP 413 before the archive is expanded (default: `512`)
 
 ## Supported Models
 

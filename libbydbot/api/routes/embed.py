@@ -88,7 +88,12 @@ def _maybe_auto_ingest_wiki(
 
 
 def _validate_upload_filename(filename: str | None) -> str:
-    """Return a safe basename for an upload, or raise 400 if unsupported."""
+    """
+    Return a safe basename for an upload, or raise 400 if unsupported.
+
+    :param filename: client-supplied upload filename
+    :return: the bare filename (no directory components)
+    """
     from libbydbot.brain.ingest import SUPPORTED_EXTENSIONS, is_supported_file
 
     name = os.path.basename(filename or "")
@@ -103,17 +108,60 @@ def _validate_upload_filename(filename: str | None) -> str:
     return name
 
 
+def _check_upload_limits(path: str) -> None:
+    """
+    Enforce the configured upload limits on a freshly uploaded file.
+
+    Rejects files larger than ``MAX_UPLOAD_MB`` and zip-based documents
+    (docx/pptx/xlsx/epub) whose declared uncompressed size exceeds
+    ``MAX_ARCHIVE_UNCOMPRESSED_MB`` — checked via a cheap central-directory
+    read, so decompression bombs are turned away before the archive is
+    ever expanded.
+
+    :param path: path of the uploaded temp file
+    :raises HTTPException: 413 when a limit is exceeded, 400 when a
+        zip-based upload is not a valid archive
+    """
+    from libbydbot.brain.ingest import UploadLimitError, check_ingest_limits
+    from libbydbot.settings import Settings
+
+    settings = Settings()
+    try:
+        check_ingest_limits(
+            path,
+            max_bytes=int(settings.max_upload_mb * 1024 * 1024),
+            max_uncompressed_bytes=int(
+                settings.max_archive_uncompressed_mb * 1024 * 1024
+            ),
+        )
+    except UploadLimitError as e:
+        raise HTTPException(status_code=413, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 def _embed_directory(
     embedder: DocEmbedder,
     directory: str,
     filename: str,
     chunk_size: int,
     chunk_overlap: int,
+    collection_name: str,
 ) -> tuple[int, set[str]]:
     """
     Run every supported document in *directory* through the ingestion
-    pipeline and embed its chunks.
+    pipeline and embed its chunks into *collection_name*.
 
+    The embedder's own ``collection_name`` is never read or mutated here,
+    so concurrent jobs sharing one embedder cannot store chunks in the
+    wrong collection.
+
+    :param embedder: embedder to embed with
+    :param directory: directory holding the uploaded document(s)
+    :param filename: upload filename, used as fallback document name
+    :param chunk_size: chunk size in characters
+    :param chunk_overlap: chunk overlap in characters
+    :param collection_name: collection to embed into
     :return: (number of chunks embedded, set of document names embedded)
     """
     from libbydbot.brain.ingest import ChunkInfo, DocumentPipeline
@@ -132,7 +180,7 @@ def _embed_directory(
             jobs = [(chunk, i) for i, chunk in enumerate(text)]
         else:
             jobs = [(page_text, page_number) for page_number, page_text in text.items()]
-        embedder.embed_chunks(jobs, doc_name)
+        embedder.embed_chunks(jobs, doc_name, collection=collection_name)
         chunks_embedded += len(jobs)
     return chunks_embedded, embedded_doc_names
 
@@ -154,9 +202,8 @@ def _run_embed_job(
         if embedder is None:
             raise RuntimeError("Embedder not initialized")
 
-        embedder.collection_name = collection_name
         chunks_embedded, embedded_doc_names = _embed_directory(
-            embedder, temp_dir, filename, chunk_size, chunk_overlap
+            embedder, temp_dir, filename, chunk_size, chunk_overlap, collection_name
         )
 
         with _jobs_lock:
@@ -194,8 +241,12 @@ def embed_text(request: EmbedTextRequest, embedder: EmbedderDep):
     try:
         doc_hash = sha256(request.text.encode()).hexdigest()
 
-        embedder.collection_name = request.collection_name
-        embedder.embed_text(request.text, request.doc_name, request.page_number)
+        embedder.embed_text(
+            request.text,
+            request.doc_name,
+            request.page_number,
+            collection=request.collection_name,
+        )
 
         if request.auto_ingest is not False:
             _maybe_auto_ingest_wiki(embedder, request.collection_name, request.doc_name)
@@ -235,6 +286,12 @@ async def upload_and_embed(
 
     with open(temp_file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
+
+    try:
+        _check_upload_limits(temp_file_path)
+    except HTTPException:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
 
     job_id = str(uuid.uuid4())
 
@@ -358,9 +415,10 @@ async def upload_and_embed_sync(
         with open(temp_file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        embedder.collection_name = collection_name
+        _check_upload_limits(temp_file_path)
+
         chunks_embedded, embedded_doc_names = _embed_directory(
-            embedder, temp_dir, filename, chunk_size, chunk_overlap
+            embedder, temp_dir, filename, chunk_size, chunk_overlap, collection_name
         )
 
         for name in embedded_doc_names:
@@ -373,6 +431,8 @@ async def upload_and_embed_sync(
             collection_name=collection_name,
             message=f"Successfully embedded {chunks_embedded} chunks from '{filename}' into collection '{collection_name}'",
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error uploading and embedding file: {e}")
         raise HTTPException(status_code=500, detail=str(e))

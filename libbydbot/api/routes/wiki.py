@@ -201,7 +201,8 @@ def wiki_ingest_diagnosis(collection_name: str = "main"):
             except Exception as e:
                 tables.append({"table": tbl, "error": str(e)})
                 continue
-            names = {r[0] for r in rows}
+            # rows are (doc_hash, doc_name, page_number, document)
+            names = {r[1] for r in rows}
             docs_by_name.update(names)
             tables.append(
                 {

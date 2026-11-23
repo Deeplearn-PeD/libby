@@ -426,6 +426,53 @@ class TestUploadEmbed:
             assert response.status_code == 400
             assert ".docx" in response.json()["detail"]
 
+    def test_upload_rejects_oversized_file(self, client, monkeypatch):
+        """Uploads beyond MAX_UPLOAD_MB get 413 before any parsing/embedding."""
+        monkeypatch.setenv("MAX_UPLOAD_MB", "0.001")  # ~1 KB
+        for endpoint in ("/api/embed/upload", "/api/embed/upload/sync"):
+            response = client.post(
+                endpoint,
+                files={"file": ("big.txt", b"x" * 2048, "text/plain")},
+                data={"collection_name": "main"},
+            )
+            assert response.status_code == 413
+            assert "maximum accepted upload size" in response.json()["detail"]
+
+    def test_upload_rejects_decompression_bomb(self, client, monkeypatch):
+        """Zip-based uploads expanding beyond MAX_ARCHIVE_UNCOMPRESSED_MB
+        are rejected with 413 before the archive is ever opened."""
+        import io
+        import zipfile
+
+        monkeypatch.setenv("MAX_ARCHIVE_UNCOMPRESSED_MB", "0.001")  # ~1 KB
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("huge.txt", "x" * 100_000)
+        for endpoint in ("/api/embed/upload", "/api/embed/upload/sync"):
+            response = client.post(
+                endpoint,
+                files={
+                    "file": (
+                        "bomb.docx",
+                        buffer.getvalue(),
+                        "application/octet-stream",
+                    )
+                },
+                data={"collection_name": "main"},
+            )
+            assert response.status_code == 413
+            assert "uncompressed" in response.json()["detail"]
+
+    def test_upload_rejects_corrupt_zip_with_400(self, client):
+        """A .docx that is not a valid zip is a bad request, not a 413."""
+        response = client.post(
+            "/api/embed/upload/sync",
+            files={"file": ("fake.docx", b"not a zip at all", "application/octet-stream")},
+            data={"collection_name": "main"},
+        )
+        assert response.status_code == 400
+        assert "not a valid" in response.json()["detail"]
+
 class TestWikiBrowse:
     """Test the wiki browsing endpoints (list pages + read a page)."""
 
